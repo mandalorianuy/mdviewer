@@ -1,111 +1,36 @@
-import AppKit
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-@MainActor
-final class AppState: ObservableObject {
-    @Published var fileURL: URL?
-    @Published var rawMarkdown: String = ""
-    @Published var renderedHTML: String = MarkdownHTMLRenderer.renderDocument(
-        markdown: "Abrí un archivo `.md` para comenzar.",
-        fontFamily: "SF Pro Text",
-        baseFontSize: 16
-    )
-    @Published var selectedFontFamily: String = "SF Pro Text"
-    @Published var fontSize: Double = 16
-    @Published var errorMessage: String?
+extension UTType {
+    static let mdviewerMarkdown = UTType(importedAs: "net.daringfireball.markdown")
+}
 
-    let availableFonts: [String] = NSFontManager.shared.availableFontFamilies.sorted()
+struct MarkdownFileDocument: FileDocument {
+    static let readableContentTypes: [UTType] = [.mdviewerMarkdown]
+    static let writableContentTypes: [UTType] = [.mdviewerMarkdown]
 
-    func pickFileToOpen() {
-        let panel = NSOpenPanel()
-        let markdownType = UTType(filenameExtension: "md") ?? .plainText
-        panel.allowedContentTypes = [
-            markdownType,
-            .plainText
-        ]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
+    var rawMarkdown: String
 
-        guard panel.runModal() == .OK, let url = panel.url else {
+    init(rawMarkdown: String = "") {
+        self.rawMarkdown = rawMarkdown
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            rawMarkdown = ""
             return
         }
 
-        open(url: url)
+        guard let markdown = String(data: data, encoding: .utf8) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        rawMarkdown = markdown
     }
 
-    func open(url: URL) {
-        do {
-            let data = try Data(contentsOf: url)
-            guard let markdown = String(data: data, encoding: .utf8) else {
-                throw NSError(domain: "MDViewer", code: 1, userInfo: [NSLocalizedDescriptionKey: "El archivo no está en UTF-8."])
-            }
-
-            fileURL = url
-            rawMarkdown = markdown
-            renderMarkdown()
-            errorMessage = nil
-        } catch {
-            errorMessage = "No se pudo abrir el archivo: \(error.localizedDescription)"
-        }
-    }
-
-    func renderMarkdown() {
-        if rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            renderedHTML = MarkdownHTMLRenderer.renderDocument(
-                markdown: "(Archivo vacío)",
-                fontFamily: selectedFontFamily,
-                baseFontSize: fontSize
-            )
-            return
-        }
-
-        renderedHTML = MarkdownHTMLRenderer.renderDocument(
-            markdown: rawMarkdown,
-            fontFamily: selectedFontFamily,
-            baseFontSize: fontSize
-        )
-        errorMessage = nil
-    }
-
-    func updateTypography(fontFamily: String? = nil, size: Double? = nil) {
-        if let fontFamily {
-            selectedFontFamily = fontFamily
-        }
-        if let size {
-            fontSize = max(10, min(size, 40))
-        }
-        renderMarkdown()
-    }
-
-    func exportPDF() {
-        guard !rawMarkdown.isEmpty else {
-            return
-        }
-
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = suggestedPDFName
-
-        guard panel.runModal() == .OK, let url = panel.url else {
-            return
-        }
-
-        do {
-            try PDFExporter.export(
-                html: renderedHTML,
-                outputURL: url
-            )
-            errorMessage = nil
-        } catch {
-            errorMessage = "No se pudo exportar el PDF: \(error.localizedDescription)"
-        }
-    }
-
-    private var suggestedPDFName: String {
-        let base = fileURL?.deletingPathExtension().lastPathComponent ?? "documento"
-        return "\(base).pdf"
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        let data = rawMarkdown.data(using: .utf8) ?? Data()
+        return .init(regularFileWithContents: data)
     }
 }
