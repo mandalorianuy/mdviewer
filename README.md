@@ -80,3 +80,4 @@ Archivos preparados para distribución:
 - `macos/MDViewer.entitlements`
 - `macos/ExportOptions-AppStore.plist`
 - `scripts/archive-appstore.sh`
+- `scripts/appstoreconnect_api.py`
