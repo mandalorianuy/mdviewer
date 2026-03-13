@@ -10,6 +10,7 @@ Visualizador de Markdown para macOS, rápido y liviano.
 - Exportación a PDF.
 - App bundle macOS con declaración de tipos `.md` para asociación.
 - Icono macOS propio (`AppIcon.icns`) generado automáticamente.
+- Icono dedicado para documentos Markdown en Finder.
 
 ## Requisitos
 
@@ -32,6 +33,7 @@ Se genera:
 
 - `dist/MDViewer.app`
 - `macos/AppIcon.icns`
+- `macos/MarkdownDocument.icns`
 
 ## Instalar en macOS
 

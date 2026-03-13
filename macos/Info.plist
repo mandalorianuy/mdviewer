@@ -36,6 +36,10 @@
             <array>
                 <string>public.plain-text</string>
             </array>
+            <key>UTTypeIconFiles</key>
+            <array>
+                <string>MarkdownDocument</string>
+            </array>
             <key>UTTypeTagSpecification</key>
             <dict>
                 <key>public.filename-extension</key>
@@ -55,6 +59,8 @@
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
+            <key>CFBundleTypeIconFile</key>
+            <string>MarkdownDocument</string>
             <key>CFBundleTypeName</key>
             <string>Markdown Document</string>
             <key>CFBundleTypeRole</key>

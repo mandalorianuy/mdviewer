@@ -8,6 +8,11 @@ struct IconSpec {
     let pointSize: CGFloat
 }
 
+struct IconAsset {
+    let name: String
+    let draw: (NSRect) -> Void
+}
+
 let specs: [IconSpec] = [
     .init(filename: "icon_16x16.png", pointSize: 16),
     .init(filename: "icon_16x16@2x.png", pointSize: 32),
@@ -23,44 +28,68 @@ let specs: [IconSpec] = [
 
 let fileManager = FileManager.default
 let rootURL = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-let iconsetURL = rootURL.appendingPathComponent("macos/AppIcon.iconset", isDirectory: true)
-let icnsURL = rootURL.appendingPathComponent("macos/AppIcon.icns")
 
-try? fileManager.removeItem(at: iconsetURL)
-try fileManager.createDirectory(at: iconsetURL, withIntermediateDirectories: true)
+let assets: [IconAsset] = [
+    .init(name: "AppIcon", draw: drawAppIcon),
+    .init(name: "MarkdownDocument", draw: drawDocumentIcon),
+]
 
-for spec in specs {
-    let image = NSImage(size: NSSize(width: spec.pointSize, height: spec.pointSize))
-    image.lockFocus()
-    drawIcon(in: NSRect(origin: .zero, size: image.size))
-    image.unlockFocus()
+for asset in assets {
+    try generateIconAsset(named: asset.name, draw: asset.draw)
+}
 
-    guard
-        let tiffData = image.tiffRepresentation,
-        let bitmap = NSBitmapImageRep(data: tiffData),
-        let pngData = bitmap.representation(using: .png, properties: [:])
-    else {
-        throw NSError(domain: "IconGeneration", code: 1, userInfo: [NSLocalizedDescriptionKey: "No se pudo generar el PNG \(spec.filename)."])
+func generateIconAsset(named name: String, draw: (NSRect) -> Void) throws {
+    let iconsetURL = rootURL.appendingPathComponent("macos/\(name).iconset", isDirectory: true)
+    let icnsURL = rootURL.appendingPathComponent("macos/\(name).icns")
+
+    try? fileManager.removeItem(at: iconsetURL)
+    try fileManager.createDirectory(at: iconsetURL, withIntermediateDirectories: true)
+
+    for spec in specs {
+        let image = NSImage(size: NSSize(width: spec.pointSize, height: spec.pointSize))
+        image.lockFocus()
+        draw(NSRect(origin: .zero, size: image.size))
+        image.unlockFocus()
+
+        guard
+            let tiffData = image.tiffRepresentation,
+            let bitmap = NSBitmapImageRep(data: tiffData),
+            let pngData = bitmap.representation(using: .png, properties: [:])
+        else {
+            throw NSError(
+                domain: "IconGeneration",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No se pudo generar el PNG \(spec.filename) para \(name)."]
+            )
+        }
+
+        try pngData.write(to: iconsetURL.appendingPathComponent(spec.filename))
     }
 
-    try pngData.write(to: iconsetURL.appendingPathComponent(spec.filename))
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
+    process.arguments = ["-c", "icns", iconsetURL.path, "-o", icnsURL.path]
+    try process.run()
+    process.waitUntilExit()
+
+    guard process.terminationStatus == 0 else {
+        throw NSError(
+            domain: "IconGeneration",
+            code: Int(process.terminationStatus),
+            userInfo: [NSLocalizedDescriptionKey: "iconutil no pudo crear \(name).icns"]
+        )
+    }
 }
 
-let process = Process()
-process.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-process.arguments = ["-c", "icns", iconsetURL.path, "-o", icnsURL.path]
-try process.run()
-process.waitUntilExit()
-
-guard process.terminationStatus == 0 else {
-    throw NSError(domain: "IconGeneration", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "iconutil no pudo crear AppIcon.icns"])
-}
-
-func drawIcon(in rect: NSRect) {
+func drawAppIcon(in rect: NSRect) {
     let size = min(rect.width, rect.height)
     let corner = size * 0.225
 
-    let background = NSBezierPath(roundedRect: rect.insetBy(dx: size * 0.02, dy: size * 0.02), xRadius: corner, yRadius: corner)
+    let background = NSBezierPath(
+        roundedRect: rect.insetBy(dx: size * 0.02, dy: size * 0.02),
+        xRadius: corner,
+        yRadius: corner
+    )
     let baseGradient = NSGradient(colors: [
         NSColor(calibratedRed: 0.98, green: 0.93, blue: 0.84, alpha: 1),
         NSColor(calibratedRed: 0.91, green: 0.46, blue: 0.27, alpha: 1)
@@ -85,24 +114,83 @@ func drawIcon(in rect: NSRect) {
     NSColor(calibratedRed: 0.37, green: 0.16, blue: 0.14, alpha: 0.14).setFill()
     lowerShape.fill()
 
-    NSGraphicsContext.saveGraphicsState()
-    let shadow = NSShadow()
-    shadow.shadowBlurRadius = size * 0.05
-    shadow.shadowOffset = NSSize(width: 0, height: -size * 0.018)
-    shadow.shadowColor = NSColor(calibratedWhite: 0, alpha: 0.18)
-    shadow.set()
+    let pageRect = standardPageRect(size: size)
+    drawPaperPage(in: pageRect, size: size, includeShadow: true)
+    drawPageContent(in: pageRect, size: size, title: "mD", titleYOffset: 0.38)
 
+    let rim = NSBezierPath(
+        roundedRect: rect.insetBy(dx: size * 0.02, dy: size * 0.02),
+        xRadius: corner,
+        yRadius: corner
+    )
+    NSColor(calibratedWhite: 1, alpha: 0.18).setStroke()
+    rim.lineWidth = max(1, size * 0.01)
+    rim.stroke()
+}
+
+func drawDocumentIcon(in rect: NSRect) {
+    let size = min(rect.width, rect.height)
     let pageRect = NSRect(
+        x: size * 0.15,
+        y: size * 0.1,
+        width: size * 0.7,
+        height: size * 0.8
+    )
+
+    drawPaperPage(in: pageRect, size: size, includeShadow: true)
+    drawPageContent(in: pageRect, size: size, title: "md", titleYOffset: 0.43)
+
+    let badgeRect = NSRect(
+        x: pageRect.maxX - size * 0.26,
+        y: pageRect.minY + size * 0.02,
+        width: size * 0.22,
+        height: size * 0.22
+    )
+    let badge = NSBezierPath(roundedRect: badgeRect, xRadius: size * 0.07, yRadius: size * 0.07)
+    let badgeGradient = NSGradient(colors: [
+        NSColor(calibratedRed: 0.91, green: 0.46, blue: 0.27, alpha: 1),
+        NSColor(calibratedRed: 0.76, green: 0.27, blue: 0.16, alpha: 1)
+    ])!
+    badgeGradient.draw(in: badge, angle: -90)
+
+    let badgeParagraph = NSMutableParagraphStyle()
+    badgeParagraph.alignment = .center
+    let badgeAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: size * 0.095, weight: .bold),
+        .foregroundColor: NSColor.white,
+        .paragraphStyle: badgeParagraph
+    ]
+    let badgeTextRect = badgeRect.offsetBy(dx: 0, dy: size * 0.014)
+    NSString(string: ".md").draw(in: badgeTextRect, withAttributes: badgeAttributes)
+}
+
+func standardPageRect(size: CGFloat) -> NSRect {
+    NSRect(
         x: size * 0.18,
         y: size * 0.14,
         width: size * 0.64,
         height: size * 0.72
     )
+}
+
+func drawPaperPage(in pageRect: NSRect, size: CGFloat, includeShadow: Bool) {
+    if includeShadow {
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowBlurRadius = size * 0.05
+        shadow.shadowOffset = NSSize(width: 0, height: -size * 0.018)
+        shadow.shadowColor = NSColor(calibratedWhite: 0, alpha: 0.18)
+        shadow.set()
+    }
+
     let pageRadius = size * 0.09
     let pagePath = NSBezierPath(roundedRect: pageRect, xRadius: pageRadius, yRadius: pageRadius)
     NSColor(calibratedRed: 0.995, green: 0.992, blue: 0.985, alpha: 1).setFill()
     pagePath.fill()
-    NSGraphicsContext.restoreGraphicsState()
+
+    if includeShadow {
+        NSGraphicsContext.restoreGraphicsState()
+    }
 
     let accentBar = NSBezierPath(roundedRect: NSRect(
         x: pageRect.minX + size * 0.04,
@@ -129,21 +217,23 @@ func drawIcon(in rect: NSRect) {
     NSColor(calibratedRed: 0.86, green: 0.77, blue: 0.66, alpha: 1).setStroke()
     foldLine.lineWidth = max(1.2, size * 0.008)
     foldLine.stroke()
+}
 
-    let mdRect = NSRect(
+func drawPageContent(in pageRect: NSRect, size: CGFloat, title: String, titleYOffset: CGFloat) {
+    let titleRect = NSRect(
         x: pageRect.minX + size * 0.12,
-        y: pageRect.minY + size * 0.38,
+        y: pageRect.minY + size * titleYOffset,
         width: pageRect.width - size * 0.2,
         height: size * 0.2
     )
-    let mdParagraph = NSMutableParagraphStyle()
-    mdParagraph.alignment = .center
-    let mdAttributes: [NSAttributedString.Key: Any] = [
+    let titleParagraph = NSMutableParagraphStyle()
+    titleParagraph.alignment = .center
+    let titleAttributes: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: size * 0.18, weight: .bold),
         .foregroundColor: NSColor(calibratedRed: 0.18, green: 0.21, blue: 0.26, alpha: 1),
-        .paragraphStyle: mdParagraph
+        .paragraphStyle: titleParagraph
     ]
-    NSString(string: "mD").draw(in: mdRect, withAttributes: mdAttributes)
+    NSString(string: title).draw(in: titleRect, withAttributes: titleAttributes)
 
     let sublineColor = NSColor(calibratedRed: 0.65, green: 0.69, blue: 0.74, alpha: 1)
     let headingLine = NSBezierPath(roundedRect: NSRect(
@@ -158,7 +248,12 @@ func drawIcon(in rect: NSRect) {
     let bulletYPositions: [CGFloat] = [0.22, 0.165, 0.11]
     for multiplier in bulletYPositions {
         let y = pageRect.minY + size * multiplier
-        let bullet = NSBezierPath(ovalIn: NSRect(x: pageRect.minX + size * 0.14, y: y, width: size * 0.024, height: size * 0.024))
+        let bullet = NSBezierPath(ovalIn: NSRect(
+            x: pageRect.minX + size * 0.14,
+            y: y,
+            width: size * 0.024,
+            height: size * 0.024
+        ))
         NSColor(calibratedRed: 0.95, green: 0.49, blue: 0.24, alpha: 1).setFill()
         bullet.fill()
 
@@ -171,9 +266,4 @@ func drawIcon(in rect: NSRect) {
         sublineColor.withAlphaComponent(0.45).setFill()
         line.fill()
     }
-
-    let rim = NSBezierPath(roundedRect: rect.insetBy(dx: size * 0.02, dy: size * 0.02), xRadius: corner, yRadius: corner)
-    NSColor(calibratedWhite: 1, alpha: 0.18).setStroke()
-    rim.lineWidth = max(1, size * 0.01)
-    rim.stroke()
 }
