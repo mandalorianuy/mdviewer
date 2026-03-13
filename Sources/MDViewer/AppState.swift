@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 final class AppState: ObservableObject {
     @Published var fileURL: URL?
     @Published var rawMarkdown: String = ""
-    @Published var renderedMarkdown: AttributedString = AttributedString("Abrí un archivo .md para comenzar.")
+    @Published var renderedMarkdown: NSAttributedString = NSAttributedString(string: "Abrí un archivo .md para comenzar.")
     @Published var selectedFontFamily: String = "SF Pro Text"
     @Published var fontSize: Double = 16
     @Published var errorMessage: String?
@@ -49,24 +49,22 @@ final class AppState: ObservableObject {
 
     func renderMarkdown() {
         if rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            renderedMarkdown = AttributedString("(Archivo vacío)")
+            renderedMarkdown = NSAttributedString(string: "(Archivo vacío)")
             return
         }
 
         do {
-            var attributed = try AttributedString(
+            renderedMarkdown = try MarkdownRenderer.render(
                 markdown: rawMarkdown,
-                options: AttributedString.MarkdownParsingOptions(
-                    interpretedSyntax: .full,
-                    failurePolicy: .returnPartiallyParsedIfPossible
-                )
+                fontFamily: selectedFontFamily,
+                baseFontSize: CGFloat(fontSize)
             )
-            let font = Font.custom(selectedFontFamily, size: fontSize)
-            attributed.font = font
-            renderedMarkdown = attributed
+            errorMessage = nil
         } catch {
-            renderedMarkdown = AttributedString(rawMarkdown)
-            renderedMarkdown.font = Font.custom(selectedFontFamily, size: fontSize)
+            renderedMarkdown = NSAttributedString(
+                string: rawMarkdown,
+                attributes: [.font: NSFont.systemFont(ofSize: fontSize)]
+            )
             errorMessage = "Markdown parcialmente inválido. Se muestra texto plano."
         }
     }

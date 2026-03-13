@@ -12,15 +12,7 @@ struct ContentView: View {
 
             Divider()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(appState.renderedMarkdown)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(22)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            MarkdownTextView(attributedText: appState.renderedMarkdown)
             .background(Color(NSColor.textBackgroundColor))
 
             if let error = appState.errorMessage {
@@ -48,7 +40,7 @@ struct ContentView: View {
             Text("Fuente")
                 .font(.system(size: 12, weight: .medium))
 
-            Picker("Fuente", selection: Binding(
+            Picker("", selection: Binding(
                 get: { appState.selectedFontFamily },
                 set: { appState.updateTypography(fontFamily: $0) }
             )) {
@@ -56,6 +48,7 @@ struct ContentView: View {
                     Text(family).tag(family)
                 }
             }
+            .labelsHidden()
             .frame(width: 220)
 
             Text("Tamaño")
