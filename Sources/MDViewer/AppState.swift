@@ -7,7 +7,11 @@ import UniformTypeIdentifiers
 final class AppState: ObservableObject {
     @Published var fileURL: URL?
     @Published var rawMarkdown: String = ""
-    @Published var renderedMarkdown: NSAttributedString = NSAttributedString(string: "Abrí un archivo .md para comenzar.")
+    @Published var renderedHTML: String = MarkdownHTMLRenderer.renderDocument(
+        markdown: "Abrí un archivo `.md` para comenzar.",
+        fontFamily: "SF Pro Text",
+        baseFontSize: 16
+    )
     @Published var selectedFontFamily: String = "SF Pro Text"
     @Published var fontSize: Double = 16
     @Published var errorMessage: String?
@@ -49,24 +53,20 @@ final class AppState: ObservableObject {
 
     func renderMarkdown() {
         if rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            renderedMarkdown = NSAttributedString(string: "(Archivo vacío)")
+            renderedHTML = MarkdownHTMLRenderer.renderDocument(
+                markdown: "(Archivo vacío)",
+                fontFamily: selectedFontFamily,
+                baseFontSize: fontSize
+            )
             return
         }
 
-        do {
-            renderedMarkdown = try MarkdownRenderer.render(
-                markdown: rawMarkdown,
-                fontFamily: selectedFontFamily,
-                baseFontSize: CGFloat(fontSize)
-            )
-            errorMessage = nil
-        } catch {
-            renderedMarkdown = NSAttributedString(
-                string: rawMarkdown,
-                attributes: [.font: NSFont.systemFont(ofSize: fontSize)]
-            )
-            errorMessage = "Markdown parcialmente inválido. Se muestra texto plano."
-        }
+        renderedHTML = MarkdownHTMLRenderer.renderDocument(
+            markdown: rawMarkdown,
+            fontFamily: selectedFontFamily,
+            baseFontSize: fontSize
+        )
+        errorMessage = nil
     }
 
     func updateTypography(fontFamily: String? = nil, size: Double? = nil) {
@@ -95,9 +95,7 @@ final class AppState: ObservableObject {
 
         do {
             try PDFExporter.export(
-                markdown: rawMarkdown,
-                fontFamily: selectedFontFamily,
-                fontSize: CGFloat(fontSize),
+                html: renderedHTML,
                 outputURL: url
             )
             errorMessage = nil

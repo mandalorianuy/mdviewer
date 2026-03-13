@@ -12,7 +12,7 @@ struct ContentView: View {
 
             Divider()
 
-            MarkdownTextView(attributedText: appState.renderedMarkdown)
+            MarkdownWebView(html: appState.renderedHTML)
             .background(Color(NSColor.textBackgroundColor))
 
             if let error = appState.errorMessage {

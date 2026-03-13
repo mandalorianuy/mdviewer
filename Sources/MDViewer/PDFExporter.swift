@@ -3,21 +3,16 @@ import Foundation
 
 enum PDFExporter {
     @MainActor
-    static func export(markdown: String, fontFamily: String, fontSize: CGFloat, outputURL: URL) throws {
-        let attributed: NSAttributedString
-        do {
-            let swiftAttributed = try AttributedString(
-                markdown: markdown,
-                options: AttributedString.MarkdownParsingOptions(
-                    interpretedSyntax: .full,
-                    failurePolicy: .returnPartiallyParsedIfPossible
-                )
-            )
-            attributed = NSAttributedString(swiftAttributed)
-        } catch {
-            let fallbackFont = NSFont(name: fontFamily, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
-            attributed = NSAttributedString(string: markdown, attributes: [.font: fallbackFont])
-        }
+    static func export(html: String, outputURL: URL) throws {
+        let data = Data(html.utf8)
+        let attributed = try NSAttributedString(
+            data: data,
+            options: [
+                .documentType: NSAttributedString.DocumentType.html,
+                .characterEncoding: String.Encoding.utf8.rawValue
+            ],
+            documentAttributes: nil
+        )
 
         let pageWidth: CGFloat = 595.2
         let pageHeight: CGFloat = 841.8
