@@ -2,15 +2,11 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
-    private enum TypographyDefaults {
-        static let fontSize = 16.0
-        static let fontFamily = "Avenir Next"
-    }
-
     let document: MarkdownFileDocument
 
-    @AppStorage("selectedFontFamily") private var selectedFontFamily = TypographyDefaults.fontFamily
-    @AppStorage("fontSize") private var fontSize = TypographyDefaults.fontSize
+    @AppStorage(AppPreferenceKey.selectedFontFamily) private var selectedFontFamily = AppPreferenceDefault.fontFamily
+    @AppStorage(AppPreferenceKey.fontSize) private var fontSize = AppPreferenceDefault.fontSize
+    @AppStorage(AppPreferenceKey.preferTabbedWindows) private var preferTabbedWindows = AppPreferenceDefault.preferTabbedWindows
     @State private var errorMessage: String?
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
@@ -38,6 +34,7 @@ struct ContentView: View {
                     .background(Color(NSColor.windowBackgroundColor))
             }
         }
+        .background(WindowTabbingConfigurator(preferTabbedWindows: preferTabbedWindows))
         .onAppear {
             if !availableFonts.contains(selectedFontFamily) {
                 selectedFontFamily = effectiveDefaultFont
@@ -83,6 +80,14 @@ struct ContentView: View {
 
             Spacer()
 
+            Button {
+                openSettings()
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .help("Configuracion")
+
             Button("Exportar PDF") {
                 exportPDF()
             }
@@ -103,8 +108,8 @@ struct ContentView: View {
     }
 
     private var effectiveDefaultFont: String {
-        if availableFonts.contains(TypographyDefaults.fontFamily) {
-            return TypographyDefaults.fontFamily
+        if availableFonts.contains(AppPreferenceDefault.fontFamily) {
+            return AppPreferenceDefault.fontFamily
         }
 
         return availableFonts.first ?? "Helvetica"
@@ -163,5 +168,9 @@ struct ContentView: View {
         }
 
         return "Markdown.pdf"
+    }
+
+    private func openSettings() {
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 }

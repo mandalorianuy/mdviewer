@@ -7,6 +7,8 @@ Visualizador de Markdown para macOS, rápido y liviano.
 - Apertura de archivos `.md`.
 - Render Markdown tipo WYSIWYG (lectura con formato).
 - Selector de tipografía (familia) y tamaño.
+- Preferencia para abrir documentos en tabs o en ventanas separadas.
+- Opción dentro de la app para asociar archivos `.md` con MDViewer.
 - Exportación a PDF.
 - App bundle macOS con declaración de tipos `.md` para asociación.
 - Icono macOS propio (`AppIcon.icns`) generado automáticamente.
