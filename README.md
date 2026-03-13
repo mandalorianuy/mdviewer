@@ -9,6 +9,7 @@ Visualizador de Markdown para macOS, rápido y liviano.
 - Selector de tipografía (familia) y tamaño.
 - Exportación a PDF.
 - App bundle macOS con declaración de tipos `.md` para asociación.
+- Icono macOS propio (`AppIcon.icns`) generado automáticamente.
 
 ## Requisitos
 
@@ -30,6 +31,7 @@ swift run
 Se genera:
 
 - `dist/MDViewer.app`
+- `macos/AppIcon.icns`
 
 ## Instalar en macOS
 
