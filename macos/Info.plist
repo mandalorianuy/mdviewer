@@ -10,8 +10,6 @@
     <string>com.facundo.mdviewer</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
     <key>CFBundleName</key>
     <string>MDViewer</string>
     <key>CFBundleDisplayName</key>

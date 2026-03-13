@@ -1,0 +1,346 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		014481C4A0C17851A6409723 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78DC7D09B553DBD4DCF619DA /* ContentView.swift */; };
+		2FD8E4DDE51D67D71E1AC1C9 /* MarkdownDocument.icns in Resources */ = {isa = PBXBuildFile; fileRef = B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */; };
+		427D880BBE37004B9607D1EE /* MDViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */; };
+		4985E46D9A2F890B4EBB8E1D /* MarkdownWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017AEC17777962CB26EED41A /* MarkdownWebView.swift */; };
+		8E6924440BD348F411D29F11 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 279CCEA66DC752F52D02DCC0 /* AppState.swift */; };
+		B4AE68DB4DA0E7BEE3972E6A /* PDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F5B0026D92DA0C9E684C12C /* PDFExporter.swift */; };
+		BE4472B2565F6A7B5C186134 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5A4384AD9A6BFFD17A81F01C /* Assets.xcassets */; };
+		DD3151D25AD5640BB7EA0C1F /* MarkdownHTMLRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		017AEC17777962CB26EED41A /* MarkdownWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownWebView.swift; sourceTree = "<group>"; };
+		279CCEA66DC752F52D02DCC0 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		4F5B0026D92DA0C9E684C12C /* PDFExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFExporter.swift; sourceTree = "<group>"; };
+		5A4384AD9A6BFFD17A81F01C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		78DC7D09B553DBD4DCF619DA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownHTMLRenderer.swift; sourceTree = "<group>"; };
+		B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = MarkdownDocument.icns; sourceTree = "<group>"; };
+		B2B94D6ECFF439ABF8F84105 /* MDViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MDViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MDViewerApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		09BD76EE28C792BB9AEEBF8B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B2B94D6ECFF439ABF8F84105 /* MDViewer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		948C07D6D92DE79B515C2B00 = {
+			isa = PBXGroup;
+			children = (
+				BBD50726D8E351F6E0DAE2E5 /* macos */,
+				BDB9A2515B53FE2F777EFA50 /* MDViewer */,
+				09BD76EE28C792BB9AEEBF8B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		BBD50726D8E351F6E0DAE2E5 /* macos */ = {
+			isa = PBXGroup;
+			children = (
+				5A4384AD9A6BFFD17A81F01C /* Assets.xcassets */,
+				B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */,
+			);
+			path = macos;
+			sourceTree = "<group>";
+		};
+		BDB9A2515B53FE2F777EFA50 /* MDViewer */ = {
+			isa = PBXGroup;
+			children = (
+				279CCEA66DC752F52D02DCC0 /* AppState.swift */,
+				78DC7D09B553DBD4DCF619DA /* ContentView.swift */,
+				8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */,
+				017AEC17777962CB26EED41A /* MarkdownWebView.swift */,
+				E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */,
+				4F5B0026D92DA0C9E684C12C /* PDFExporter.swift */,
+			);
+			name = MDViewer;
+			path = Sources/MDViewer;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		9A5FCE18BDAE8C363B2A821C /* MDViewer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 449C7D9C6F506ACEB743E545 /* Build configuration list for PBXNativeTarget "MDViewer" */;
+			buildPhases = (
+				315F4B5453DD4E94AF9A3AE7 /* Sources */,
+				F78AB5BC13761543249D21CD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MDViewer;
+			packageProductDependencies = (
+			);
+			productName = MDViewer;
+			productReference = B2B94D6ECFF439ABF8F84105 /* MDViewer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0DF200EDE3B21792C4B8F45B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					9A5FCE18BDAE8C363B2A821C = {
+						DevelopmentTeam = PFK2TQW42Q;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 143BBF338B8553C13608D81A /* Build configuration list for PBXProject "MDViewer" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 948C07D6D92DE79B515C2B00;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				9A5FCE18BDAE8C363B2A821C /* MDViewer */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F78AB5BC13761543249D21CD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BE4472B2565F6A7B5C186134 /* Assets.xcassets in Resources */,
+				2FD8E4DDE51D67D71E1AC1C9 /* MarkdownDocument.icns in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		315F4B5453DD4E94AF9A3AE7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8E6924440BD348F411D29F11 /* AppState.swift in Sources */,
+				014481C4A0C17851A6409723 /* ContentView.swift in Sources */,
+				427D880BBE37004B9607D1EE /* MDViewerApp.swift in Sources */,
+				DD3151D25AD5640BB7EA0C1F /* MarkdownHTMLRenderer.swift in Sources */,
+				4985E46D9A2F890B4EBB8E1D /* MarkdownWebView.swift in Sources */,
+				B4AE68DB4DA0E7BEE3972E6A /* PDFExporter.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		3180EC117B385984E629525A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_ENTITLEMENTS = macos/MDViewer.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = PFK2TQW42Q;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = macos/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.facundo.mdviewer;
+				PRODUCT_NAME = MDViewer;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		8869D68D1C7BEF470AD8BCBE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		9620221DB912DF52709D8274 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_ENTITLEMENTS = macos/MDViewer.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = PFK2TQW42Q;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = macos/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.facundo.mdviewer;
+				PRODUCT_NAME = MDViewer;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		FB34AF5FD64ECE737E0B6A05 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		143BBF338B8553C13608D81A /* Build configuration list for PBXProject "MDViewer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9620221DB912DF52709D8274 /* Debug */,
+				3180EC117B385984E629525A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		449C7D9C6F506ACEB743E545 /* Build configuration list for PBXNativeTarget "MDViewer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FB34AF5FD64ECE737E0B6A05 /* Debug */,
+				8869D68D1C7BEF470AD8BCBE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 0DF200EDE3B21792C4B8F45B /* Project object */;
+}

@@ -23,6 +23,24 @@ Visualizador de Markdown para macOS, rápido y liviano.
 swift run
 ```
 
+## Proyecto Xcode
+
+Para generar el proyecto macOS listo para distribuir:
+
+```bash
+xcodegen generate
+```
+
+Se crea:
+
+- `MDViewer.xcodeproj`
+
+Build sin firma para validar el target:
+
+```bash
+xcodebuild -project MDViewer.xcodeproj -scheme MDViewer -configuration Release CODE_SIGNING_ALLOWED=NO build
+```
+
 ## Empaquetar `.app`
 
 ```bash
@@ -53,3 +71,12 @@ La app declara soporte de Markdown en su `Info.plist`.
 
 - Si tenés `duti`, el instalador intentará configurar `.md`/`.markdown` por defecto.
 - Sin `duti`, podés usar Finder: `Get Info` -> `Open with` -> `MDViewer` -> `Change All`.
+
+## App Store
+
+Archivos preparados para distribución:
+
+- `project.yml`
+- `macos/MDViewer.entitlements`
+- `macos/ExportOptions-AppStore.plist`
+- `scripts/archive-appstore.sh`
