@@ -55,6 +55,21 @@ Se genera:
 - `macos/AppIcon.icns`
 - `macos/MarkdownDocument.icns`
 
+## Crear `.dmg`
+
+```bash
+./scripts/create-dmg.sh
+```
+
+Se genera:
+
+- `dist/MDViewer-0.1.0.dmg`
+
+El DMG incluye:
+
+- `MDViewer.app`
+- alias/symlink a `/Applications` para instalacion por drag and drop
+
 ## Instalar en macOS
 
 ```bash
