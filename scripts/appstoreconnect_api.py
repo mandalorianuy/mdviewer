@@ -96,6 +96,29 @@ def request_api(method: str, path: str, token: str, body=None):
         return err.code, payload
 
 
+def cmd_raw_get(args):
+    token = generate_jwt(args.key_id, args.issuer_id, args.private_key)
+    status, payload = request_api("GET", args.path, token)
+    print(json.dumps({"status": status, "payload": payload}, indent=2))
+    return 0 if status < 300 else 1
+
+
+def cmd_raw_patch(args):
+    token = generate_jwt(args.key_id, args.issuer_id, args.private_key)
+    body = json.loads(args.body)
+    status, payload = request_api("PATCH", args.path, token, body=body)
+    print(json.dumps({"status": status, "payload": payload}, indent=2))
+    return 0 if status < 300 else 1
+
+
+def cmd_raw_post(args):
+    token = generate_jwt(args.key_id, args.issuer_id, args.private_key)
+    body = json.loads(args.body)
+    status, payload = request_api("POST", args.path, token, body=body)
+    print(json.dumps({"status": status, "payload": payload}, indent=2))
+    return 0 if status < 300 else 1
+
+
 def cmd_get_bundle_id(args):
     token = generate_jwt(args.key_id, args.issuer_id, args.private_key)
     query = urllib.parse.urlencode({"filter[identifier]": args.identifier})
@@ -178,6 +201,20 @@ def build_parser():
     apps = subparsers.add_parser("list-apps")
     apps.add_argument("--bundle-id", required=True)
     apps.set_defaults(func=cmd_list_apps)
+
+    raw_get = subparsers.add_parser("raw-get")
+    raw_get.add_argument("--path", required=True)
+    raw_get.set_defaults(func=cmd_raw_get)
+
+    raw_patch = subparsers.add_parser("raw-patch")
+    raw_patch.add_argument("--path", required=True)
+    raw_patch.add_argument("--body", required=True)
+    raw_patch.set_defaults(func=cmd_raw_patch)
+
+    raw_post = subparsers.add_parser("raw-post")
+    raw_post.add_argument("--path", required=True)
+    raw_post.add_argument("--body", required=True)
+    raw_post.set_defaults(func=cmd_raw_post)
 
     create = subparsers.add_parser("create-app")
     create.add_argument("--name", required=True)

@@ -26,6 +26,8 @@ targets:
       - path: Sources/MDViewer
       - path: macos/Assets.xcassets
         buildPhase: resources
+      - path: macos/AppIcon.icns
+        buildPhase: resources
       - path: macos/MarkdownDocument.icns
         buildPhase: resources
     scheme:

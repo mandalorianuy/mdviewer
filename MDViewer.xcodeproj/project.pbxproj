@@ -12,6 +12,7 @@
 		427D880BBE37004B9607D1EE /* MDViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */; };
 		4985E46D9A2F890B4EBB8E1D /* MarkdownWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017AEC17777962CB26EED41A /* MarkdownWebView.swift */; };
 		8E6924440BD348F411D29F11 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 279CCEA66DC752F52D02DCC0 /* AppState.swift */; };
+		B22D22D633A1648599489E32 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = F0997C6166994981F23F1685 /* AppIcon.icns */; };
 		B4AE68DB4DA0E7BEE3972E6A /* PDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F5B0026D92DA0C9E684C12C /* PDFExporter.swift */; };
 		BE4472B2565F6A7B5C186134 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5A4384AD9A6BFFD17A81F01C /* Assets.xcassets */; };
 		DD3151D25AD5640BB7EA0C1F /* MarkdownHTMLRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */; };
@@ -27,6 +28,7 @@
 		B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = MarkdownDocument.icns; sourceTree = "<group>"; };
 		B2B94D6ECFF439ABF8F84105 /* MDViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MDViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MDViewerApp.swift; sourceTree = "<group>"; };
+		F0997C6166994981F23F1685 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -50,6 +52,7 @@
 		BBD50726D8E351F6E0DAE2E5 /* macos */ = {
 			isa = PBXGroup;
 			children = (
+				F0997C6166994981F23F1685 /* AppIcon.icns */,
 				5A4384AD9A6BFFD17A81F01C /* Assets.xcassets */,
 				B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */,
 			);
@@ -130,6 +133,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B22D22D633A1648599489E32 /* AppIcon.icns in Resources */,
 				BE4472B2565F6A7B5C186134 /* Assets.xcassets in Resources */,
 				2FD8E4DDE51D67D71E1AC1C9 /* MarkdownDocument.icns in Resources */,
 			);
