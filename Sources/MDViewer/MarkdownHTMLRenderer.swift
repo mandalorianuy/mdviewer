@@ -258,7 +258,7 @@ img {
 
         do {
             let down = Down(markdownString: preparedMarkdown)
-            let html = try down.toHTML()
+            let html = try down.toHTML(.unsafe)
             return html.replacingOccurrences(of: "<table>", with: "<div class=\"table-wrap\"><table>")
                 .replacingOccurrences(of: "</table>", with: "</table></div>")
         } catch {
@@ -269,7 +269,8 @@ img {
     private static func prepareMarkdown(_ markdown: String) -> String {
         let normalizedLineEndings = markdown.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        return repairCollapsedTables(in: normalizedLineEndings)
+        let repairedTables = repairCollapsedTables(in: normalizedLineEndings)
+        return convertMarkdownTablesToHTML(in: repairedTables)
     }
 
     private static func repairCollapsedTables(in markdown: String) -> String {
@@ -349,10 +350,214 @@ img {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
+
+    private static func convertMarkdownTablesToHTML(in markdown: String) -> String {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var output: [String] = []
+        var index = 0
+        var activeFence: String?
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if let fence = markdownFenceMarker(in: trimmed) {
+                if activeFence == fence {
+                    activeFence = nil
+                } else if activeFence == nil {
+                    activeFence = fence
+                }
+                output.append(line)
+                index += 1
+                continue
+            }
+
+            guard activeFence == nil,
+                  index + 1 < lines.count,
+                  isPotentialTableRow(line),
+                  isMarkdownTableSeparator(lines[index + 1]) else {
+                output.append(line)
+                index += 1
+                continue
+            }
+
+            var tableLines = [line, lines[index + 1]]
+            index += 2
+
+            while index < lines.count, isPotentialTableRow(lines[index]) {
+                tableLines.append(lines[index])
+                index += 1
+            }
+
+            output.append(renderTableHTML(from: tableLines))
+        }
+
+        return output.joined(separator: "\n")
+    }
+
+    private static func renderTableHTML(from lines: [String]) -> String {
+        guard lines.count >= 2 else {
+            return lines.joined(separator: "\n")
+        }
+
+        let headerCells = splitTableRow(lines[0])
+        let alignments = splitTableRow(lines[1]).map(tableAlignment(for:))
+        let bodyRows = lines.dropFirst(2).map(splitTableRow)
+
+        guard headerCells.count >= 2, alignments.count == headerCells.count else {
+            return lines.joined(separator: "\n")
+        }
+
+        func inlineHTML(for cell: String) -> String {
+            let trimmed = cell.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                return ""
+            }
+
+            do {
+                let rendered = try Down(markdownString: trimmed).toHTML(.unsafe)
+                return stripOuterParagraph(from: rendered)
+            } catch {
+                return htmlEscaped(trimmed)
+            }
+        }
+
+        func styleAttribute(for alignment: TableAlignment) -> String {
+            switch alignment {
+            case .left:
+                return " style=\"text-align: left;\""
+            case .center:
+                return " style=\"text-align: center;\""
+            case .right:
+                return " style=\"text-align: right;\""
+            case .none:
+                return ""
+            }
+        }
+
+        let headerHTML = zip(headerCells, alignments).map { cell, alignment in
+            "<th\(styleAttribute(for: alignment))>\(inlineHTML(for: cell))</th>"
+        }.joined()
+
+        let rowsHTML = bodyRows.map { row in
+            let paddedRow = row.count < alignments.count ? row + Array(repeating: "", count: alignments.count - row.count) : Array(row.prefix(alignments.count))
+            let cellsHTML = zip(paddedRow, alignments).map { cell, alignment in
+                "<td\(styleAttribute(for: alignment))>\(inlineHTML(for: cell))</td>"
+            }.joined()
+            return "<tr>\(cellsHTML)</tr>"
+        }.joined(separator: "\n")
+
+        var sections = ["<table>", "<thead><tr>\(headerHTML)</tr></thead>"]
+        if !rowsHTML.isEmpty {
+            sections.append("<tbody>\n\(rowsHTML)\n</tbody>")
+        }
+        sections.append("</table>")
+
+        return sections.joined(separator: "\n")
+    }
+
+    private static func splitTableRow(_ line: String) -> [String] {
+        var trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("|") {
+            trimmed.removeFirst()
+        }
+        if trimmed.hasSuffix("|") {
+            trimmed.removeLast()
+        }
+
+        var cells: [String] = []
+        var current = ""
+        var isEscaped = false
+
+        for character in trimmed {
+            if isEscaped {
+                current.append(character)
+                isEscaped = false
+                continue
+            }
+
+            if character == "\\" {
+                current.append(character)
+                isEscaped = true
+                continue
+            }
+
+            if character == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(character)
+            }
+        }
+
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        return cells
+    }
+
+    private static func isPotentialTableRow(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|"), !trimmed.isEmpty else {
+            return false
+        }
+
+        let cells = splitTableRow(trimmed)
+        return cells.count >= 2 && cells.contains { !$0.isEmpty }
+    }
+
+    private static func markdownFenceMarker(in line: String) -> String? {
+        if line.hasPrefix("```") {
+            return "```"
+        }
+
+        if line.hasPrefix("~~~") {
+            return "~~~"
+        }
+
+        return nil
+    }
+
+    private static func stripOuterParagraph(from html: String) -> String {
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("<p>"), trimmed.hasSuffix("</p>") else {
+            return trimmed
+        }
+
+        return String(trimmed.dropFirst(3).dropLast(4))
+    }
+
+    private static func tableAlignment(for cell: String) -> TableAlignment {
+        let trimmed = cell.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isValidSeparator = !trimmed.isEmpty && trimmed.allSatisfy { $0 == "-" || $0 == ":" }
+
+        guard isValidSeparator else {
+            return .none
+        }
+
+        let hasLeadingColon = trimmed.hasPrefix(":")
+        let hasTrailingColon = trimmed.hasSuffix(":")
+
+        switch (hasLeadingColon, hasTrailingColon) {
+        case (true, true):
+            return .center
+        case (false, true):
+            return .right
+        case (true, false):
+            return .left
+        case (false, false):
+            return .none
+        }
+    }
 }
 
 private extension Character {
     var isPipeCharacter: Bool {
         self == "|"
     }
+}
+
+private enum TableAlignment {
+    case none
+    case left
+    case center
+    case right
 }
