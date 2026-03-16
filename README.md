@@ -70,6 +70,15 @@ El DMG incluye:
 - `MDViewer.app`
 - alias/symlink a `/Applications` para instalacion por drag and drop
 
+## Notarizar `.dmg`
+
+Para distribucion fuera de App Store necesitás un certificado `Developer ID Application`
+instalado en el keychain y luego podés ejecutar:
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: Tu Nombre (TEAMID)" ./scripts/notarize-dmg.sh
+```
+
 ## Instalar en macOS
 
 ```bash

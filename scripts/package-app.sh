@@ -10,6 +10,8 @@ BUILT_APP_BUNDLE="$DERIVED_DATA_PATH/Build/Products/Release/MDViewer.app"
 ICON_FILE="$ROOT_DIR/macos/AppIcon.icns"
 DOCUMENT_ICON_FILE="$ROOT_DIR/macos/MarkdownDocument.icns"
 MODULE_CACHE_DIR="$ROOT_DIR/.build/module-cache"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+ENABLE_HARDENED_RUNTIME="${ENABLE_HARDENED_RUNTIME:-0}"
 
 mkdir -p "$MODULE_CACHE_DIR"
 
@@ -37,7 +39,15 @@ printf "==> Packaging app bundle\n"
 rm -rf "$APP_BUNDLE"
 cp -R "$BUILT_APP_BUNDLE" "$APP_BUNDLE"
 
-printf "==> Applying ad-hoc signature\n"
-codesign --force --deep --sign - "$APP_BUNDLE"
+printf "==> Applying code signature\n"
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  codesign --force --deep --sign - "$APP_BUNDLE"
+else
+  SIGN_ARGS=(--force --deep --timestamp --sign "$CODESIGN_IDENTITY")
+  if [[ "$ENABLE_HARDENED_RUNTIME" == "1" ]]; then
+    SIGN_ARGS+=(--options runtime --entitlements "$ROOT_DIR/macos/MDViewer.entitlements")
+  fi
+  codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE"
+fi
 
 printf "Done: %s\n" "$APP_BUNDLE"
