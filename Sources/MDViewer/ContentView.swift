@@ -13,6 +13,17 @@ struct ContentView: View {
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
     private let appVersion = AppVersion.current
+    private var selectedAppearanceModeBinding: Binding<AppAppearanceMode> {
+        Binding(
+            get: { selectedAppearanceMode },
+            set: { newValue in
+                appearanceModeRawValue = newValue.rawValue
+                Task { @MainActor in
+                    AppAppearanceController.apply(newValue)
+                }
+            }
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -111,6 +122,19 @@ struct ContentView: View {
             }
 
             Spacer()
+
+            Menu {
+                Picker("Tema", selection: selectedAppearanceModeBinding) {
+                    ForEach(AppAppearanceMode.allCases) { appearanceMode in
+                        Label(appearanceMode.title, systemImage: appearanceMode.symbolName)
+                            .tag(appearanceMode)
+                    }
+                }
+            } label: {
+                Image(systemName: selectedAppearanceMode.symbolName)
+            }
+            .menuStyle(.borderlessButton)
+            .help("Cambiar tema: System / Light / Dark")
 
             Button {
                 openSettings()
@@ -246,7 +270,8 @@ struct ContentView: View {
         return "Markdown.pdf"
     }
 
+    @MainActor
     private func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        SettingsWindowController.shared.show()
     }
 }
