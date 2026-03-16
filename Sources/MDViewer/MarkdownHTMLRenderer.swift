@@ -41,15 +41,16 @@ body {
   font-family: \"\(safeFontFamily)\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;
   font-size: var(--font-size);
   line-height: 1.7;
-  padding: 28px;
+  padding: 16px;
 }
 .article {
-  max-width: 940px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
   background: var(--paper);
   border: 1px solid var(--border);
   border-radius: 16px;
-  padding: 38px 46px;
+  padding: 30px 32px;
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
 }
 h1, h2, h3, h4, h5, h6 {
@@ -184,7 +185,9 @@ td code, th code {
   border-radius: 6px;
   padding: 0.08em 0.4em;
   font-size: 0.92em;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .table-wrap {
   width: 100%;
@@ -194,6 +197,38 @@ td code, th code {
   border-radius: 12px;
   background: linear-gradient(180deg, #ffffff, #fcfdff);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+.table-wrap table.resizable-table th,
+.table-wrap table.resizable-table td {
+  position: relative;
+}
+.table-wrap table.resizable-table th {
+  user-select: none;
+}
+.column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+}
+.column-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 22%;
+  bottom: 22%;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.18);
+  transition: background 140ms ease;
+}
+.column-resize-handle:hover::after,
+.column-resize-handle.is-active::after {
+  background: rgba(37, 99, 235, 0.75);
 }
 input[type="checkbox"] {
   accent-color: var(--accent);
@@ -245,6 +280,113 @@ img {
   }
 }
 </style>
+<script>
+function setupResizableTables() {
+  const tables = Array.from(document.querySelectorAll('.table-wrap table'));
+
+  tables.forEach((table, tableIndex) => {
+    const wrapper = table.closest('.table-wrap');
+    const headerRow = table.tHead && table.tHead.rows.length > 0 ? table.tHead.rows[0] : table.rows[0];
+    if (!wrapper || !headerRow || headerRow.cells.length === 0) {
+      return;
+    }
+
+    table.classList.add('resizable-table');
+
+    if (!table.querySelector('colgroup')) {
+      const colgroup = document.createElement('colgroup');
+      const headerCells = Array.from(headerRow.cells);
+      headerCells.forEach((cell, cellIndex) => {
+        const col = document.createElement('col');
+        col.dataset.columnIndex = String(cellIndex);
+        const width = Math.max(120, Math.ceil(cell.getBoundingClientRect().width));
+        col.style.width = `${width}px`;
+        colgroup.appendChild(col);
+      });
+      table.insertBefore(colgroup, table.firstChild);
+    }
+
+    const columns = Array.from(table.querySelectorAll('colgroup col'));
+    if (columns.length === 0) {
+      return;
+    }
+
+    fitTableToWrapper(table, wrapper, columns);
+
+    Array.from(headerRow.cells).forEach((cell, columnIndex) => {
+      if (cell.querySelector('.column-resize-handle')) {
+        return;
+      }
+
+      const handle = document.createElement('div');
+      handle.className = 'column-resize-handle';
+      handle.title = 'Arrastrar para ajustar columna';
+
+      handle.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+
+        const startX = event.clientX;
+        const column = columns[columnIndex];
+        const startWidth = column.getBoundingClientRect().width;
+        const minWidth = 90;
+
+        handle.classList.add('is-active');
+
+        const onMouseMove = (moveEvent) => {
+          const nextWidth = Math.max(minWidth, startWidth + (moveEvent.clientX - startX));
+          column.dataset.userSized = 'true';
+          column.style.width = `${nextWidth}px`;
+          table.style.width = `${Math.max(wrapper.clientWidth, totalColumnWidth(columns))}px`;
+        };
+
+        const onMouseUp = () => {
+          handle.classList.remove('is-active');
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+      });
+
+      cell.appendChild(handle);
+    });
+
+    table.dataset.tableIndex = String(tableIndex);
+    window.addEventListener('resize', () => fitTableToWrapper(table, wrapper, columns));
+  });
+}
+
+function totalColumnWidth(columns) {
+  return columns.reduce((sum, column) => sum + Math.max(90, Math.ceil(column.getBoundingClientRect().width)), 0);
+}
+
+function fitTableToWrapper(table, wrapper, columns) {
+  const wrapperWidth = Math.max(0, Math.floor(wrapper.clientWidth));
+  let totalWidth = totalColumnWidth(columns);
+
+  if (wrapperWidth > totalWidth) {
+    const flexibleColumns = columns.filter((column) => column.dataset.userSized !== 'true');
+    const targets = flexibleColumns.length > 0 ? flexibleColumns : columns;
+    const extraWidth = wrapperWidth - totalWidth;
+    const perColumn = Math.floor(extraWidth / targets.length);
+    let remainder = extraWidth - (perColumn * targets.length);
+
+    targets.forEach((column) => {
+      const currentWidth = Math.max(90, Math.ceil(column.getBoundingClientRect().width));
+      const growth = perColumn + (remainder > 0 ? 1 : 0);
+      remainder = Math.max(0, remainder - 1);
+      column.style.width = `${currentWidth + growth}px`;
+    });
+
+    totalWidth = totalColumnWidth(columns);
+  }
+
+  table.style.width = `${Math.max(wrapperWidth, totalWidth)}px`;
+}
+
+window.addEventListener('load', setupResizableTables);
+</script>
 </head>
 <body>
   <article class=\"article\">\(body)</article>
