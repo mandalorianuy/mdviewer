@@ -285,28 +285,54 @@ img {
                 continue
             }
 
-            var expandedLine = line
-                .replacingOccurrences(
-                    of: #"\|\s*\|(?=[:\-]{3,}\s*\|)"#,
-                    with: "|\n|",
-                    options: .regularExpression
-                )
-                .replacingOccurrences(
-                    of: #"\|\s*\|(?=(?:\d+|[`A-Za-z/\[_*]))"#,
-                    with: "|\n|",
-                    options: .regularExpression
-                )
+            let segments = line
+                .split(separator: "||", omittingEmptySubsequences: true)
+                .map { normalizeCollapsedTableSegment(String($0)) }
+                .filter { !$0.isEmpty }
 
-            expandedLine = expandedLine.replacingOccurrences(
-                of: #"\n{3,}"#,
-                with: "\n\n",
-                options: .regularExpression
-            )
-
-            repairedLines.append(contentsOf: expandedLine.split(separator: "\n", omittingEmptySubsequences: false).map(String.init))
+            if segments.count >= 3, isMarkdownTableSeparator(segments[1]) {
+                repairedLines.append(contentsOf: segments)
+            } else {
+                repairedLines.append(line)
+            }
         }
 
         return repairedLines.joined(separator: "\n")
+    }
+
+    private static func normalizeCollapsedTableSegment(_ segment: String) -> String {
+        var normalized = segment.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !normalized.hasPrefix("|") {
+            normalized = "|" + normalized
+        }
+
+        if !normalized.hasSuffix("|") {
+            normalized += "|"
+        }
+
+        return normalized
+    }
+
+    private static func isMarkdownTableSeparator(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("|"), trimmed.hasSuffix("|") else {
+            return false
+        }
+
+        let cells = trimmed
+            .dropFirst()
+            .dropLast()
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+
+        guard !cells.isEmpty else {
+            return false
+        }
+
+        return cells.allSatisfy { cell in
+            !cell.isEmpty && cell.allSatisfy { $0 == "-" || $0 == ":" }
+        }
     }
 
     private static func htmlEscaped(_ input: String) -> String {
