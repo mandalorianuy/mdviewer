@@ -5,7 +5,7 @@ import Foundation
 
 struct IconSpec {
     let filename: String
-    let pointSize: CGFloat
+    let pixelSize: Int
 }
 
 struct IconAsset {
@@ -14,16 +14,16 @@ struct IconAsset {
 }
 
 let specs: [IconSpec] = [
-    .init(filename: "icon_16x16.png", pointSize: 16),
-    .init(filename: "icon_16x16@2x.png", pointSize: 32),
-    .init(filename: "icon_32x32.png", pointSize: 32),
-    .init(filename: "icon_32x32@2x.png", pointSize: 64),
-    .init(filename: "icon_128x128.png", pointSize: 128),
-    .init(filename: "icon_128x128@2x.png", pointSize: 256),
-    .init(filename: "icon_256x256.png", pointSize: 256),
-    .init(filename: "icon_256x256@2x.png", pointSize: 512),
-    .init(filename: "icon_512x512.png", pointSize: 512),
-    .init(filename: "icon_512x512@2x.png", pointSize: 1024),
+    .init(filename: "icon_16x16.png", pixelSize: 16),
+    .init(filename: "icon_16x16@2x.png", pixelSize: 32),
+    .init(filename: "icon_32x32.png", pixelSize: 32),
+    .init(filename: "icon_32x32@2x.png", pixelSize: 64),
+    .init(filename: "icon_128x128.png", pixelSize: 128),
+    .init(filename: "icon_128x128@2x.png", pixelSize: 256),
+    .init(filename: "icon_256x256.png", pixelSize: 256),
+    .init(filename: "icon_256x256@2x.png", pixelSize: 512),
+    .init(filename: "icon_512x512.png", pixelSize: 512),
+    .init(filename: "icon_512x512@2x.png", pixelSize: 1024),
 ]
 
 let fileManager = FileManager.default
@@ -46,14 +46,46 @@ func generateIconAsset(named name: String, draw: (NSRect) -> Void) throws {
     try fileManager.createDirectory(at: iconsetURL, withIntermediateDirectories: true)
 
     for spec in specs {
-        let image = NSImage(size: NSSize(width: spec.pointSize, height: spec.pointSize))
-        image.lockFocus()
-        draw(NSRect(origin: .zero, size: image.size))
-        image.unlockFocus()
+        guard
+            let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: spec.pixelSize,
+                pixelsHigh: spec.pixelSize,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            )
+        else {
+            throw NSError(
+                domain: "IconGeneration",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No se pudo crear el bitmap \(spec.filename) para \(name)."]
+            )
+        }
+
+        bitmap.size = NSSize(width: spec.pixelSize, height: spec.pixelSize)
+
+        NSGraphicsContext.saveGraphicsState()
+        guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            throw NSError(
+                domain: "IconGeneration",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No se pudo crear el contexto \(spec.filename) para \(name)."]
+            )
+        }
+
+        NSGraphicsContext.current = context
+        NSColor.clear.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: spec.pixelSize, height: spec.pixelSize)).fill()
+        draw(NSRect(x: 0, y: 0, width: spec.pixelSize, height: spec.pixelSize))
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
 
         guard
-            let tiffData = image.tiffRepresentation,
-            let bitmap = NSBitmapImageRep(data: tiffData),
             let pngData = bitmap.representation(using: .png, properties: [:])
         else {
             throw NSError(
