@@ -47,7 +47,7 @@ struct ContentView: View {
             footerBar
         }
         .preferredColorScheme(selectedAppearanceMode.preferredColorScheme)
-        .tint(BrandChrome.cyberYellow)
+        .tint(controlAccent)
         .background(WindowTabbingConfigurator(preferTabbedWindows: preferTabbedWindows))
         .background(windowBackground)
         .onAppear {
@@ -76,9 +76,24 @@ struct ContentView: View {
 
     private var controlsBar: some View {
         HStack(spacing: 14) {
-            Button("Abrir .md") {
+            Button {
                 pickFilesToOpen()
+            } label: {
+                Text("Abrir .md")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(primaryText)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(secondaryActionBackground)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(secondaryActionBorder, lineWidth: 1)
+                    )
             }
+            .buttonStyle(.plain)
 
             Divider()
                 .frame(height: 20)
@@ -119,9 +134,13 @@ struct ContentView: View {
                 cycleAppearanceMode()
             } label: {
                 ZStack {
-                    Circle()
-                        .fill(themeIconTint.opacity(0.18))
-                        .frame(width: 28, height: 28)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(secondaryActionBackground)
+                        .frame(width: 32, height: 32)
+
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(secondaryActionBorder, lineWidth: 1)
+                        .frame(width: 32, height: 32)
 
                     Circle()
                         .fill(themeIconTint.opacity(themeIconGlowOpacity))
@@ -134,8 +153,8 @@ struct ContentView: View {
                         .scaleEffect(themeIconScale)
                         .rotationEffect(.degrees(themeIconRotation))
                 }
-                .frame(width: 28, height: 28)
-                .contentShape(Circle())
+                .frame(width: 32, height: 32)
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(.borderless)
             .help("Tema actual: \(selectedAppearanceMode.title). Click para cambiar a \(selectedAppearanceMode.next.title).")
@@ -143,15 +162,39 @@ struct ContentView: View {
             Button {
                 openSettings()
             } label: {
-                Image(systemName: "gearshape")
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(secondaryActionBackground)
+                        .frame(width: 32, height: 32)
+
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(secondaryActionBorder, lineWidth: 1)
+                        .frame(width: 32, height: 32)
+
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(controlAccent)
+                }
             }
             .buttonStyle(.borderless)
             .help("Configuracion")
 
-            Button("Exportar PDF") {
+            Button {
                 exportPDF()
+            } label: {
+                Text("Exportar PDF")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(primaryActionForeground)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(primaryActionBackground)
+                    )
             }
+            .buttonStyle(.plain)
             .disabled(document.rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .opacity(document.rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.55 : 1)
         }
     }
 
@@ -234,15 +277,35 @@ struct ContentView: View {
         BrandChrome.mutedText(for: resolvedColorScheme)
     }
 
+    private var controlAccent: Color {
+        BrandChrome.interactiveAccent(for: resolvedColorScheme)
+    }
+
     private var themeIconTint: Color {
         switch selectedAppearanceMode {
         case .system:
-            return BrandChrome.deepTeal
+            return controlAccent
         case .light:
-            return BrandChrome.cyberYellow
+            return BrandChrome.lightModeTeal
         case .dark:
             return BrandChrome.violet
         }
+    }
+
+    private var primaryActionBackground: Color {
+        BrandChrome.primaryActionBackground(for: resolvedColorScheme)
+    }
+
+    private var primaryActionForeground: Color {
+        BrandChrome.primaryActionForeground(for: resolvedColorScheme)
+    }
+
+    private var secondaryActionBackground: Color {
+        BrandChrome.secondaryActionBackground(for: resolvedColorScheme)
+    }
+
+    private var secondaryActionBorder: Color {
+        BrandChrome.secondaryActionBorder(for: resolvedColorScheme)
     }
 
     private var effectiveFontFamily: String {

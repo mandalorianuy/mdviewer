@@ -84,27 +84,31 @@ enum AppAppearanceController {
 enum BrandChrome {
     static let cyberDark = Color(hex: 0x0F1117)
     static let cyberDarkSurface = Color(hex: 0x1A1D27)
-    static let cyberMidSurface = Color(hex: 0x222633)
+    static let cyberRaisedSurface = Color(hex: 0x242736)
     static let ironGray = Color(hex: 0x30302D)
+    static let lightInk = Color(hex: 0x1A1A1A)
     static let cyberYellow = Color(hex: 0xFFEF34)
     static let deepTeal = Color(hex: 0x00B8A3)
     static let violet = Color(hex: 0x8B5CF6)
+    static let lightModeYellow = Color(hex: 0xD4C800)
+    static let lightModeTeal = Color(hex: 0x009688)
+    static let lightModeViolet = Color(hex: 0x7C3AED)
     static let textPrimaryDark = Color(hex: 0xE8EAF0)
     static let textSecondaryDark = Color(hex: 0xC1C5D2)
     static let textMutedDark = Color(hex: 0x8B90A0)
-    static let textPrimaryLight = Color(hex: 0x0F1117)
-    static let textSecondaryLight = Color(hex: 0x30302D)
-    static let textMutedLight = Color(hex: 0x5C6475)
-    static let lightCanvas = Color(hex: 0xF5F5F5)
+    static let textPrimaryLight = Color(hex: 0x1A1A1A)
+    static let textSecondaryLight = Color(hex: 0x4A4A4A)
+    static let textMutedLight = Color(hex: 0x8B8B85)
+    static let lightCanvas = Color(hex: 0xF5F5F0)
     static let lightSurface = Color.white
-    static let lightSurfaceAlt = Color(hex: 0xECEFF4)
+    static let lightSurfaceAlt = Color(hex: 0xEAEAE5)
 
     static func chromeBackground(for colorScheme: ColorScheme) -> Color {
         colorScheme == .dark ? cyberDarkSurface : lightSurface
     }
 
     static func chromeAccentBackground(for colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? cyberMidSurface : lightSurfaceAlt
+        colorScheme == .dark ? cyberRaisedSurface : lightSurfaceAlt
     }
 
     static func windowBackground(for colorScheme: ColorScheme) -> Color {
@@ -125,6 +129,30 @@ enum BrandChrome {
 
     static func mutedText(for colorScheme: ColorScheme) -> Color {
         colorScheme == .dark ? textMutedDark : textMutedLight
+    }
+
+    static func interactiveAccent(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? deepTeal : lightModeTeal
+    }
+
+    static func primaryActionBackground(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? cyberYellow : lightModeTeal
+    }
+
+    static func primaryActionForeground(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? cyberDark : Color.white
+    }
+
+    static func secondaryActionBorder(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.10)
+    }
+
+    static func secondaryActionBackground(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? cyberRaisedSurface.opacity(0.72) : lightSurface
+    }
+
+    static func selectionHighlight(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? cyberYellow : lightModeYellow
     }
 }
 
