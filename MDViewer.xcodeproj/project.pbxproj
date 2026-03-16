@@ -15,6 +15,7 @@
 		4B101537F537EC72CBB11B5F /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D62B3197719B6F8599FD7DB /* SettingsView.swift */; };
 		600AA2E5C37AB864C1397489 /* WindowTabbingConfigurator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D37E2BDCE60464DD977A91FF /* WindowTabbingConfigurator.swift */; };
 		63E4BA87628A92DC0F3C23F4 /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1006810AD9443534FDE7C690 /* AppPreferences.swift */; };
+		70D7AEF2D01DFE1F3B8D1CFD /* Down in Frameworks */ = {isa = PBXBuildFile; productRef = 119024A542D61E4817B0B119 /* Down */; };
 		8E6924440BD348F411D29F11 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 279CCEA66DC752F52D02DCC0 /* AppState.swift */; };
 		B22D22D633A1648599489E32 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = F0997C6166994981F23F1685 /* AppIcon.icns */; };
 		B4AE68DB4DA0E7BEE3972E6A /* PDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F5B0026D92DA0C9E684C12C /* PDFExporter.swift */; };
@@ -38,6 +39,17 @@
 		E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MDViewerApp.swift; sourceTree = "<group>"; };
 		F0997C6166994981F23F1685 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		68857ED4AD826C25C801ABDB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				70D7AEF2D01DFE1F3B8D1CFD /* Down in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		09BD76EE28C792BB9AEEBF8B /* Products */ = {
@@ -94,6 +106,7 @@
 			buildPhases = (
 				315F4B5453DD4E94AF9A3AE7 /* Sources */,
 				F78AB5BC13761543249D21CD /* Resources */,
+				68857ED4AD826C25C801ABDB /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -101,6 +114,7 @@
 			);
 			name = MDViewer;
 			packageProductDependencies = (
+				119024A542D61E4817B0B119 /* Down */,
 			);
 			productName = MDViewer;
 			productReference = B2B94D6ECFF439ABF8F84105 /* MDViewer.app */;
@@ -131,6 +145,9 @@
 			);
 			mainGroup = 948C07D6D92DE79B515C2B00;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				32BF35D4BBC4D044195D1F21 /* XCRemoteSwiftPackageReference "Down-gfm" */,
+			);
 			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
@@ -361,6 +378,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		32BF35D4BBC4D044195D1F21 /* XCRemoteSwiftPackageReference "Down-gfm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stackotter/Down-gfm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.12.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		119024A542D61E4817B0B119 /* Down */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 32BF35D4BBC4D044195D1F21 /* XCRemoteSwiftPackageReference "Down-gfm" */;
+			productName = Down;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 0DF200EDE3B21792C4B8F45B /* Project object */;
 }

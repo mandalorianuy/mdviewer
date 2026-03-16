@@ -1,3 +1,4 @@
+import Down
 import Foundation
 
 enum MarkdownHTMLRenderer {
@@ -63,11 +64,42 @@ h3 { font-size: var(--h3); }
 p {
   margin: 0.85em 0;
 }
+strong {
+  font-weight: 700;
+}
+em {
+  font-style: italic;
+}
+del {
+  color: #64748b;
+  text-decoration-thickness: 2px;
+}
 ul, ol {
   margin: 0.6em 0 1.1em 1.4em;
   padding-left: 1.1em;
 }
 li { margin: 0.35em 0; }
+li > p:first-child {
+  margin-top: 0;
+}
+li > p:last-child {
+  margin-bottom: 0;
+}
+ul.contains-task-list,
+ul.task-list {
+  list-style: none;
+  margin-left: 0;
+  padding-left: 0.2em;
+}
+li.task-list-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55em;
+}
+li.task-list-item input[type="checkbox"] {
+  margin-top: 0.35em;
+  flex: 0 0 auto;
+}
 blockquote {
   margin: 1.1em 0;
   padding: 0.7em 1em;
@@ -86,9 +118,18 @@ pre {
   overflow-x: auto;
   font-size: 0.92em;
   line-height: 1.55;
+  border: 1px solid rgba(148, 163, 184, 0.18);
 }
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace;
+}
+pre code {
+  background: transparent;
+  color: inherit;
+  border: none;
+  padding: 0;
+  font-size: 1em;
+  white-space: pre;
 }
 p code, li code, blockquote code {
   background: var(--inline-code-bg);
@@ -113,16 +154,84 @@ hr {
 }
 table {
   border-collapse: collapse;
-  width: 100%;
-  margin: 1em 0;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  table-layout: auto;
+  background: var(--paper);
 }
 th, td {
   border: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: 10px 12px;
   text-align: left;
+  vertical-align: top;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 th {
   background: #f8fafc;
+}
+thead th {
+  font-weight: 700;
+}
+tbody tr:nth-child(even) {
+  background: #fbfdff;
+}
+td code, th code {
+  background: var(--inline-code-bg);
+  color: var(--inline-code-text);
+  border: 1px solid #dbeafe;
+  border-radius: 6px;
+  padding: 0.08em 0.4em;
+  font-size: 0.92em;
+  white-space: nowrap;
+}
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 1.2em 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff, #fcfdff);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+details {
+  margin: 1em 0;
+  padding: 0.85em 1em;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fafcff;
+}
+summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+section.footnotes {
+  margin-top: 2.4em;
+  padding-top: 1.2em;
+  border-top: 1px solid var(--border);
+  color: #334155;
+}
+section.footnotes ol {
+  margin-bottom: 0;
+}
+mark {
+  background: #fef3c7;
+  color: inherit;
+  border-radius: 4px;
+  padding: 0.05em 0.2em;
+}
+kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 0.08em 0.38em;
 }
 img {
   max-width: 100%;
@@ -145,227 +254,14 @@ img {
     }
 
     private static func renderBody(_ markdown: String) -> String {
-        let normalized = markdown.replacingOccurrences(of: "\r\n", with: "\n")
-        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-
-        var html: [String] = []
-        var paragraphBuffer: [String] = []
-        var codeBuffer: [String] = []
-        var inCodeBlock = false
-        var codeLanguage = ""
-        var inUnorderedList = false
-        var inOrderedList = false
-        var inBlockquote = false
-
-        func flushParagraph() {
-            guard !paragraphBuffer.isEmpty else { return }
-            let text = paragraphBuffer.map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " ")
-            html.append("<p>\(renderInline(text))</p>")
-            paragraphBuffer.removeAll(keepingCapacity: true)
+        do {
+            let down = Down(markdownString: markdown)
+            let html = try down.toHTML()
+            return html.replacingOccurrences(of: "<table>", with: "<div class=\"table-wrap\"><table>")
+                .replacingOccurrences(of: "</table>", with: "</table></div>")
+        } catch {
+            return "<pre><code>\(htmlEscaped(markdown))</code></pre>"
         }
-
-        func closeLists() {
-            if inUnorderedList {
-                html.append("</ul>")
-                inUnorderedList = false
-            }
-            if inOrderedList {
-                html.append("</ol>")
-                inOrderedList = false
-            }
-        }
-
-        func closeBlockquote() {
-            if inBlockquote {
-                html.append("</blockquote>")
-                inBlockquote = false
-            }
-        }
-
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            if trimmed.hasPrefix("```") {
-                flushParagraph()
-                closeLists()
-                closeBlockquote()
-
-                if inCodeBlock {
-                    let langClass = codeLanguage.isEmpty ? "" : " class=\"language-\(htmlEscaped(codeLanguage))\""
-                    let code = htmlEscaped(codeBuffer.joined(separator: "\n"))
-                    html.append("<pre><code\(langClass)>\(code)</code></pre>")
-                    codeBuffer.removeAll(keepingCapacity: true)
-                    inCodeBlock = false
-                    codeLanguage = ""
-                } else {
-                    inCodeBlock = true
-                    codeLanguage = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                }
-                continue
-            }
-
-            if inCodeBlock {
-                codeBuffer.append(line)
-                continue
-            }
-
-            if trimmed.isEmpty {
-                flushParagraph()
-                closeLists()
-                closeBlockquote()
-                continue
-            }
-
-            if let heading = headingLevelAndText(trimmed) {
-                flushParagraph()
-                closeLists()
-                closeBlockquote()
-                html.append("<h\(heading.level)>\(renderInline(heading.text))</h\(heading.level)>")
-                continue
-            }
-
-            if isHorizontalRule(trimmed) {
-                flushParagraph()
-                closeLists()
-                closeBlockquote()
-                html.append("<hr />")
-                continue
-            }
-
-            if let quoteText = blockquoteText(trimmed) {
-                flushParagraph()
-                closeLists()
-                if !inBlockquote {
-                    html.append("<blockquote>")
-                    inBlockquote = true
-                }
-                html.append("<p>\(renderInline(quoteText))</p>")
-                continue
-            }
-
-            closeBlockquote()
-
-            if let bullet = unorderedItemText(trimmed) {
-                flushParagraph()
-                if inOrderedList {
-                    html.append("</ol>")
-                    inOrderedList = false
-                }
-                if !inUnorderedList {
-                    html.append("<ul>")
-                    inUnorderedList = true
-                }
-                html.append("<li>\(renderInline(bullet))</li>")
-                continue
-            }
-
-            if let ordered = orderedItemText(trimmed) {
-                flushParagraph()
-                if inUnorderedList {
-                    html.append("</ul>")
-                    inUnorderedList = false
-                }
-                if !inOrderedList {
-                    html.append("<ol>")
-                    inOrderedList = true
-                }
-                html.append("<li>\(renderInline(ordered))</li>")
-                continue
-            }
-
-            closeLists()
-            paragraphBuffer.append(line)
-        }
-
-        if inCodeBlock {
-            let code = htmlEscaped(codeBuffer.joined(separator: "\n"))
-            html.append("<pre><code>\(code)</code></pre>")
-        }
-
-        flushParagraph()
-        closeLists()
-        closeBlockquote()
-
-        return html.joined(separator: "\n")
-    }
-
-    private static func headingLevelAndText(_ line: String) -> (level: Int, text: String)? {
-        let hashes = line.prefix { $0 == "#" }
-        guard !hashes.isEmpty, hashes.count <= 6 else { return nil }
-        let remainder = line.dropFirst(hashes.count)
-        guard remainder.first == " " else { return nil }
-        return (hashes.count, String(remainder.dropFirst()))
-    }
-
-    private static func isHorizontalRule(_ line: String) -> Bool {
-        let compact = line.replacingOccurrences(of: " ", with: "")
-        return compact == "---" || compact == "***" || compact == "___"
-    }
-
-    private static func blockquoteText(_ line: String) -> String? {
-        guard line.hasPrefix(">") else { return nil }
-        return String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
-    }
-
-    private static func unorderedItemText(_ line: String) -> String? {
-        for prefix in ["- ", "* ", "+ "] {
-            if line.hasPrefix(prefix) {
-                return String(line.dropFirst(prefix.count))
-            }
-        }
-        return nil
-    }
-
-    private static func orderedItemText(_ line: String) -> String? {
-        let pattern = #"^\d+\.\s+(.+)$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(line.startIndex..<line.endIndex, in: line)
-        guard let match = regex.firstMatch(in: line, range: range), match.numberOfRanges > 1,
-              let textRange = Range(match.range(at: 1), in: line) else {
-            return nil
-        }
-        return String(line[textRange])
-    }
-
-    private static func renderInline(_ text: String) -> String {
-        let escaped = htmlEscaped(text)
-        let segments = escaped.split(separator: "`", omittingEmptySubsequences: false)
-
-        var rendered = ""
-        for (index, rawPart) in segments.enumerated() {
-            let part = String(rawPart)
-            if index.isMultiple(of: 2) {
-                rendered += applyInlineRegex(part)
-            } else {
-                rendered += "<code>\(part)</code>"
-            }
-        }
-        return rendered
-    }
-
-    private static func applyInlineRegex(_ text: String) -> String {
-        var output = text
-
-        output = replacing(
-            pattern: #"\[([^\]]+)\]\(([^\)]+)\)"#,
-            in: output,
-            template: "<a href=\"$2\">$1</a>"
-        )
-        output = replacing(pattern: #"\*\*([^*]+)\*\*"#, in: output, template: "<strong>$1</strong>")
-        output = replacing(pattern: #"__([^_]+)__"#, in: output, template: "<strong>$1</strong>")
-        output = replacing(pattern: #"~~([^~]+)~~"#, in: output, template: "<del>$1</del>")
-        output = replacing(pattern: #"\*([^*]+)\*"#, in: output, template: "<em>$1</em>")
-        output = replacing(pattern: #"_([^_]+)_"#, in: output, template: "<em>$1</em>")
-
-        return output
-    }
-
-    private static func replacing(pattern: String, in text: String, template: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return text
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
     }
 
     private static func htmlEscaped(_ input: String) -> String {

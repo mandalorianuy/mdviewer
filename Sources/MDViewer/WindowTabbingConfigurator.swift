@@ -2,6 +2,8 @@ import AppKit
 import SwiftUI
 
 struct WindowTabbingConfigurator: NSViewRepresentable {
+    private static let tabbingIdentifier = "com.facundo.mdviewer.document"
+
     let preferTabbedWindows: Bool
 
     func makeNSView(context: Context) -> WindowObserverView {
@@ -28,10 +30,46 @@ struct WindowTabbingConfigurator: NSViewRepresentable {
                 return
             }
 
-            DispatchQueue.main.async {
-                window.tabbingIdentifier = "com.facundo.mdviewer.document"
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window else {
+                    return
+                }
+
+                window.tabbingIdentifier = WindowTabbingConfigurator.tabbingIdentifier
                 window.tabbingMode = self.preferTabbedWindows ? .preferred : .disallowed
+
+                if self.preferTabbedWindows {
+                    self.attachWindowToExistingTabGroup(window)
+                }
             }
+        }
+
+        private func attachWindowToExistingTabGroup(_ window: NSWindow) {
+            guard window.isVisible else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self, weak window] in
+                    guard let self, let window else {
+                        return
+                    }
+                    self.attachWindowToExistingTabGroup(window)
+                }
+                return
+            }
+
+            guard window.tabbedWindows?.count ?? 1 <= 1 else {
+                return
+            }
+
+            guard let targetWindow = NSApp.windows.first(where: {
+                $0 !== window &&
+                $0.isVisible &&
+                !$0.isMiniaturized &&
+                $0.tabbingIdentifier == WindowTabbingConfigurator.tabbingIdentifier
+            }) else {
+                return
+            }
+
+            targetWindow.addTabbedWindow(window, ordered: .above)
+            targetWindow.makeKeyAndOrderFront(nil)
         }
     }
 }

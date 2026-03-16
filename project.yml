@@ -18,10 +18,17 @@ settings:
     CODE_SIGN_IDENTITY: Apple Development
     CODE_SIGN_ENTITLEMENTS: macos/MDViewer.entitlements
     ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+packages:
+  DownGFM:
+    url: https://github.com/stackotter/Down-gfm
+    from: 0.12.0
 targets:
   MDViewer:
     type: application
     platform: macOS
+    dependencies:
+      - package: DownGFM
+        product: Down
     sources:
       - path: Sources/MDViewer
       - path: macos/Assets.xcassets
