@@ -10,6 +10,9 @@ struct ContentView: View {
     @AppStorage(AppPreferenceKey.preferTabbedWindows) private var preferTabbedWindows = AppPreferenceDefault.preferTabbedWindows
     @AppStorage(AppPreferenceKey.appearanceMode) private var appearanceModeRawValue = AppPreferenceDefault.appearanceMode
     @State private var errorMessage: String?
+    @State private var themeIconScale: CGFloat = 1.0
+    @State private var themeIconRotation: Double = 0
+    @State private var themeIconGlowOpacity = 0.0
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
     private let appVersion = AppVersion.current
@@ -115,7 +118,24 @@ struct ContentView: View {
             Button {
                 cycleAppearanceMode()
             } label: {
-                Image(systemName: selectedAppearanceMode.symbolName)
+                ZStack {
+                    Circle()
+                        .fill(themeIconTint.opacity(0.18))
+                        .frame(width: 28, height: 28)
+
+                    Circle()
+                        .fill(themeIconTint.opacity(themeIconGlowOpacity))
+                        .frame(width: 28, height: 28)
+                        .blur(radius: 10)
+
+                    Image(systemName: selectedAppearanceMode.symbolName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(themeIconTint)
+                        .scaleEffect(themeIconScale)
+                        .rotationEffect(.degrees(themeIconRotation))
+                }
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
             }
             .buttonStyle(.borderless)
             .help("Tema actual: \(selectedAppearanceMode.title). Click para cambiar a \(selectedAppearanceMode.next.title).")
@@ -151,8 +171,28 @@ struct ContentView: View {
     @MainActor
     private func cycleAppearanceMode() {
         let nextMode = selectedAppearanceMode.next
+
+        withAnimation(.easeIn(duration: 0.12)) {
+            themeIconScale = 0.84
+            themeIconRotation -= 12
+            themeIconGlowOpacity = 0.22
+        }
+
         appearanceModeRawValue = nextMode.rawValue
         AppAppearanceController.apply(nextMode)
+
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.58)) {
+            themeIconScale = 1.14
+            themeIconRotation += 132
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+                themeIconScale = 1.0
+                themeIconGlowOpacity = 0.0
+            }
+        }
     }
 
     private var resolvedColorScheme: ColorScheme {
@@ -192,6 +232,17 @@ struct ContentView: View {
 
     private var mutedText: Color {
         BrandChrome.mutedText(for: resolvedColorScheme)
+    }
+
+    private var themeIconTint: Color {
+        switch selectedAppearanceMode {
+        case .system:
+            return BrandChrome.deepTeal
+        case .light:
+            return BrandChrome.cyberYellow
+        case .dark:
+            return BrandChrome.violet
+        }
     }
 
     private var effectiveFontFamily: String {
