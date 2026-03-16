@@ -4,9 +4,11 @@ import SwiftUI
 struct ContentView: View {
     let document: MarkdownFileDocument
 
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage(AppPreferenceKey.selectedFontFamily) private var selectedFontFamily = AppPreferenceDefault.fontFamily
     @AppStorage(AppPreferenceKey.fontSize) private var fontSize = AppPreferenceDefault.fontSize
     @AppStorage(AppPreferenceKey.preferTabbedWindows) private var preferTabbedWindows = AppPreferenceDefault.preferTabbedWindows
+    @AppStorage(AppPreferenceKey.appearanceMode) private var appearanceModeRawValue = AppPreferenceDefault.appearanceMode
     @State private var errorMessage: String?
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
@@ -17,27 +19,34 @@ struct ContentView: View {
             controlsBar
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(.ultraThinMaterial)
+                .background(chromeBackground)
 
-            Divider()
+            Rectangle()
+                .fill(dividerColor)
+                .frame(height: 1)
 
             MarkdownWebView(html: renderedHTML)
-                .background(Color(NSColor.textBackgroundColor))
+                .background(windowBackground)
 
             if let error = errorMessage {
-                Divider()
+                Rectangle()
+                    .fill(dividerColor)
+                    .frame(height: 1)
                 Text(error)
                     .foregroundStyle(.red)
                     .font(.system(size: 12, weight: .medium))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(Color(NSColor.windowBackgroundColor))
+                    .background(chromeAccentBackground)
             }
 
             footerBar
         }
+        .preferredColorScheme(selectedAppearanceMode.preferredColorScheme)
+        .tint(BrandChrome.cyberYellow)
         .background(WindowTabbingConfigurator(preferTabbedWindows: preferTabbedWindows))
+        .background(windowBackground)
         .onAppear {
             if !availableFonts.contains(selectedFontFamily) {
                 selectedFontFamily = effectiveDefaultFont
@@ -47,16 +56,18 @@ struct ContentView: View {
 
     private var footerBar: some View {
         VStack(spacing: 0) {
-            Divider()
+            Rectangle()
+                .fill(dividerColor)
+                .frame(height: 1)
             HStack {
                 Spacer()
                 Text(appVersion.displayString)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(mutedText)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
             }
-            .background(Color(NSColor.windowBackgroundColor))
+            .background(chromeBackground)
         }
     }
 
@@ -71,6 +82,7 @@ struct ContentView: View {
 
             Text("Fuente")
                 .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(secondaryText)
 
             Picker("", selection: $selectedFontFamily) {
                 ForEach(availableFonts, id: \.self) { family in
@@ -82,6 +94,7 @@ struct ContentView: View {
 
             Text("Tamaño")
                 .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(secondaryText)
 
             HStack(spacing: 6) {
                 Slider(
@@ -93,6 +106,7 @@ struct ContentView: View {
 
                 Text("\(Int(fontSize)) pt")
                     .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(primaryText)
                     .frame(width: 48, alignment: .leading)
             }
 
@@ -117,8 +131,52 @@ struct ContentView: View {
         MarkdownHTMLRenderer.renderDocument(
             markdown: document.rawMarkdown,
             fontFamily: effectiveFontFamily,
-            baseFontSize: fontSize
+            baseFontSize: fontSize,
+            appearanceMode: selectedAppearanceMode
         )
+    }
+
+    private var selectedAppearanceMode: AppAppearanceMode {
+        AppAppearanceMode(rawValue: appearanceModeRawValue) ?? .system
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        switch selectedAppearanceMode {
+        case .system:
+            return colorScheme
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        }
+    }
+
+    private var windowBackground: Color {
+        BrandChrome.windowBackground(for: resolvedColorScheme)
+    }
+
+    private var chromeBackground: Color {
+        BrandChrome.chromeBackground(for: resolvedColorScheme)
+    }
+
+    private var chromeAccentBackground: Color {
+        BrandChrome.chromeAccentBackground(for: resolvedColorScheme)
+    }
+
+    private var dividerColor: Color {
+        BrandChrome.divider(for: resolvedColorScheme)
+    }
+
+    private var primaryText: Color {
+        BrandChrome.primaryText(for: resolvedColorScheme)
+    }
+
+    private var secondaryText: Color {
+        BrandChrome.secondaryText(for: resolvedColorScheme)
+    }
+
+    private var mutedText: Color {
+        BrandChrome.mutedText(for: resolvedColorScheme)
     }
 
     private var effectiveFontFamily: String {

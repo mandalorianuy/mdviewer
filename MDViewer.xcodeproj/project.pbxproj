@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		014481C4A0C17851A6409723 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78DC7D09B553DBD4DCF619DA /* ContentView.swift */; };
+		2A128F245E7E290AE6B96067 /* AppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 428F350C0D317BC95A7D2235 /* AppAppearance.swift */; };
 		2BD1378DD298D1C8B8DCCB89 /* MarkdownAssociationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26FDE8F95DA29F285B7C59ED /* MarkdownAssociationService.swift */; };
 		2FD8E4DDE51D67D71E1AC1C9 /* MarkdownDocument.icns in Resources */ = {isa = PBXBuildFile; fileRef = B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */; };
 		3B948E235DD49E408158FE74 /* AppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D62660C18F1C5F467B0B10 /* AppVersion.swift */; };
@@ -30,6 +31,7 @@
 		26FDE8F95DA29F285B7C59ED /* MarkdownAssociationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownAssociationService.swift; sourceTree = "<group>"; };
 		279CCEA66DC752F52D02DCC0 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		2D62B3197719B6F8599FD7DB /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		428F350C0D317BC95A7D2235 /* AppAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAppearance.swift; sourceTree = "<group>"; };
 		4F5B0026D92DA0C9E684C12C /* PDFExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFExporter.swift; sourceTree = "<group>"; };
 		5A4384AD9A6BFFD17A81F01C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		78DC7D09B553DBD4DCF619DA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -84,6 +86,7 @@
 		BDB9A2515B53FE2F777EFA50 /* MDViewer */ = {
 			isa = PBXGroup;
 			children = (
+				428F350C0D317BC95A7D2235 /* AppAppearance.swift */,
 				1006810AD9443534FDE7C690 /* AppPreferences.swift */,
 				279CCEA66DC752F52D02DCC0 /* AppState.swift */,
 				B9D62660C18F1C5F467B0B10 /* AppVersion.swift */,
@@ -178,6 +181,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2A128F245E7E290AE6B96067 /* AppAppearance.swift in Sources */,
 				63E4BA87628A92DC0F3C23F4 /* AppPreferences.swift in Sources */,
 				8E6924440BD348F411D29F11 /* AppState.swift in Sources */,
 				3B948E235DD49E408158FE74 /* AppVersion.swift in Sources */,
@@ -233,7 +237,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = NXJ8VR67NC;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -249,7 +253,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = macos/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.facundo.mdviewer;
@@ -312,7 +316,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = NXJ8VR67NC;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -334,7 +338,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = macos/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

@@ -5,15 +5,41 @@ struct SettingsView: View {
     @AppStorage(AppPreferenceKey.selectedFontFamily) private var selectedFontFamily = AppPreferenceDefault.fontFamily
     @AppStorage(AppPreferenceKey.fontSize) private var fontSize = AppPreferenceDefault.fontSize
     @AppStorage(AppPreferenceKey.preferTabbedWindows) private var preferTabbedWindows = AppPreferenceDefault.preferTabbedWindows
+    @AppStorage(AppPreferenceKey.appearanceMode) private var appearanceModeRawValue = AppPreferenceDefault.appearanceMode
 
     @State private var isUpdatingAssociation = false
     @State private var associationStatus = "Consultando asociacion actual..."
     @State private var associationIsCurrent = false
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
+    private var selectedAppearanceMode: Binding<AppAppearanceMode> {
+        Binding(
+            get: { AppAppearanceMode(rawValue: appearanceModeRawValue) ?? .system },
+            set: { newValue in
+                appearanceModeRawValue = newValue.rawValue
+                Task { @MainActor in
+                    AppAppearanceController.apply(newValue)
+                }
+            }
+        )
+    }
 
     var body: some View {
         Form {
+            Section("Apariencia") {
+                Picker("Tema", selection: selectedAppearanceMode) {
+                    ForEach(AppAppearanceMode.allCases) { appearanceMode in
+                        Text(appearanceMode.title).tag(appearanceMode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 300)
+
+                Text("System sigue la apariencia de macOS. Light y Dark fuerzan el estilo tanto en la app como en el documento renderizado.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Lectura") {
                 Picker("Fuente por defecto", selection: $selectedFontFamily) {
                     ForEach(availableFonts, id: \.self) { family in
