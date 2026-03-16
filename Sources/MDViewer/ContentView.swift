@@ -13,17 +13,6 @@ struct ContentView: View {
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
     private let appVersion = AppVersion.current
-    private var selectedAppearanceModeBinding: Binding<AppAppearanceMode> {
-        Binding(
-            get: { selectedAppearanceMode },
-            set: { newValue in
-                appearanceModeRawValue = newValue.rawValue
-                Task { @MainActor in
-                    AppAppearanceController.apply(newValue)
-                }
-            }
-        )
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -123,18 +112,13 @@ struct ContentView: View {
 
             Spacer()
 
-            Menu {
-                Picker("Tema", selection: selectedAppearanceModeBinding) {
-                    ForEach(AppAppearanceMode.allCases) { appearanceMode in
-                        Label(appearanceMode.title, systemImage: appearanceMode.symbolName)
-                            .tag(appearanceMode)
-                    }
-                }
+            Button {
+                cycleAppearanceMode()
             } label: {
                 Image(systemName: selectedAppearanceMode.symbolName)
             }
-            .menuStyle(.borderlessButton)
-            .help("Cambiar tema: System / Light / Dark")
+            .buttonStyle(.borderless)
+            .help("Tema actual: \(selectedAppearanceMode.title). Click para cambiar a \(selectedAppearanceMode.next.title).")
 
             Button {
                 openSettings()
@@ -162,6 +146,13 @@ struct ContentView: View {
 
     private var selectedAppearanceMode: AppAppearanceMode {
         AppAppearanceMode(rawValue: appearanceModeRawValue) ?? .system
+    }
+
+    @MainActor
+    private func cycleAppearanceMode() {
+        let nextMode = selectedAppearanceMode.next
+        appearanceModeRawValue = nextMode.rawValue
+        AppAppearanceController.apply(nextMode)
     }
 
     private var resolvedColorScheme: ColorScheme {

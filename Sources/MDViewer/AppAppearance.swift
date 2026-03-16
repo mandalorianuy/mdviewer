@@ -30,6 +30,17 @@ enum AppAppearanceMode: String, CaseIterable, Identifiable {
         }
     }
 
+    var next: AppAppearanceMode {
+        switch self {
+        case .system:
+            return .light
+        case .light:
+            return .dark
+        case .dark:
+            return .system
+        }
+    }
+
     var preferredColorScheme: ColorScheme? {
         switch self {
         case .system:
