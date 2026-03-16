@@ -4,10 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/MDViewer.app"
-VERSION="$(
-  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$ROOT_DIR/macos/Info.plist"
-)"
-DMG_PATH="$DIST_DIR/MDViewer-${VERSION}.dmg"
 AUTH_KEY_PATH="${AUTH_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_J3JJ2WXQ5S.p8}"
 AUTH_KEY_ID="${AUTH_KEY_ID:-J3JJ2WXQ5S}"
 AUTH_ISSUER_ID="${AUTH_ISSUER_ID:-c9f7eed4-57f2-4c22-8efa-8e2cf829a79e}"
@@ -34,6 +30,11 @@ printf "==> Building signed app bundle for Developer ID\n"
 ENABLE_HARDENED_RUNTIME=1 \
 CODESIGN_IDENTITY="$CODESIGN_IDENTITY" \
 "$ROOT_DIR/scripts/create-dmg.sh"
+
+VERSION="$(
+  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist"
+)"
+DMG_PATH="$DIST_DIR/MDViewer-${VERSION}.dmg"
 
 printf "==> Signing DMG\n"
 codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$DMG_PATH"

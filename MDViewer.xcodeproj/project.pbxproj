@@ -10,6 +10,7 @@
 		014481C4A0C17851A6409723 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78DC7D09B553DBD4DCF619DA /* ContentView.swift */; };
 		2BD1378DD298D1C8B8DCCB89 /* MarkdownAssociationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26FDE8F95DA29F285B7C59ED /* MarkdownAssociationService.swift */; };
 		2FD8E4DDE51D67D71E1AC1C9 /* MarkdownDocument.icns in Resources */ = {isa = PBXBuildFile; fileRef = B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */; };
+		3B948E235DD49E408158FE74 /* AppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D62660C18F1C5F467B0B10 /* AppVersion.swift */; };
 		427D880BBE37004B9607D1EE /* MDViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */; };
 		4985E46D9A2F890B4EBB8E1D /* MarkdownWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017AEC17777962CB26EED41A /* MarkdownWebView.swift */; };
 		4B101537F537EC72CBB11B5F /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D62B3197719B6F8599FD7DB /* SettingsView.swift */; };
@@ -35,6 +36,7 @@
 		8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownHTMLRenderer.swift; sourceTree = "<group>"; };
 		B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = MarkdownDocument.icns; sourceTree = "<group>"; };
 		B2B94D6ECFF439ABF8F84105 /* MDViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MDViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B9D62660C18F1C5F467B0B10 /* AppVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersion.swift; sourceTree = "<group>"; };
 		D37E2BDCE60464DD977A91FF /* WindowTabbingConfigurator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowTabbingConfigurator.swift; sourceTree = "<group>"; };
 		E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MDViewerApp.swift; sourceTree = "<group>"; };
 		F0997C6166994981F23F1685 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
@@ -84,6 +86,7 @@
 			children = (
 				1006810AD9443534FDE7C690 /* AppPreferences.swift */,
 				279CCEA66DC752F52D02DCC0 /* AppState.swift */,
+				B9D62660C18F1C5F467B0B10 /* AppVersion.swift */,
 				78DC7D09B553DBD4DCF619DA /* ContentView.swift */,
 				26FDE8F95DA29F285B7C59ED /* MarkdownAssociationService.swift */,
 				8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */,
@@ -177,6 +180,7 @@
 			files = (
 				63E4BA87628A92DC0F3C23F4 /* AppPreferences.swift in Sources */,
 				8E6924440BD348F411D29F11 /* AppState.swift in Sources */,
+				3B948E235DD49E408158FE74 /* AppVersion.swift in Sources */,
 				014481C4A0C17851A6409723 /* ContentView.swift in Sources */,
 				427D880BBE37004B9607D1EE /* MDViewerApp.swift in Sources */,
 				2BD1378DD298D1C8B8DCCB89 /* MarkdownAssociationService.swift in Sources */,
@@ -229,7 +233,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = NXJ8VR67NC;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -308,7 +312,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = NXJ8VR67NC;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

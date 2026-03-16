@@ -254,14 +254,59 @@ img {
     }
 
     private static func renderBody(_ markdown: String) -> String {
+        let preparedMarkdown = prepareMarkdown(markdown)
+
         do {
-            let down = Down(markdownString: markdown)
+            let down = Down(markdownString: preparedMarkdown)
             let html = try down.toHTML()
             return html.replacingOccurrences(of: "<table>", with: "<div class=\"table-wrap\"><table>")
                 .replacingOccurrences(of: "</table>", with: "</table></div>")
         } catch {
-            return "<pre><code>\(htmlEscaped(markdown))</code></pre>"
+            return "<pre><code>\(htmlEscaped(preparedMarkdown))</code></pre>"
         }
+    }
+
+    private static func prepareMarkdown(_ markdown: String) -> String {
+        let normalizedLineEndings = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        return repairCollapsedTables(in: normalizedLineEndings)
+    }
+
+    private static func repairCollapsedTables(in markdown: String) -> String {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var repairedLines: [String] = []
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let looksLikeCollapsedTable = trimmed.hasPrefix("|") && trimmed.filter(\.isPipeCharacter).count >= 8 && trimmed.contains("||")
+
+            guard looksLikeCollapsedTable else {
+                repairedLines.append(line)
+                continue
+            }
+
+            var expandedLine = line
+                .replacingOccurrences(
+                    of: #"\|\s*\|(?=[:\-]{3,}\s*\|)"#,
+                    with: "|\n|",
+                    options: .regularExpression
+                )
+                .replacingOccurrences(
+                    of: #"\|\s*\|(?=(?:\d+|[`A-Za-z/\[_*]))"#,
+                    with: "|\n|",
+                    options: .regularExpression
+                )
+
+            expandedLine = expandedLine.replacingOccurrences(
+                of: #"\n{3,}"#,
+                with: "\n\n",
+                options: .regularExpression
+            )
+
+            repairedLines.append(contentsOf: expandedLine.split(separator: "\n", omittingEmptySubsequences: false).map(String.init))
+        }
+
+        return repairedLines.joined(separator: "\n")
     }
 
     private static func htmlEscaped(_ input: String) -> String {
@@ -277,5 +322,11 @@ img {
         input
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+}
+
+private extension Character {
+    var isPipeCharacter: Bool {
+        self == "|"
     }
 }

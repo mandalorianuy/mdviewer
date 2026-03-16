@@ -6,13 +6,14 @@ DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/MDViewer.app"
 STAGING_DIR="$ROOT_DIR/.build/dmg-staging"
 VOLUME_NAME="MDViewer"
-VERSION="$(
-  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$ROOT_DIR/macos/Info.plist"
-)"
-DMG_PATH="$DIST_DIR/MDViewer-${VERSION}.dmg"
 
 printf "==> Packaging app bundle\n"
 "$ROOT_DIR/scripts/package-app.sh"
+
+VERSION="$(
+  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist"
+)"
+DMG_PATH="$DIST_DIR/MDViewer-${VERSION}.dmg"
 
 printf "==> Preparing DMG staging directory\n"
 rm -rf "$STAGING_DIR"

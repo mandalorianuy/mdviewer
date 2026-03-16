@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var errorMessage: String?
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
+    private let appVersion = AppVersion.current
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,12 +34,29 @@ struct ContentView: View {
                     .padding(.vertical, 8)
                     .background(Color(NSColor.windowBackgroundColor))
             }
+
+            footerBar
         }
         .background(WindowTabbingConfigurator(preferTabbedWindows: preferTabbedWindows))
         .onAppear {
             if !availableFonts.contains(selectedFontFamily) {
                 selectedFontFamily = effectiveDefaultFont
             }
+        }
+    }
+
+    private var footerBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack {
+                Spacer()
+                Text(appVersion.displayString)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+            }
+            .background(Color(NSColor.windowBackgroundColor))
         }
     }
 
