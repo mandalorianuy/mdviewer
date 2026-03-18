@@ -9,10 +9,19 @@ struct ContentView: View {
     @AppStorage(AppPreferenceKey.fontSize) private var fontSize = AppPreferenceDefault.fontSize
     @AppStorage(AppPreferenceKey.preferTabbedWindows) private var preferTabbedWindows = AppPreferenceDefault.preferTabbedWindows
     @AppStorage(AppPreferenceKey.appearanceMode) private var appearanceModeRawValue = AppPreferenceDefault.appearanceMode
+    @FocusState private var isSearchFieldFocused: Bool
     @State private var errorMessage: String?
+    @State private var renderedHTML = ""
+    @State private var isRenderingDocument = false
+    @State private var isSearchPresented = false
+    @State private var searchQuery = ""
+    @State private var searchRequest = DocumentSearchRequest.idle
+    @State private var searchResult = DocumentSearchResult.empty
+    @State private var searchToken = 0
     @State private var themeIconScale: CGFloat = 1.0
     @State private var themeIconRotation: Double = 0
     @State private var themeIconGlowOpacity = 0.0
+    @State private var searchDebounceTask: Task<Void, Never>?
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
     private let appVersion = AppVersion.current
@@ -28,8 +37,31 @@ struct ContentView: View {
                 .fill(dividerColor)
                 .frame(height: 1)
 
-            MarkdownWebView(html: renderedHTML)
-                .background(windowBackground)
+            if isSearchPresented {
+                searchBar
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(chromeAccentBackground)
+
+                Rectangle()
+                    .fill(dividerColor)
+                    .frame(height: 1)
+            }
+
+            Group {
+                if renderedHTML.isEmpty && isRenderingDocument {
+                    loadingState
+                } else {
+                    MarkdownWebView(
+                        html: renderedHTML,
+                        searchRequest: searchRequest,
+                        onSearchResult: { result in
+                            searchResult = result
+                        }
+                    )
+                }
+            }
+            .background(windowBackground)
 
             if let error = errorMessage {
                 Rectangle()
@@ -50,11 +82,28 @@ struct ContentView: View {
         .tint(controlAccent)
         .background(WindowTabbingConfigurator(preferTabbedWindows: preferTabbedWindows))
         .background(windowBackground)
+        .task(id: currentRenderRequest) {
+            await renderDocument(for: currentRenderRequest)
+        }
         .onAppear {
             if !availableFonts.contains(selectedFontFamily) {
                 selectedFontFamily = effectiveDefaultFont
             }
         }
+        .onChange(of: searchQuery) { _ in
+            scheduleSearchUpdate()
+        }
+        .onDisappear {
+            searchDebounceTask?.cancel()
+        }
+        .onExitCommand {
+            if isSearchPresented {
+                dismissSearch()
+            }
+        }
+        .focusedSceneValue(\.showFindAction, SearchCommandAction(handler: presentSearch))
+        .focusedSceneValue(\.findNextAction, SearchCommandAction(handler: findNextMatch))
+        .focusedSceneValue(\.findPreviousAction, SearchCommandAction(handler: findPreviousMatch))
     }
 
     private var footerBar: some View {
@@ -198,13 +247,93 @@ struct ContentView: View {
         }
     }
 
-    private var renderedHTML: String {
-        MarkdownHTMLRenderer.renderDocument(
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(controlAccent)
+
+            TextField("Buscar en el documento", text: $searchQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(primaryText)
+                .focused($isSearchFieldFocused)
+                .onSubmit {
+                    findNextMatch()
+                }
+
+            if !searchQuery.isEmpty {
+                Text(searchStatusText)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(mutedText)
+                    .monospacedDigit()
+            }
+
+            Button {
+                findPreviousMatch()
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.borderless)
+            .disabled(searchQuery.isEmpty || searchResult.totalMatches == 0)
+
+            Button {
+                findNextMatch()
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.borderless)
+            .disabled(searchQuery.isEmpty || searchResult.totalMatches == 0)
+
+            Button {
+                dismissSearch()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(secondaryActionBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(secondaryActionBorder, lineWidth: 1)
+        )
+    }
+
+    private var loadingState: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.regular)
+            Text("Renderizando documento…")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(mutedText)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var currentRenderRequest: MarkdownRenderRequest {
+        MarkdownRenderRequest(
             markdown: document.rawMarkdown,
             fontFamily: effectiveFontFamily,
             baseFontSize: fontSize,
             appearanceMode: selectedAppearanceMode
         )
+    }
+
+    private var searchStatusText: String {
+        guard !searchQuery.isEmpty else {
+            return ""
+        }
+
+        guard searchResult.totalMatches > 0 else {
+            return "0 resultados"
+        }
+
+        return "\(searchResult.currentIndex) / \(searchResult.totalMatches)"
     }
 
     private var selectedAppearanceMode: AppAppearanceMode {
@@ -236,6 +365,83 @@ struct ContentView: View {
                 themeIconGlowOpacity = 0.0
             }
         }
+    }
+
+    @MainActor
+    private func presentSearch() {
+        isSearchPresented = true
+        searchResult = DocumentSearchResult.empty
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            isSearchFieldFocused = true
+        }
+    }
+
+    @MainActor
+    private func dismissSearch() {
+        searchDebounceTask?.cancel()
+        isSearchPresented = false
+        isSearchFieldFocused = false
+        searchQuery = ""
+        issueSearch(action: .clear)
+    }
+
+    @MainActor
+    private func findNextMatch() {
+        guard !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            presentSearch()
+            return
+        }
+
+        if !isSearchPresented {
+            presentSearch()
+        }
+
+        issueSearch(action: .next)
+    }
+
+    @MainActor
+    private func findPreviousMatch() {
+        guard !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            presentSearch()
+            return
+        }
+
+        if !isSearchPresented {
+            presentSearch()
+        }
+
+        issueSearch(action: .previous)
+    }
+
+    @MainActor
+    private func scheduleSearchUpdate() {
+        guard isSearchPresented else { return }
+
+        searchDebounceTask?.cancel()
+        let currentQuery = searchQuery
+
+        searchDebounceTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            guard !Task.isCancelled else { return }
+
+            if currentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                issueSearch(action: .clear)
+            } else {
+                issueSearch(action: .update)
+            }
+        }
+    }
+
+    @MainActor
+    private func issueSearch(action: DocumentSearchRequest.Action) {
+        searchToken += 1
+        searchRequest = DocumentSearchRequest(
+            query: searchQuery,
+            action: action,
+            token: searchToken
+        )
     }
 
     private var resolvedColorScheme: ColorScheme {
@@ -350,11 +556,17 @@ struct ContentView: View {
             return
         }
 
-        do {
-            try PDFExporter.export(html: renderedHTML, outputURL: outputURL)
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        let exportRequest = currentRenderRequest
+
+        Task { @MainActor in
+            let html = await MarkdownRenderPipeline.shared.render(exportRequest)
+
+            do {
+                try PDFExporter.export(html: html, outputURL: outputURL)
+                errorMessage = nil
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -378,5 +590,20 @@ struct ContentView: View {
     @MainActor
     private func openSettings() {
         SettingsWindowController.shared.show()
+    }
+
+    @MainActor
+    private func renderDocument(for request: MarkdownRenderRequest) async {
+        isRenderingDocument = true
+        let html = await MarkdownRenderPipeline.shared.render(request)
+        guard !Task.isCancelled else { return }
+
+        renderedHTML = html
+        isRenderingDocument = false
+
+        if isSearchPresented {
+            let action: DocumentSearchRequest.Action = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .clear : .update
+            issueSearch(action: action)
+        }
     }
 }

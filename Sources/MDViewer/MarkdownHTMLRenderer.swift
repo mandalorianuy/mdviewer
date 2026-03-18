@@ -319,6 +319,18 @@ mark {
   border-radius: 4px;
   padding: 0.05em 0.2em;
 }
+.mdviewer-find-hit {
+  background: color-mix(in oklab, var(--accent-yellow) 18%, transparent);
+  color: inherit;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent-yellow) 28%, transparent);
+}
+.mdviewer-find-hit.is-active {
+  background: color-mix(in oklab, var(--accent-teal) 18%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklab, var(--accent-teal) 46%, transparent),
+    0 0 0 2px color-mix(in oklab, var(--accent-teal) 14%, transparent);
+}
 kbd {
   font-family: var(--font-mono);
   font-size: 0.9em;
@@ -359,6 +371,157 @@ img {
 }
 </style>
 <script>
+window.__mdviewerSearchController = (() => {
+  const hitClass = "mdviewer-find-hit";
+  const activeClass = "is-active";
+  let hits = [];
+  let activeIndex = -1;
+  let lastQuery = "";
+
+  function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+  }
+
+  function clearHighlights() {
+    const existingHits = Array.from(document.querySelectorAll(`span.${hitClass}`));
+    for (const hit of existingHits) {
+      const parent = hit.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(document.createTextNode(hit.textContent || ""), hit);
+      parent.normalize();
+    }
+    hits = [];
+    activeIndex = -1;
+  }
+
+  function collectTextNodes() {
+    const article = document.querySelector(".article");
+    if (!article) return [];
+
+    const walker = document.createTreeWalker(
+      article,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          if (["SCRIPT", "STYLE", "NOSCRIPT"].includes(parent.tagName)) return NodeFilter.FILTER_REJECT;
+          if (parent.closest(`.${hitClass}`)) return NodeFilter.FILTER_REJECT;
+          if (!(node.nodeValue || "").trim()) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+
+    const nodes = [];
+    while (walker.nextNode()) {
+      nodes.push(walker.currentNode);
+    }
+    return nodes;
+  }
+
+  function setActive(index) {
+    if (hits.length === 0) {
+      activeIndex = -1;
+      return { currentIndex: 0, totalMatches: 0 };
+    }
+
+    activeIndex = ((index % hits.length) + hits.length) % hits.length;
+    hits.forEach((hit, hitIndex) => {
+      hit.classList.toggle(activeClass, hitIndex === activeIndex);
+    });
+
+    hits[activeIndex].scrollIntoView({
+      block: "center",
+      inline: "nearest",
+      behavior: "smooth"
+    });
+
+    return {
+      currentIndex: activeIndex + 1,
+      totalMatches: hits.length
+    };
+  }
+
+  function highlight(query) {
+    clearHighlights();
+
+    if (!query) {
+      lastQuery = "";
+      return { currentIndex: 0, totalMatches: 0 };
+    }
+
+    const regex = new RegExp(escapeRegExp(query), "gi");
+    const textNodes = collectTextNodes();
+
+    for (const node of textNodes) {
+      const text = node.nodeValue || "";
+      regex.lastIndex = 0;
+      if (!regex.test(text)) continue;
+
+      regex.lastIndex = 0;
+      const fragment = document.createDocumentFragment();
+      let lastIndex = 0;
+      let match;
+
+      while ((match = regex.exec(text)) !== null) {
+        if (match.index > lastIndex) {
+          fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+        }
+
+        const span = document.createElement("span");
+        span.className = hitClass;
+        span.textContent = match[0];
+        fragment.appendChild(span);
+        hits.push(span);
+        lastIndex = match.index + match[0].length;
+      }
+
+      if (lastIndex < text.length) {
+        fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+      }
+
+      node.parentNode.replaceChild(fragment, node);
+    }
+
+    lastQuery = query;
+    return setActive(0);
+  }
+
+  function move(direction) {
+    if (hits.length === 0) {
+      return { currentIndex: 0, totalMatches: 0 };
+    }
+
+    const nextIndex = activeIndex < 0
+      ? 0
+      : activeIndex + direction;
+    return setActive(nextIndex);
+  }
+
+  function search(query, action) {
+    const normalizedQuery = query.trim();
+
+    if (action === "clear" || normalizedQuery.length === 0) {
+      clearHighlights();
+      lastQuery = "";
+      return { currentIndex: 0, totalMatches: 0 };
+    }
+
+    if (action === "update" || normalizedQuery !== lastQuery) {
+      return highlight(normalizedQuery);
+    }
+
+    if (action === "previous") {
+      return move(-1);
+    }
+
+    return move(1);
+  }
+
+  return { search };
+})();
+
 function setupResizableTables() {
   const tables = Array.from(document.querySelectorAll('.table-wrap table'));
 

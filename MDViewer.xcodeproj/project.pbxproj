@@ -18,12 +18,14 @@
 		600AA2E5C37AB864C1397489 /* WindowTabbingConfigurator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D37E2BDCE60464DD977A91FF /* WindowTabbingConfigurator.swift */; };
 		63E4BA87628A92DC0F3C23F4 /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1006810AD9443534FDE7C690 /* AppPreferences.swift */; };
 		70D7AEF2D01DFE1F3B8D1CFD /* Down in Frameworks */ = {isa = PBXBuildFile; productRef = 119024A542D61E4817B0B119 /* Down */; };
+		811D3A634D91EED4DDE9B28F /* MarkdownRenderPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF3265B5739E7D91BEC4898 /* MarkdownRenderPipeline.swift */; };
 		8E6924440BD348F411D29F11 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 279CCEA66DC752F52D02DCC0 /* AppState.swift */; };
 		A86A0CE6EB034537704C2C13 /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6115943882347275D9E36A8B /* SettingsWindowController.swift */; };
 		B22D22D633A1648599489E32 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = F0997C6166994981F23F1685 /* AppIcon.icns */; };
 		B4AE68DB4DA0E7BEE3972E6A /* PDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F5B0026D92DA0C9E684C12C /* PDFExporter.swift */; };
 		BE4472B2565F6A7B5C186134 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5A4384AD9A6BFFD17A81F01C /* Assets.xcassets */; };
 		DD3151D25AD5640BB7EA0C1F /* MarkdownHTMLRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */; };
+		E9F20A535E77D7CB85E36B91 /* DocumentSearchCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D96B0C294F9A68758098429A /* DocumentSearchCommands.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -38,10 +40,12 @@
 		6115943882347275D9E36A8B /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
 		78DC7D09B553DBD4DCF619DA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownHTMLRenderer.swift; sourceTree = "<group>"; };
+		9BF3265B5739E7D91BEC4898 /* MarkdownRenderPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRenderPipeline.swift; sourceTree = "<group>"; };
 		B009EDCFB5056211423EC7EA /* MarkdownDocument.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = MarkdownDocument.icns; sourceTree = "<group>"; };
 		B2B94D6ECFF439ABF8F84105 /* MDViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MDViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B9D62660C18F1C5F467B0B10 /* AppVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersion.swift; sourceTree = "<group>"; };
 		D37E2BDCE60464DD977A91FF /* WindowTabbingConfigurator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowTabbingConfigurator.swift; sourceTree = "<group>"; };
+		D96B0C294F9A68758098429A /* DocumentSearchCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentSearchCommands.swift; sourceTree = "<group>"; };
 		E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MDViewerApp.swift; sourceTree = "<group>"; };
 		F0997C6166994981F23F1685 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -93,8 +97,10 @@
 				279CCEA66DC752F52D02DCC0 /* AppState.swift */,
 				B9D62660C18F1C5F467B0B10 /* AppVersion.swift */,
 				78DC7D09B553DBD4DCF619DA /* ContentView.swift */,
+				D96B0C294F9A68758098429A /* DocumentSearchCommands.swift */,
 				26FDE8F95DA29F285B7C59ED /* MarkdownAssociationService.swift */,
 				8491DE44F3239C3570A4A7CB /* MarkdownHTMLRenderer.swift */,
+				9BF3265B5739E7D91BEC4898 /* MarkdownRenderPipeline.swift */,
 				017AEC17777962CB26EED41A /* MarkdownWebView.swift */,
 				E0CB506A3B9A7A7CD6C50708 /* MDViewerApp.swift */,
 				4F5B0026D92DA0C9E684C12C /* PDFExporter.swift */,
@@ -189,9 +195,11 @@
 				8E6924440BD348F411D29F11 /* AppState.swift in Sources */,
 				3B948E235DD49E408158FE74 /* AppVersion.swift in Sources */,
 				014481C4A0C17851A6409723 /* ContentView.swift in Sources */,
+				E9F20A535E77D7CB85E36B91 /* DocumentSearchCommands.swift in Sources */,
 				427D880BBE37004B9607D1EE /* MDViewerApp.swift in Sources */,
 				2BD1378DD298D1C8B8DCCB89 /* MarkdownAssociationService.swift in Sources */,
 				DD3151D25AD5640BB7EA0C1F /* MarkdownHTMLRenderer.swift in Sources */,
+				811D3A634D91EED4DDE9B28F /* MarkdownRenderPipeline.swift in Sources */,
 				4985E46D9A2F890B4EBB8E1D /* MarkdownWebView.swift in Sources */,
 				B4AE68DB4DA0E7BEE3972E6A /* PDFExporter.swift in Sources */,
 				4B101537F537EC72CBB11B5F /* SettingsView.swift in Sources */,
@@ -241,7 +249,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = NXJ8VR67NC;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -257,7 +265,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = macos/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 0.1.11;
+				MARKETING_VERSION = 0.1.12;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.facundo.mdviewer;
@@ -320,7 +328,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = NXJ8VR67NC;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -342,7 +350,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = macos/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 0.1.11;
+				MARKETING_VERSION = 0.1.12;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

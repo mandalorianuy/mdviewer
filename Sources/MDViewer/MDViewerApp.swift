@@ -9,6 +9,9 @@ struct MDViewerApp: App {
             ContentView(document: file.document)
                 .frame(minWidth: 720, minHeight: 520)
         }
+        .commands {
+            DocumentSearchCommands()
+        }
 
         Settings {
             SettingsView()
