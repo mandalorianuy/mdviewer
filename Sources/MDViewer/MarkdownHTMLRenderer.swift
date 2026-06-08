@@ -3,13 +3,13 @@ import Foundation
 
 enum MarkdownHTMLRenderer {
     static func renderDocument(markdown: String, fontFamily: String, baseFontSize: Double, appearanceMode: AppAppearanceMode) -> String {
-        let body = renderBody(markdown)
+        let (preparedMarkdown, mermaidBlocks) = extractMermaidBlocks(from: markdown)
+        let body = renderBody(preparedMarkdown, mermaidBlocks: mermaidBlocks)
         let safeFontFamily = cssEscaped(fontFamily)
         let bodySize = max(12, min(baseFontSize, 28))
         let h1Size = bodySize * 2.0
         let h2Size = bodySize * 1.6
         let h3Size = bodySize * 1.3
-
         return """
 <!doctype html>
 <html lang=\"es\" data-theme=\"\(appearanceMode.rawValue)\">
@@ -369,7 +369,31 @@ img {
     border-radius: 10px;
   }
 }
+pre.mermaid {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow-x: auto;
+}
+pre.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
 </style>
+<script type=\"module\">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  window.__mermaid = mermaid;
+  const dataTheme = document.documentElement.getAttribute('data-theme');
+  let mermaidTheme = 'default';
+  if (dataTheme === 'dark') {
+    mermaidTheme = 'dark';
+  } else if (dataTheme === 'system') {
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      mermaidTheme = 'dark';
+    }
+  }
+  mermaid.initialize({ startOnLoad: false, theme: mermaidTheme, securityLevel: 'strict' });
+</script>
 <script>
 window.__mdviewerSearchController = (() => {
   const hitClass = "mdviewer-find-hit";
@@ -626,7 +650,12 @@ function fitTableToWrapper(table, wrapper, columns) {
   table.style.width = `${Math.max(wrapperWidth, totalWidth)}px`;
 }
 
-window.addEventListener('load', setupResizableTables);
+window.addEventListener('load', () => {
+  setupResizableTables();
+  if (window.__mermaid) {
+    window.__mermaid.run({ querySelector: '.mermaid' });
+  }
+});
 </script>
 </head>
 <body>
@@ -804,14 +833,16 @@ html[data-theme="system"] {
 """
     }
 
-    private static func renderBody(_ markdown: String) -> String {
+    private static func renderBody(_ markdown: String, mermaidBlocks: [String]) -> String {
         let preparedMarkdown = prepareMarkdown(markdown)
 
         do {
             let down = Down(markdownString: preparedMarkdown)
-            let html = try down.toHTML(.unsafe)
-            return html.replacingOccurrences(of: "<table>", with: "<div class=\"table-wrap\"><table>")
+            var html = try down.toHTML(.unsafe)
+            html = html.replacingOccurrences(of: "<table>", with: "<div class=\"table-wrap\"><table>")
                 .replacingOccurrences(of: "</table>", with: "</table></div>")
+            html = injectMermaidBlocks(html: html, blocks: mermaidBlocks)
+            return html
         } catch {
             return "<pre><code>\(htmlEscaped(preparedMarkdown))</code></pre>"
         }
@@ -900,6 +931,54 @@ html[data-theme="system"] {
         input
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func extractMermaidBlocks(from markdown: String) -> (markdown: String, blocks: [String]) {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var output: [String] = []
+        var blocks: [String] = []
+        var index = 0
+
+        while index < lines.count {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            guard let fence = markdownFenceMarker(in: trimmed),
+                  trimmed.dropFirst(fence.count).trimmingCharacters(in: .whitespaces).lowercased() == "mermaid" else {
+                output.append(lines[index])
+                index += 1
+                continue
+            }
+
+            var contentLines: [String] = []
+            index += 1
+            while index < lines.count {
+                let line = lines[index]
+                if line.trimmingCharacters(in: .whitespaces) == fence {
+                    index += 1
+                    break
+                }
+                contentLines.append(line)
+                index += 1
+            }
+
+            let content = contentLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            blocks.append(content)
+            output.append("")
+            output.append("<!-- MERMAID_BLOCK_\(blocks.count - 1) -->")
+            output.append("")
+        }
+
+        return (output.joined(separator: "\n"), blocks)
+    }
+
+    private static func injectMermaidBlocks(html: String, blocks: [String]) -> String {
+        var result = html
+        for (index, content) in blocks.enumerated() {
+            let placeholder = "<!-- MERMAID_BLOCK_\(index) -->"
+            let escapedContent = htmlEscaped(content)
+            let replacement = "<pre class=\"mermaid\">\(escapedContent)</pre>"
+            result = result.replacingOccurrences(of: placeholder, with: replacement)
+        }
+        return result
     }
 
     private static func convertMarkdownTablesToHTML(in markdown: String) -> String {
