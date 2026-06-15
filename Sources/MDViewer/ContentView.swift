@@ -11,7 +11,6 @@ struct ContentView: View {
     @AppStorage(AppPreferenceKey.appearanceMode) private var appearanceModeRawValue = AppPreferenceDefault.appearanceMode
     @FocusState private var isSearchFieldFocused: Bool
     @State private var errorMessage: String?
-    @State private var conversionError: String?
     @State private var isConverting = false
     @State private var renderedHTML = ""
     @State private var isRenderingDocument = false
@@ -132,7 +131,23 @@ struct ContentView: View {
 
     @ViewBuilder
     private var conversionBar: some View {
-        if let result = document.conversionResult {
+        if isConverting && document.conversionResult == nil {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Convirtiendo...")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(secondaryText)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(chromeAccentBackground)
+
+            Rectangle()
+                .fill(dividerColor)
+                .frame(height: 1)
+        } else if let result = document.conversionResult {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Image(systemName: "arrow.right.arrow.left")
@@ -675,18 +690,26 @@ struct ContentView: View {
     private func runPendingConversionIfNeeded() async {
         guard let url = document.pendingConversionURL, document.rawMarkdown.isEmpty else { return }
 
-        isConverting = true
-        conversionError = nil
+        await MainActor.run {
+            isConverting = true
+            errorMessage = nil
+        }
 
         do {
             let result = try await DocumentConversionService.shared.convert(url: url)
-            document.rawMarkdown = result.markdown
-            document.conversionResult = result
-            document.pendingConversionURL = nil
+            await MainActor.run {
+                document.rawMarkdown = result.markdown
+                document.conversionResult = result
+                document.pendingConversionURL = nil
+            }
         } catch {
-            conversionError = error.localizedDescription
+            await MainActor.run {
+                errorMessage = error.localizedDescription
+            }
         }
 
-        isConverting = false
+        await MainActor.run {
+            isConverting = false
+        }
     }
 }

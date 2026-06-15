@@ -30,7 +30,15 @@ actor DocumentConversionService {
 
     func convert(url: URL) async throws -> MarkdownConversionResult {
         logger.info("Convirtiendo archivo: \(url.lastPathComponent)")
-        return try convertSync(url: url)
+
+        guard detector.converter(for: url) != nil else {
+            logger.error("Formato no soportado para: \(url.lastPathComponent)")
+            throw ConversionError.unsupportedFormat
+        }
+
+        return try await Task.detached(priority: .userInitiated) {
+            try self.convertSync(url: url)
+        }.value
     }
 
     nonisolated func convertSync(url: URL) throws -> MarkdownConversionResult {

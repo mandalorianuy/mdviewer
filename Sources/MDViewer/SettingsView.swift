@@ -142,16 +142,30 @@ struct SettingsView: View {
     @MainActor
     private func refreshAssociationStatus() async {
         let currentURL = MarkdownAssociationService.currentDefaultApplicationURL()
+        let allTypes = MarkdownAssociationService.convertibleUTTypes
+        let mdviewerURL = Bundle.main.bundleURL
 
-        if MarkdownAssociationService.isMDViewerDefaultHandler() {
+        let associatedTypes = allTypes.filter { type in
+            guard let defaultAppURL = NSWorkspace.shared.urlForApplication(toOpen: type) else {
+                return false
+            }
+            return defaultAppURL == mdviewerURL
+        }
+
+        let isMarkdownAssociated = associatedTypes.contains(.mdviewerMarkdown)
+        let allAssociated = associatedTypes.count == allTypes.count
+
+        if allAssociated {
             associationIsCurrent = true
-            associationStatus = "MDViewer ya es la app por defecto para archivos Markdown."
+            associationStatus = "MDViewer ya es la app por defecto para Markdown y formatos convertibles."
             return
         }
 
         associationIsCurrent = false
 
-        if let currentURL {
+        if isMarkdownAssociated {
+            associationStatus = "MDViewer esta asociado a .md, pero no a todos los formatos convertibles."
+        } else if let currentURL {
             let appName = FileManager.default.displayName(atPath: currentURL.path)
             associationStatus = "La app actual para Markdown es \(appName)."
         } else {
