@@ -111,6 +111,7 @@ struct ContentView: View {
         .focusedSceneValue(\.showFindAction, SearchCommandAction(handler: presentSearch))
         .focusedSceneValue(\.findNextAction, SearchCommandAction(handler: findNextMatch))
         .focusedSceneValue(\.findPreviousAction, SearchCommandAction(handler: findPreviousMatch))
+        .focusedSceneValue(\.saveAsMarkdownAction, SearchCommandAction(handler: saveConvertedMarkdown))
     }
 
     private var footerBar: some View {
@@ -160,6 +161,14 @@ struct ContentView: View {
                         .foregroundStyle(secondaryText)
 
                     Spacer()
+
+                    Button {
+                        saveConvertedMarkdown()
+                    } label: {
+                        Text("Guardar como Markdown")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
 
                     if !result.warnings.isEmpty {
                         Button {
@@ -627,6 +636,24 @@ struct ContentView: View {
     }
 
     @MainActor
+    private func saveConvertedMarkdown() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.mdviewerMarkdown]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "Documento.md"
+
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+
+        do {
+            let data = document.rawMarkdown.data(using: .utf8) ?? Data()
+            try data.write(to: outputURL)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
     private func exportPDF() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
@@ -704,11 +731,17 @@ struct ContentView: View {
             await MainActor.run {
                 document.rawMarkdown = result.markdown
                 document.conversionResult = result
+                if let url = document.pendingConversionURL {
+                    try? FileManager.default.removeItem(at: url)
+                }
                 document.pendingConversionURL = nil
             }
         } catch {
             await MainActor.run {
                 errorMessage = error.localizedDescription
+                if let url = document.pendingConversionURL {
+                    try? FileManager.default.removeItem(at: url)
+                }
                 document.pendingConversionURL = nil
             }
         }

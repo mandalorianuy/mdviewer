@@ -57,6 +57,17 @@ final class ZIPToMarkdownConverterTests: XCTestCase {
         XCTAssertTrue(result.warnings.contains(where: { $0.contains("varios archivos soportados") }))
     }
 
+    func testZIPContainingOnlyAnotherZIPReturnsFallback() throws {
+        try createZIP(at: tempURL, entries: [
+            ("nested.zip", "PK")
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertEqual(result.sourceFormat, "ZIP")
+        XCTAssertTrue(result.markdown.contains("_El archivo ZIP no contiene formatos soportados._"))
+        XCTAssertTrue(result.warnings.contains("No se encontró un archivo convertible dentro del ZIP."))
+    }
+
     private func createZIP(at zipURL: URL, entries: [(name: String, content: String)]) throws {
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

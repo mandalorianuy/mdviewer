@@ -29,6 +29,10 @@ final class MarkdownFileDocument: ReferenceFileDocument, @unchecked Sendable {
         self.pendingConversionURL = nil
     }
 
+    convenience init() {
+        self.init(rawMarkdown: "")
+    }
+
     init(conversionResult: MarkdownConversionResult) {
         self.rawMarkdown = conversionResult.markdown
         self.conversionResult = conversionResult

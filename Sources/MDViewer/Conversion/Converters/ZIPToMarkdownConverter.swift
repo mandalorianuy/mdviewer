@@ -79,7 +79,8 @@ struct ZIPToMarkdownConverter: DocumentConverter {
 
         let files = try listFiles(at: tempDir)
         let convertibleFiles = files.filter { path in
-            DocumentConversionService.isConvertibleExtension(URL(fileURLWithPath: path).pathExtension)
+            let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+            return ext != "zip" && DocumentConversionService.isConvertibleExtension(ext)
         }
 
         guard let firstFile = convertibleFiles.first else {
