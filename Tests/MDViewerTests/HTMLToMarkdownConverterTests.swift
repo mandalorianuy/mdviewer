@@ -31,4 +31,16 @@ final class HTMLToMarkdownConverterTests: XCTestCase {
         let result = try! converter.convert(tempURL)
         XCTAssertTrue(result.markdown.contains("[Ejemplo](https://example.com)"))
     }
+
+    func testBoldAndItalicExactOutput() {
+        writeHTML("<p><strong>Bold</strong> and <em>italic</em></p>")
+        let result = try! converter.convert(tempURL)
+        XCTAssertEqual(result.markdown, "**Bold** and _italic_")
+    }
+
+    func testWarningsNotEmpty() {
+        writeHTML("<p>Hello</p>")
+        let result = try! converter.convert(tempURL)
+        XCTAssertFalse(result.warnings.isEmpty)
+    }
 }

@@ -1,5 +1,11 @@
 import Foundation
 
+// LIMITATIONS:
+// - HTML entities are not decoded.
+// - <script>, <style>, <head>, and <title> content is included without special handling.
+// - Ordered lists are rendered as bullets.
+// - Nested lists, images, tables, blockquotes, <pre>, and <code> blocks are not specially handled.
+// - Malformed HTML may produce poor output.
 struct HTMLToMarkdownConverter: DocumentConverter {
     let supportedExtensions: [String] = ["html", "htm"]
 

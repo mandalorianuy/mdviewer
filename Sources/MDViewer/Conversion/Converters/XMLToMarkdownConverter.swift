@@ -1,6 +1,9 @@
 import Foundation
 
-final class XMLToMarkdownConverter: NSObject, DocumentConverter {
+// LIMITATIONS:
+// - Mixed content (text + child elements) is simplified: text directly before
+//   a child element may be dropped. This is acceptable for the MVP.
+struct XMLToMarkdownConverter: DocumentConverter {
     let supportedExtensions: [String] = ["xml"]
 
     func convert(_ url: URL) throws -> MarkdownConversionResult {
@@ -36,13 +39,11 @@ final class XMLToMarkdownConverter: NSObject, DocumentConverter {
 }
 
 private final class XMLParserDelegateHandler: NSObject, XMLParserDelegate {
-    private var output: [String] = []
-    private var currentDepth = 0
-    private var currentElementAttributes: [String: String]?
-    private var currentText = ""
+    private var rootNodes: [XMLNode] = []
+    private var nodeStack: [XMLNode] = []
 
     var markdown: String {
-        output.joined(separator: "\n")
+        render(nodes: rootNodes, depth: 0).joined(separator: "\n")
     }
 
     func parser(_ parser: XMLParser,
@@ -50,32 +51,61 @@ private final class XMLParserDelegateHandler: NSObject, XMLParserDelegate {
                 namespaceURI: String?,
                 qualifiedName qName: String?,
                 attributes attributeDict: [String: String] = [:]) {
-        currentElementAttributes = attributeDict
-        currentText = ""
+        let node = XMLNode(name: elementName, attributes: attributeDict)
+        if let parent = nodeStack.last {
+            parent.children.append(node)
+        } else {
+            rootNodes.append(node)
+        }
+        nodeStack.append(node)
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        currentText += string
+        nodeStack.last?.text += string
+    }
+
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        if let string = String(data: CDATABlock, encoding: .utf8) {
+            nodeStack.last?.text += string
+        }
     }
 
     func parser(_ parser: XMLParser,
                 didEndElement elementName: String,
                 namespaceURI: String?,
                 qualifiedName qName: String?) {
-        let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let indent = String(repeating: "  ", count: currentDepth)
-        let attrs = currentElementAttributes?.map { "**\($0.key)**: `\($0.value)`" }.joined(separator: ", ")
+        nodeStack.removeLast()
+    }
 
-        if !trimmed.isEmpty {
-            if let attrs = attrs, !attrs.isEmpty {
-                output.append("\(indent)- **\(elementName)** (\(attrs)): \(trimmed)")
-            } else {
-                output.append("\(indent)- **\(elementName)**: \(trimmed)")
+    private func render(nodes: [XMLNode], depth: Int) -> [String] {
+        var output: [String] = []
+        for node in nodes {
+            let indent = String(repeating: "  ", count: depth)
+            let attrs = node.attributes.map { "**\($0.key)**: `\($0.value)`" }.joined(separator: ", ")
+            let trimmed = node.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            var line = "\(indent)- **\(node.name)**"
+            if !attrs.isEmpty {
+                line += " (\(attrs))"
             }
-        } else if let attrs = attrs, !attrs.isEmpty {
-            output.append("\(indent)- **\(elementName)** (\(attrs))")
+            if !trimmed.isEmpty {
+                line += ": \(trimmed)"
+            }
+            output.append(line)
+            output += render(nodes: node.children, depth: depth + 1)
         }
+        return output
+    }
+}
 
-        currentDepth += 1
+private final class XMLNode {
+    let name: String
+    let attributes: [String: String]
+    var text: String = ""
+    var children: [XMLNode] = []
+
+    init(name: String, attributes: [String: String]) {
+        self.name = name
+        self.attributes = attributes
     }
 }

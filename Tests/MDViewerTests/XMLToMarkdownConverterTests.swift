@@ -27,6 +27,26 @@ final class XMLToMarkdownConverterTests: XCTestCase {
         XCTAssertTrue(result.markdown.contains("**name**: Juan"))
     }
 
+    func testNestedXMLExactOutput() {
+        writeXML("<root><child>text</child></root>")
+        let result = try! converter.convert(tempURL)
+        XCTAssertEqual(result.markdown, "- **root**\n  - **child**: text")
+    }
+
+    func testAttributes() {
+        writeXML("<root><user id=\"42\" active=\"true\">Juan</user></root>")
+        let result = try! converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("**id**: `42`"))
+        XCTAssertTrue(result.markdown.contains("**active**: `true`"))
+        XCTAssertTrue(result.markdown.contains("**user**"))
+    }
+
+    func testCDATA() {
+        writeXML("<root><![CDATA[<unescaped> & more]]></root>")
+        let result = try! converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("<unescaped> & more"))
+    }
+
     func testInvalidXMLThrows() {
         writeXML("<root><unclosed>")
         XCTAssertThrowsError(try converter.convert(tempURL))
