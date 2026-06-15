@@ -34,7 +34,7 @@ final class DocumentConversionServiceTests: XCTestCase {
 
         do {
             _ = try await service.convert(url: url)
-            XCTFail("Deberia haber fallado")
+            XCTFail("Debería haber fallado")
         } catch {
             XCTAssertTrue(error is ConversionError)
         }
