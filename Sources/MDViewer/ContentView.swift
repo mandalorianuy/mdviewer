@@ -12,6 +12,7 @@ struct ContentView: View {
     @FocusState private var isSearchFieldFocused: Bool
     @State private var errorMessage: String?
     @State private var isConverting = false
+    @State private var isWarningsExpanded = false
     @State private var renderedHTML = ""
     @State private var isRenderingDocument = false
     @State private var isSearchPresented = false
@@ -162,7 +163,7 @@ struct ContentView: View {
 
                     if !result.warnings.isEmpty {
                         Button {
-                            // Toggle warnings panel (simplificado: cicla el primer mensaje)
+                            isWarningsExpanded.toggle()
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "exclamationmark.triangle")
@@ -176,10 +177,10 @@ struct ContentView: View {
                     }
                 }
 
-                if !result.warnings.isEmpty {
+                if isWarningsExpanded && !result.warnings.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(result.warnings, id: \.self) { warning in
-                            Text("• \(warning)")
+                        ForEach(Array(result.warnings.enumerated()), id: \.offset) { index, warning in
+                            Text("\(index + 1). \(warning)")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.orange)
                         }
@@ -299,7 +300,7 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(.borderless)
-            .help("Configuracion")
+            .help("Configuración")
 
             Button {
                 exportPDF()
@@ -676,7 +677,10 @@ struct ContentView: View {
     private func renderDocument(for request: MarkdownRenderRequest) async {
         isRenderingDocument = true
         let html = await MarkdownRenderPipeline.shared.render(request)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            isRenderingDocument = false
+            return
+        }
 
         renderedHTML = html
         isRenderingDocument = false
@@ -705,6 +709,7 @@ struct ContentView: View {
         } catch {
             await MainActor.run {
                 errorMessage = error.localizedDescription
+                document.pendingConversionURL = nil
             }
         }
 

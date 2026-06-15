@@ -36,8 +36,8 @@ actor DocumentConversionService {
             throw ConversionError.unsupportedFormat
         }
 
-        return try await Task.detached(priority: .userInitiated) {
-            try self.convertSync(url: url)
+        return try await Task.detached(priority: .userInitiated) { [self] in
+            try convertSync(url: url)
         }.value
     }
 

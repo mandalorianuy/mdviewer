@@ -6,7 +6,9 @@ extension UTType {
     static let mdviewerMarkdown = UTType(importedAs: "net.daringfireball.markdown")
 }
 
-final class MarkdownFileDocument: ReferenceFileDocument {
+/// Document model for MDViewer.
+/// - Warning: Marked `@unchecked Sendable` because `ReferenceFileDocument` requires a class. All mutations are dispatched to `@MainActor` by `ContentView`.
+final class MarkdownFileDocument: ReferenceFileDocument, @unchecked Sendable {
     static let readableContentTypes: [UTType] = [
         .mdviewerMarkdown,
         .commaSeparatedText,
@@ -58,6 +60,8 @@ final class MarkdownFileDocument: ReferenceFileDocument {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(ext)
 
+        // Known limitation: the temporary file is left for `ContentView` to convert and is not cleaned up here.
+        // Complex cleanup will be addressed later if needed.
         try fileWrapper.write(to: tempURL)
 
         rawMarkdown = ""

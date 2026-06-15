@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @AppStorage(AppPreferenceKey.selectedFontFamily) private var selectedFontFamily = AppPreferenceDefault.fontFamily
@@ -8,8 +9,9 @@ struct SettingsView: View {
     @AppStorage(AppPreferenceKey.appearanceMode) private var appearanceModeRawValue = AppPreferenceDefault.appearanceMode
 
     @State private var isUpdatingAssociation = false
-    @State private var associationStatus = "Consultando asociacion actual..."
+    @State private var associationStatus = "Consultando asociación actual..."
     @State private var associationIsCurrent = false
+    @State private var markdownIsAssociated = false
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
     private var selectedAppearanceMode: Binding<AppAppearanceMode> {
@@ -50,7 +52,7 @@ struct SettingsView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("Tamano base")
+                        Text("Tamaño base")
                         Slider(value: $fontSize, in: 10...40, step: 1)
                             .frame(width: 220)
                         Text("\(Int(fontSize)) pt")
@@ -67,7 +69,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Asociacion de archivos") {
+            Section("Asociación de archivos") {
                 HStack(alignment: .center, spacing: 12) {
                     Circle()
                         .fill(associationIsCurrent ? Color.green : Color.orange)
@@ -77,12 +79,12 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Button(associationIsCurrent ? "MDViewer ya esta asociado a .md" : "Asociar archivos .md con MDViewer") {
+                Button(markdownIsAssociated ? "MDViewer ya está asociado a .md" : "Asociar archivos .md con MDViewer") {
                     Task {
                         await associateMarkdownFiles()
                     }
                 }
-                .disabled(isUpdatingAssociation || associationIsCurrent)
+                .disabled(isUpdatingAssociation || markdownIsAssociated)
 
                 Button("Asociar formatos convertibles con MDViewer") {
                     Task {
@@ -91,7 +93,7 @@ struct SettingsView: View {
                 }
                 .disabled(isUpdatingAssociation)
 
-                Text("macOS puede pedirte confirmacion para cambiar la app por defecto de archivos Markdown.")
+                Text("macOS puede pedirte confirmación para cambiar la app por defecto de archivos Markdown.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -117,7 +119,7 @@ struct SettingsView: View {
             await refreshAssociationStatus()
         } catch {
             associationIsCurrent = false
-            associationStatus = "No se pudo asociar .md automaticamente: \(error.localizedDescription)"
+            associationStatus = "No se pudo asociar .md automáticamente: \(error.localizedDescription)"
         }
 
         isUpdatingAssociation = false
@@ -126,7 +128,7 @@ struct SettingsView: View {
     @MainActor
     private func associateConvertibleFiles() async {
         isUpdatingAssociation = true
-        associationStatus = "Solicitando asociacion de formatos convertibles..."
+        associationStatus = "Solicitando asociación de formatos convertibles..."
 
         do {
             try await MarkdownAssociationService.setMDViewerAsDefaultForConvertibleTypes()
@@ -143,17 +145,15 @@ struct SettingsView: View {
     private func refreshAssociationStatus() async {
         let currentURL = MarkdownAssociationService.currentDefaultApplicationURL()
         let allTypes = MarkdownAssociationService.convertibleUTTypes
-        let mdviewerURL = Bundle.main.bundleURL
 
         let associatedTypes = allTypes.filter { type in
-            guard let defaultAppURL = NSWorkspace.shared.urlForApplication(toOpen: type) else {
-                return false
-            }
-            return defaultAppURL == mdviewerURL
+            isDefaultApplicationMDViewer(for: type)
         }
 
         let isMarkdownAssociated = associatedTypes.contains(.mdviewerMarkdown)
         let allAssociated = associatedTypes.count == allTypes.count
+
+        markdownIsAssociated = isMarkdownAssociated
 
         if allAssociated {
             associationIsCurrent = true
@@ -164,12 +164,25 @@ struct SettingsView: View {
         associationIsCurrent = false
 
         if isMarkdownAssociated {
-            associationStatus = "MDViewer esta asociado a .md, pero no a todos los formatos convertibles."
+            associationStatus = "MDViewer está asociado a .md, pero no a todos los formatos convertibles."
         } else if let currentURL {
             let appName = FileManager.default.displayName(atPath: currentURL.path)
             associationStatus = "La app actual para Markdown es \(appName)."
         } else {
             associationStatus = "No hay una app por defecto definida para Markdown."
         }
+    }
+
+    @MainActor
+    private func isDefaultApplicationMDViewer(for type: UTType) -> Bool {
+        guard
+            let defaultAppURL = NSWorkspace.shared.urlForApplication(toOpen: type),
+            let defaultBundleID = Bundle(url: defaultAppURL)?.bundleIdentifier,
+            let currentBundleID = Bundle.main.bundleIdentifier
+        else {
+            return false
+        }
+
+        return defaultBundleID == currentBundleID
     }
 }
