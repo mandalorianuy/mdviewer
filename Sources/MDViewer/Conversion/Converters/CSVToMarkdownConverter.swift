@@ -77,6 +77,12 @@ struct CSVToMarkdownConverter: DocumentConverter {
             }
 
             if scalar == "\r" || scalar == "\n" {
+                if insideQuotes {
+                    currentField.append(String(scalar))
+                    index += 1
+                    continue
+                }
+
                 currentRow.append(currentField)
                 if !currentRow.allSatisfy({ $0.isEmpty }) {
                     rows.append(currentRow)

@@ -79,4 +79,10 @@ final class CSVToMarkdownConverterTests: XCTestCase {
         """
         XCTAssertEqual(result.markdown, expected)
     }
+
+    func testQuotedNewlinesPreserved() {
+        writeCSV("A,B\n\"multi\nline\",value")
+        let result = try! converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("| multi<br>line | value |"))
+    }
 }
