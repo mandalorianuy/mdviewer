@@ -27,7 +27,10 @@ let package = Package(
                 .product(name: "Down", package: "Down-gfm")
             ],
             resources: [
-                .copy("Fixtures")
+                .copy("Fixtures/sample.csv"),
+                .copy("Fixtures/sample.html"),
+                .copy("Fixtures/sample.json"),
+                .copy("Fixtures/sample.xml")
             ]
         )
     ]

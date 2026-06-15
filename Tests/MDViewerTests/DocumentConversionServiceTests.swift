@@ -34,7 +34,7 @@ final class DocumentConversionServiceTests: XCTestCase {
 
         do {
             _ = try await service.convert(url: url)
-            XCTFail("Debería haber fallado")
+            XCTFail("Expected conversion to throw for unsupported format")
         } catch {
             XCTAssertTrue(error is ConversionError)
         }
@@ -44,32 +44,32 @@ final class DocumentConversionServiceTests: XCTestCase {
 final class FixtureConversionTests: XCTestCase {
     private let service = DocumentConversionService()
 
-    private func fixtureURL(named name: String) -> URL {
-        let thisFile = URL(fileURLWithPath: #filePath)
-        return thisFile
-            .deletingLastPathComponent()
-            .appendingPathComponent("Fixtures")
-            .appendingPathComponent(name)
+    private func fixtureURL(named name: String, withExtension ext: String) -> URL {
+        guard let url = Bundle.module.url(forResource: name, withExtension: ext) else {
+            XCTFail("Missing fixture: \(name).\(ext)")
+            return URL(fileURLWithPath: "/dev/null")
+        }
+        return url
     }
 
     func testCSVFixture() async throws {
-        let result = try await service.convert(url: fixtureURL(named: "sample.csv"))
+        let result = try await service.convert(url: fixtureURL(named: "sample", withExtension: "csv"))
         XCTAssertTrue(result.markdown.contains("| Name | Age |"))
         XCTAssertTrue(result.markdown.contains("| Alice | 30 |"))
     }
 
     func testJSONFixture() async throws {
-        let result = try await service.convert(url: fixtureURL(named: "sample.json"))
+        let result = try await service.convert(url: fixtureURL(named: "sample", withExtension: "json"))
         XCTAssertTrue(result.markdown.contains("- **name**: Alice"))
     }
 
     func testXMLFixture() async throws {
-        let result = try await service.convert(url: fixtureURL(named: "sample.xml"))
+        let result = try await service.convert(url: fixtureURL(named: "sample", withExtension: "xml"))
         XCTAssertTrue(result.markdown.contains("**name**: Alice"))
     }
 
     func testHTMLFixture() async throws {
-        let result = try await service.convert(url: fixtureURL(named: "sample.html"))
+        let result = try await service.convert(url: fixtureURL(named: "sample", withExtension: "html"))
         XCTAssertTrue(result.markdown.contains("# Hello"))
         XCTAssertTrue(result.markdown.contains("World"))
     }
