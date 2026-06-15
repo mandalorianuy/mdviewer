@@ -31,7 +31,7 @@ final class ZIPToMarkdownConverterTests: XCTestCase {
         let result = try converter.convert(tempURL)
         XCTAssertEqual(result.sourceFormat, "ZIP")
         XCTAssertTrue(result.markdown.contains("_El archivo ZIP no contiene formatos soportados._"))
-        XCTAssertTrue(result.warnings.contains("No se encontro un archivo convertible dentro del ZIP."))
+        XCTAssertTrue(result.warnings.contains("No se encontró un archivo convertible dentro del ZIP."))
     }
 
     func testZIPWithUnsupportedFilesReturnsFallback() throws {
@@ -42,7 +42,7 @@ final class ZIPToMarkdownConverterTests: XCTestCase {
         let result = try converter.convert(tempURL)
         XCTAssertEqual(result.sourceFormat, "ZIP")
         XCTAssertTrue(result.markdown.contains("_El archivo ZIP no contiene formatos soportados._"))
-        XCTAssertTrue(result.warnings.contains("No se encontro un archivo convertible dentro del ZIP."))
+        XCTAssertTrue(result.warnings.contains("No se encontró un archivo convertible dentro del ZIP."))
     }
 
     func testZIPWithMultipleConvertibleFilesConvertsFirstAndWarns() throws {

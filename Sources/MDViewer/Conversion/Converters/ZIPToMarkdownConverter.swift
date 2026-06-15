@@ -40,28 +40,34 @@ struct ZIPToMarkdownConverter: DocumentConverter {
         process.standardError = stderrPipe
 
         let timeoutSeconds: TimeInterval = 30
+        let timeoutLock = NSLock()
         var didTimeOut = false
+        var extractionFinished = false
+
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
         timer.schedule(deadline: .now() + timeoutSeconds)
-        timer.setEventHandler {
+        timer.setEventHandler { [weak process] in
+            timeoutLock.lock()
+            defer { timeoutLock.unlock() }
+            guard !extractionFinished else { return }
             didTimeOut = true
-            if process.isRunning {
-                process.terminate()
-            }
+            process?.terminate()
         }
 
         do {
             timer.resume()
             try process.run()
             process.waitUntilExit()
+            timeoutLock.lock(); extractionFinished = true; timeoutLock.unlock()
             timer.cancel()
         } catch {
+            timeoutLock.lock(); extractionFinished = true; timeoutLock.unlock()
             timer.cancel()
             throw ConversionError.conversionFailed(reason: error.localizedDescription)
         }
 
-        if didTimeOut {
-            throw ConversionError.conversionFailed(reason: "unzip timed out after \(Int(timeoutSeconds)) seconds")
+        if didTimeOut && process.terminationReason == .uncaughtSignal {
+            throw ConversionError.timeout
         }
 
         guard process.terminationStatus == 0 else {
@@ -82,7 +88,7 @@ struct ZIPToMarkdownConverter: DocumentConverter {
                 markdown: "_El archivo ZIP no contiene formatos soportados._\n\n## Contenido\n\n\(index.isEmpty ? "_Vacío_" : index)",
                 sourceFormat: "ZIP",
                 title: nil,
-                warnings: ["No se encontro un archivo convertible dentro del ZIP."]
+                warnings: ["No se encontró un archivo convertible dentro del ZIP."]
             )
         }
 
@@ -91,7 +97,7 @@ struct ZIPToMarkdownConverter: DocumentConverter {
 
         var warnings = innerResult.warnings
         if convertibleFiles.count > 1 {
-            warnings.append("El ZIP contiene varios archivos soportados; se convirtio el primero: \(firstURL.lastPathComponent).")
+            warnings.append("El ZIP contiene varios archivos soportados; se convirtió el primero: \(firstURL.lastPathComponent).")
         }
 
         return MarkdownConversionResult(
