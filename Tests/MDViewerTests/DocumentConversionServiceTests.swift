@@ -40,3 +40,37 @@ final class DocumentConversionServiceTests: XCTestCase {
         }
     }
 }
+
+final class FixtureConversionTests: XCTestCase {
+    private let service = DocumentConversionService()
+
+    private func fixtureURL(named name: String) -> URL {
+        let thisFile = URL(fileURLWithPath: #filePath)
+        return thisFile
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent(name)
+    }
+
+    func testCSVFixture() async throws {
+        let result = try await service.convert(url: fixtureURL(named: "sample.csv"))
+        XCTAssertTrue(result.markdown.contains("| Name | Age |"))
+        XCTAssertTrue(result.markdown.contains("| Alice | 30 |"))
+    }
+
+    func testJSONFixture() async throws {
+        let result = try await service.convert(url: fixtureURL(named: "sample.json"))
+        XCTAssertTrue(result.markdown.contains("- **name**: Alice"))
+    }
+
+    func testXMLFixture() async throws {
+        let result = try await service.convert(url: fixtureURL(named: "sample.xml"))
+        XCTAssertTrue(result.markdown.contains("**name**: Alice"))
+    }
+
+    func testHTMLFixture() async throws {
+        let result = try await service.convert(url: fixtureURL(named: "sample.html"))
+        XCTAssertTrue(result.markdown.contains("# Hello"))
+        XCTAssertTrue(result.markdown.contains("World"))
+    }
+}

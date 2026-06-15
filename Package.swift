@@ -25,6 +25,9 @@ let package = Package(
             dependencies: [
                 .target(name: "MDViewer"),
                 .product(name: "Down", package: "Down-gfm")
+            ],
+            resources: [
+                .copy("Fixtures")
             ]
         )
     ]
