@@ -31,6 +31,7 @@ targets:
         product: Down
     sources:
       - path: Sources/MDViewer
+        includes: ["**/*.swift"]
       - path: macos/Assets.xcassets
         buildPhase: resources
       - path: macos/AppIcon.icns
