@@ -23,7 +23,7 @@ final class CSVToMarkdownConverterTests: XCTestCase {
         writeCSV("")
         let result = try! converter.convert(tempURL)
         XCTAssertEqual(result.markdown, "")
-        XCTAssertEqual(result.warnings, ["El archivo CSV esta vacio."])
+        XCTAssertEqual(result.warnings, ["El archivo CSV está vacío."])
     }
 
     func testSimpleCSV() {

@@ -28,7 +28,7 @@ struct HTMLToMarkdownConverter: DocumentConverter {
             markdown: markdown,
             sourceFormat: "HTML",
             title: nil,
-            warnings: ["La estructura HTML se convirtio a Markdown plano; estilos y layouts no se conservaron."]
+            warnings: ["La estructura HTML se convirtió a Markdown plano; estilos y layouts no se conservaron."]
         )
     }
 }

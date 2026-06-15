@@ -21,7 +21,7 @@ struct CSVToMarkdownConverter: DocumentConverter {
                 markdown: "",
                 sourceFormat: "CSV",
                 title: nil,
-                warnings: ["El archivo CSV esta vacio."]
+                warnings: ["El archivo CSV está vacío."]
             )
         }
 
