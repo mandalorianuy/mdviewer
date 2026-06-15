@@ -51,7 +51,13 @@ struct JSONToMarkdownConverter: DocumentConverter {
 
         if let array = object as? [Any] {
             return array.enumerated().map { _, value in
-                "\(indent)1. \(renderScalar(value))"
+                if let nestedDict = value as? [String: Any], !nestedDict.isEmpty {
+                    return "\(indent)-\n" + render(value, level: level + 1)
+                } else if let nestedArray = value as? [Any], !nestedArray.isEmpty {
+                    return "\(indent)-\n" + render(value, level: level + 1)
+                } else {
+                    return "\(indent)- \(renderScalar(value))"
+                }
             }.joined(separator: "\n")
         }
 
@@ -84,5 +90,7 @@ struct JSONToMarkdownConverter: DocumentConverter {
             .replacingOccurrences(of: "*", with: "\\*")
             .replacingOccurrences(of: "_", with: "\\_")
             .replacingOccurrences(of: "`", with: "\\`")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
     }
 }

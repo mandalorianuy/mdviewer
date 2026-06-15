@@ -27,6 +27,42 @@ final class JSONToMarkdownConverterTests: XCTestCase {
         XCTAssertTrue(result.markdown.contains("- **activo**: `true`"))
     }
 
+    func testTopLevelArrayWithObjects() {
+        writeJSON("[{\"nombre\": \"Juan\"}, {\"nombre\": \"Maria\"}]")
+        let result = try! converter.convert(tempURL)
+        let expected = """
+        -
+          - **nombre**: Juan
+        -
+          - **nombre**: Maria
+        """
+        XCTAssertEqual(result.markdown, expected)
+    }
+
+    func testNestedObjects() {
+        writeJSON("{\"usuario\": {\"nombre\": \"Juan\", \"direccion\": {\"ciudad\": \"BUE\"}}}")
+        let result = try! converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("- **usuario**:"))
+        XCTAssertTrue(result.markdown.contains("- **nombre**: Juan"))
+        XCTAssertTrue(result.markdown.contains("- **direccion**:"))
+        XCTAssertTrue(result.markdown.contains("- **ciudad**: BUE"))
+    }
+
+    func testScalars() {
+        writeJSON("{\"nulo\": null, \"falso\": false, \"numero\": 42}")
+        let result = try! converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("- **nulo**: `null`"))
+        XCTAssertTrue(result.markdown.contains("- **falso**: `false`"))
+        XCTAssertTrue(result.markdown.contains("- **numero**: `42`"))
+    }
+
+    func testStringEscaping() {
+        writeJSON("{\"texto\": \"hola *mundo* _test_ `code`\"}")
+        let result = try! converter.convert(tempURL)
+        let expected = "- **texto**: hola \\*mundo\\* \\_test\\_ \\`code\\`"
+        XCTAssertEqual(result.markdown, expected)
+    }
+
     func testInvalidJSONThrows() {
         writeJSON("{ no es json }")
         XCTAssertThrowsError(try converter.convert(tempURL))

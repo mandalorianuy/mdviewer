@@ -48,33 +48,57 @@ struct CSVToMarkdownConverter: DocumentConverter {
         var currentField = ""
         var insideQuotes = false
 
-        let characters = Array(content)
+        let scalars = Array(content.unicodeScalars)
         var index = 0
 
-        while index < characters.count {
-            let char = characters[index]
+        while index < scalars.count {
+            let scalar = scalars[index]
 
-            if char == "\"" {
-                if insideQuotes && index + 1 < characters.count && characters[index + 1] == "\"" {
-                    currentField.append("\"")
+            if scalar == "\"" {
+                if insideQuotes {
+                    if index + 1 < scalars.count && scalars[index + 1] == "\"" {
+                        currentField.append("\"")
+                        index += 2
+                        continue
+                    } else {
+                        insideQuotes = false
+                        index += 1
+                        continue
+                    }
+                } else if currentField.isEmpty {
+                    insideQuotes = true
                     index += 1
+                    continue
                 } else {
-                    insideQuotes.toggle()
+                    currentField.append(String(scalar))
+                    index += 1
+                    continue
                 }
-            } else if char == "," && !insideQuotes {
-                currentRow.append(currentField)
-                currentField = ""
-            } else if char == "\n" && !insideQuotes {
+            }
+
+            if scalar == "\r" || scalar == "\n" {
                 currentRow.append(currentField)
                 if !currentRow.allSatisfy({ $0.isEmpty }) {
                     rows.append(currentRow)
                 }
                 currentRow = []
                 currentField = ""
-            } else {
-                currentField.append(char)
+                if scalar == "\r" && index + 1 < scalars.count && scalars[index + 1] == "\n" {
+                    index += 2
+                } else {
+                    index += 1
+                }
+                continue
             }
 
+            if scalar == "," && !insideQuotes {
+                currentRow.append(currentField)
+                currentField = ""
+                index += 1
+                continue
+            }
+
+            currentField.append(String(scalar))
             index += 1
         }
 
