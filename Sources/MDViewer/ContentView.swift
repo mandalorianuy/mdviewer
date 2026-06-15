@@ -111,7 +111,7 @@ struct ContentView: View {
         .focusedSceneValue(\.showFindAction, SearchCommandAction(handler: presentSearch))
         .focusedSceneValue(\.findNextAction, SearchCommandAction(handler: findNextMatch))
         .focusedSceneValue(\.findPreviousAction, SearchCommandAction(handler: findPreviousMatch))
-        .focusedSceneValue(\.saveAsMarkdownAction, SearchCommandAction(handler: saveConvertedMarkdown))
+        .focusedSceneValue(\.saveAsMarkdownAction, SaveAsMarkdownAction(handler: saveConvertedMarkdown))
     }
 
     private var footerBar: some View {

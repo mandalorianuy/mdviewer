@@ -1,26 +1,29 @@
 import SwiftUI
 
+struct SaveAsMarkdownAction {
+    let handler: () -> Void
+}
+
 private struct SaveAsMarkdownActionKey: FocusedValueKey {
-    typealias Value = SearchCommandAction
+    typealias Value = SaveAsMarkdownAction
 }
 
 extension FocusedValues {
-    var saveAsMarkdownAction: SearchCommandAction? {
+    var saveAsMarkdownAction: SaveAsMarkdownAction? {
         get { self[SaveAsMarkdownActionKey.self] }
         set { self[SaveAsMarkdownActionKey.self] = newValue }
     }
 }
 
 struct SaveAsMarkdownCommands: Commands {
-    @FocusedValue(\.saveAsMarkdownAction) private var saveAsMarkdownAction
+    @FocusedValue(\.saveAsMarkdownAction) private var action: SaveAsMarkdownAction?
 
     var body: some Commands {
-        CommandMenu("Archivo") {
+        CommandGroup(after: .saveItem) {
             Button("Guardar como Markdown") {
-                saveAsMarkdownAction?()
+                action?.handler()
             }
             .keyboardShortcut("S", modifiers: [.command, .shift])
-            .disabled(saveAsMarkdownAction == nil)
         }
     }
 }
