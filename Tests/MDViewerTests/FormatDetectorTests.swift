@@ -13,4 +13,16 @@ final class FormatDetectorTests: XCTestCase {
         let url = URL(fileURLWithPath: "/tmp/sample.unknown")
         XCTAssertNil(detector.converter(for: url))
     }
+
+    func testDetectsUppercaseExtension() {
+        let detector = FormatDetector(converters: [CSVToMarkdownConverter()])
+        let url = URL(fileURLWithPath: "/tmp/sample.CSV")
+        XCTAssertNotNil(detector.converter(for: url))
+    }
+
+    func testFindsConverterByExtension() {
+        let detector = FormatDetector(converters: [CSVToMarkdownConverter()])
+        XCTAssertNotNil(detector.converter(forExtension: "csv"))
+        XCTAssertNil(detector.converter(forExtension: "unknown"))
+    }
 }
