@@ -39,4 +39,12 @@ targets:
         buildPhase: resources
     scheme:
       gatherCoverageData: false
-      testTargets: []
+      testTargets:
+        - name: MDViewerTests
+  MDViewerTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/MDViewerTests
+    dependencies:
+      - target: MDViewer

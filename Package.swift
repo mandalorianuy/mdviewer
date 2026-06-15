@@ -19,6 +19,13 @@ let package = Package(
             dependencies: [
                 .product(name: "Down", package: "Down-gfm")
             ]
+        ),
+        .testTarget(
+            name: "MDViewerTests",
+            dependencies: [
+                .target(name: "MDViewer"),
+                .product(name: "Down", package: "Down-gfm")
+            ]
         )
     ]
 )
