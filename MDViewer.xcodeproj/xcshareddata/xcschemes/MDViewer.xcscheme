@@ -39,6 +39,17 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "9E50EFD011C50268C447D600"
+               BuildableName = "MDViewerTests.xctest"
+               BlueprintName = "MDViewerTests"
+               ReferencedContainer = "container:MDViewer.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>
