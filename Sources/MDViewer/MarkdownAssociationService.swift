@@ -3,6 +3,15 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum MarkdownAssociationService {
+    static let convertibleUTTypes: [UTType] = [
+        .mdviewerMarkdown,
+        .commaSeparatedText,
+        .json,
+        .xml,
+        .html,
+        .zip
+    ]
+
     static func currentDefaultApplicationURL() -> URL? {
         NSWorkspace.shared.urlForApplication(toOpen: .mdviewerMarkdown)
     }
@@ -21,5 +30,11 @@ enum MarkdownAssociationService {
 
     static func setMDViewerAsDefault() async throws {
         try await NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpen: .mdviewerMarkdown)
+    }
+
+    static func setMDViewerAsDefaultForConvertibleTypes() async throws {
+        for type in convertibleUTTypes {
+            try await NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpen: type)
+        }
     }
 }

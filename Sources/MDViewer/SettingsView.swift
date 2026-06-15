@@ -84,6 +84,13 @@ struct SettingsView: View {
                 }
                 .disabled(isUpdatingAssociation || associationIsCurrent)
 
+                Button("Asociar formatos convertibles con MDViewer") {
+                    Task {
+                        await associateConvertibleFiles()
+                    }
+                }
+                .disabled(isUpdatingAssociation)
+
                 Text("macOS puede pedirte confirmacion para cambiar la app por defecto de archivos Markdown.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -111,6 +118,22 @@ struct SettingsView: View {
         } catch {
             associationIsCurrent = false
             associationStatus = "No se pudo asociar .md automaticamente: \(error.localizedDescription)"
+        }
+
+        isUpdatingAssociation = false
+    }
+
+    @MainActor
+    private func associateConvertibleFiles() async {
+        isUpdatingAssociation = true
+        associationStatus = "Solicitando asociacion de formatos convertibles..."
+
+        do {
+            try await MarkdownAssociationService.setMDViewerAsDefaultForConvertibleTypes()
+            await refreshAssociationStatus()
+        } catch {
+            associationIsCurrent = false
+            associationStatus = "No se pudo asociar todos los formatos: \(error.localizedDescription)"
         }
 
         isUpdatingAssociation = false
