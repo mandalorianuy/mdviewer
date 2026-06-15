@@ -15,9 +15,9 @@ extension ConversionError: LocalizedError {
         case .fileNotReadable:
             return "No se pudo leer el archivo."
         case .conversionFailed(let reason):
-            return "Error de conversion: \(reason)"
+            return "Error de conversión: \(reason)"
         case .timeout:
-            return "La conversion tardo demasiado."
+            return "La conversión tardó demasiado."
         }
     }
 }
