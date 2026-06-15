@@ -21,8 +21,17 @@ final class DocumentConversionServiceTests: XCTestCase {
         XCTAssertTrue(result.markdown.contains("| A | B |"))
     }
 
+    func testConvertSyncConvertsCSV() throws {
+        try "A,B\n1,2".write(to: tempURL, atomically: true, encoding: .utf8)
+        let result = try service.convertSync(url: tempURL)
+        XCTAssertTrue(result.markdown.contains("| A | B |"))
+    }
+
     func testUnsupportedFormatThrows() async {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".xyz")
+        FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: nil)
+        defer { try? FileManager.default.removeItem(at: url) }
+
         do {
             _ = try await service.convert(url: url)
             XCTFail("Deberia haber fallado")

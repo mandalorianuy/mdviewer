@@ -22,23 +22,18 @@ actor DocumentConversionService {
     }
 
     static func isConvertibleExtension(_ ext: String) -> Bool {
-        let knownExtensions = ["csv", "json", "xml", "html", "htm"]
-        return knownExtensions.contains(ext.lowercased())
+        let lowercased = ext.lowercased()
+        return defaultConverters.contains { converter in
+            converter.supportedExtensions.contains(lowercased)
+        }
     }
 
     func convert(url: URL) async throws -> MarkdownConversionResult {
         logger.info("Convirtiendo archivo: \(url.lastPathComponent)")
-
-        return try await Task.detached(priority: .userInitiated) { [detector] in
-            try Self.convertSync(detector: detector, url: url)
-        }.value
+        return try convertSync(url: url)
     }
 
     nonisolated func convertSync(url: URL) throws -> MarkdownConversionResult {
-        try Self.convertSync(detector: detector, url: url)
-    }
-
-    private static func convertSync(detector: FormatDetector, url: URL) throws -> MarkdownConversionResult {
         guard let converter = detector.converter(for: url) else {
             throw ConversionError.unsupportedFormat
         }

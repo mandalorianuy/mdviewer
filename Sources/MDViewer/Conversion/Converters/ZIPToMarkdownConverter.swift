@@ -24,25 +24,51 @@ struct ZIPToMarkdownConverter: DocumentConverter {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
 
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-o", url.path, "-d", tempDir.path]
+        process.arguments = ["-j", "-o", url.path, "-d", tempDir.path]
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        let timeoutSeconds: TimeInterval = 30
+        var didTimeOut = false
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        timer.schedule(deadline: .now() + timeoutSeconds)
+        timer.setEventHandler {
+            didTimeOut = true
+            if process.isRunning {
+                process.terminate()
+            }
+        }
 
         do {
+            timer.resume()
             try process.run()
             process.waitUntilExit()
+            timer.cancel()
         } catch {
+            timer.cancel()
             throw ConversionError.conversionFailed(reason: error.localizedDescription)
         }
 
+        if didTimeOut {
+            throw ConversionError.conversionFailed(reason: "unzip timed out after \(Int(timeoutSeconds)) seconds")
+        }
+
         guard process.terminationStatus == 0 else {
-            throw ConversionError.conversionFailed(reason: "unzip exited with status \(process.terminationStatus)")
+            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let reason = stderr?.isEmpty == false ? stderr! : "unzip exited with status \(process.terminationStatus)"
+            throw ConversionError.conversionFailed(reason: reason)
         }
 
         let files = try listFiles(at: tempDir)
