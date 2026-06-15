@@ -11,6 +11,8 @@ struct ContentView: View {
     @AppStorage(AppPreferenceKey.appearanceMode) private var appearanceModeRawValue = AppPreferenceDefault.appearanceMode
     @FocusState private var isSearchFieldFocused: Bool
     @State private var errorMessage: String?
+    @State private var conversionError: String?
+    @State private var isConverting = false
     @State private var renderedHTML = ""
     @State private var isRenderingDocument = false
     @State private var isSearchPresented = false
@@ -36,6 +38,8 @@ struct ContentView: View {
             Rectangle()
                 .fill(dividerColor)
                 .frame(height: 1)
+
+            conversionBar
 
             if isSearchPresented {
                 searchBar
@@ -85,6 +89,9 @@ struct ContentView: View {
         .task(id: currentRenderRequest) {
             await renderDocument(for: currentRenderRequest)
         }
+        .task {
+            await runPendingConversionIfNeeded()
+        }
         .onAppear {
             if !availableFonts.contains(selectedFontFamily) {
                 selectedFontFamily = effectiveDefaultFont
@@ -123,12 +130,63 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private var conversionBar: some View {
+        if let result = document.conversionResult {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Image(systemName: "arrow.right.arrow.left")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(controlAccent)
+
+                    Text("Convertido desde \(result.sourceFormat)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(secondaryText)
+
+                    Spacer()
+
+                    if !result.warnings.isEmpty {
+                        Button {
+                            // Toggle warnings panel (simplificado: cicla el primer mensaje)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.system(size: 10))
+                                Text("\(result.warnings.count) advertencia\(result.warnings.count == 1 ? "" : "s")")
+                                    .font(.system(size: 11))
+                            }
+                            .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if !result.warnings.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(result.warnings, id: \.self) { warning in
+                            Text("• \(warning)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(chromeAccentBackground)
+
+            Rectangle()
+                .fill(dividerColor)
+                .frame(height: 1)
+        }
+    }
+
     private var controlsBar: some View {
         HStack(spacing: 14) {
             Button {
                 pickFilesToOpen()
             } label: {
-                Text("Abrir .md")
+                Text("Abrir archivo")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(primaryText)
                     .padding(.horizontal, 14)
@@ -529,7 +587,14 @@ struct ContentView: View {
     @MainActor
     private func pickFilesToOpen() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.mdviewerMarkdown]
+        panel.allowedContentTypes = [
+            .mdviewerMarkdown,
+            .commaSeparatedText,
+            .json,
+            .xml,
+            .html,
+            .zip
+        ]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.begin { response in
@@ -605,5 +670,23 @@ struct ContentView: View {
             let action: DocumentSearchRequest.Action = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .clear : .update
             issueSearch(action: action)
         }
+    }
+
+    private func runPendingConversionIfNeeded() async {
+        guard let url = document.pendingConversionURL, document.rawMarkdown.isEmpty else { return }
+
+        isConverting = true
+        conversionError = nil
+
+        do {
+            let result = try await DocumentConversionService.shared.convert(url: url)
+            document.rawMarkdown = result.markdown
+            document.conversionResult = result
+            document.pendingConversionURL = nil
+        } catch {
+            conversionError = error.localizedDescription
+        }
+
+        isConverting = false
     }
 }
