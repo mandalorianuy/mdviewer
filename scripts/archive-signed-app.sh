@@ -36,6 +36,9 @@ xcodebuild \
   DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM_ID" \
   CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+  ENABLE_HARDENED_RUNTIME=YES \
+  CODE_SIGN_ENTITLEMENTS="$ROOT_DIR/macos/MDViewer.entitlements" \
+  OTHER_CODE_SIGN_FLAGS="--options runtime" \
   archive
 
 echo "==> Archived app: $APP_PATH"
