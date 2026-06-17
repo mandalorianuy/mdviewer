@@ -30,7 +30,9 @@ let package = Package(
                 .copy("Fixtures/sample.csv"),
                 .copy("Fixtures/sample.html"),
                 .copy("Fixtures/sample.json"),
-                .copy("Fixtures/sample.xml")
+                .copy("Fixtures/sample.xml"),
+                .copy("Fixtures/youtube.html"),
+                .copy("Fixtures/youtube_captions.xml")
             ]
         )
     ]

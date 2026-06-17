@@ -3,14 +3,9 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum MarkdownAssociationService {
-    static let convertibleUTTypes: [UTType] = [
-        .mdviewerMarkdown,
-        .commaSeparatedText,
-        .json,
-        .xml,
-        .html,
-        .zip
-    ]
+    /// Tipos de archivo que la app puede abrir y convertir a Markdown.
+    /// Se mantiene sincronizado con `MarkdownFileDocument.readableContentTypes`.
+    static let convertibleUTTypes: [UTType] = MarkdownFileDocument.readableContentTypes
 
     static func currentDefaultApplicationURL() -> URL? {
         NSWorkspace.shared.urlForApplication(toOpen: .mdviewerMarkdown)

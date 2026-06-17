@@ -1,8 +1,23 @@
 import AppKit
 import SwiftUI
 
+struct ConvertToMarkdownAction {
+    let handler: () -> Void
+}
+
+private struct ConvertToMarkdownActionKey: FocusedValueKey {
+    typealias Value = ConvertToMarkdownAction
+}
+
+extension FocusedValues {
+    var convertToMarkdownAction: ConvertToMarkdownAction? {
+        get { self[ConvertToMarkdownActionKey.self] }
+        set { self[ConvertToMarkdownActionKey.self] = newValue }
+    }
+}
+
 struct ContentView: View {
-    let document: MarkdownFileDocument
+    @ObservedObject var document: MarkdownFileDocument
 
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(AppPreferenceKey.selectedFontFamily) private var selectedFontFamily = AppPreferenceDefault.fontFamily
@@ -24,6 +39,22 @@ struct ContentView: View {
     @State private var themeIconRotation: Double = 0
     @State private var themeIconGlowOpacity = 0.0
     @State private var searchDebounceTask: Task<Void, Never>?
+    @State private var editorMode: EditorMode = .preview
+
+    private enum EditorMode: String, CaseIterable, Identifiable {
+        case preview = "Vista previa"
+        case editor = "Editor"
+        case split = "Dividido"
+
+        var id: String { rawValue }
+        var icon: String {
+            switch self {
+            case .preview: return "eye"
+            case .editor: return "pencil"
+            case .split: return "square.split.2x1"
+            }
+        }
+    }
 
     private let availableFonts = NSFontManager.shared.availableFontFamilies.sorted()
     private let appVersion = AppVersion.current
@@ -53,16 +84,16 @@ struct ContentView: View {
             }
 
             Group {
-                if renderedHTML.isEmpty && isRenderingDocument {
-                    loadingState
-                } else {
-                    MarkdownWebView(
-                        html: renderedHTML,
-                        searchRequest: searchRequest,
-                        onSearchResult: { result in
-                            searchResult = result
-                        }
-                    )
+                switch editorMode {
+                case .preview:
+                    previewView
+                case .editor:
+                    editorView
+                case .split:
+                    HSplitView {
+                        editorView
+                        previewView
+                    }
                 }
             }
             .background(windowBackground)
@@ -112,6 +143,7 @@ struct ContentView: View {
         .focusedSceneValue(\.findNextAction, SearchCommandAction(handler: findNextMatch))
         .focusedSceneValue(\.findPreviousAction, SearchCommandAction(handler: findPreviousMatch))
         .focusedSceneValue(\.saveAsMarkdownAction, SaveAsMarkdownAction(handler: saveConvertedMarkdown))
+        .focusedSceneValue(\.convertToMarkdownAction, ConvertToMarkdownAction(handler: convertFileToMarkdown))
     }
 
     private var footerBar: some View {
@@ -260,6 +292,17 @@ struct ContentView: View {
                     .frame(width: 48, alignment: .leading)
             }
 
+            Divider()
+                .frame(height: 20)
+
+            Picker("Modo", selection: $editorMode) {
+                ForEach(EditorMode.allCases) { mode in
+                    Image(systemName: mode.icon).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 120)
+
             Spacer()
 
             Button {
@@ -310,6 +353,23 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help("Configuración")
+
+            Button {
+                exportHTML()
+            } label: {
+                Text("Exportar HTML")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(primaryActionForeground)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(primaryActionBackground)
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(document.rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .opacity(document.rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.55 : 1)
 
             Button {
                 exportPDF()
@@ -385,6 +445,28 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(secondaryActionBorder, lineWidth: 1)
         )
+    }
+
+    private var previewView: some View {
+        Group {
+            if renderedHTML.isEmpty && isRenderingDocument {
+                loadingState
+            } else {
+                MarkdownWebView(
+                    html: renderedHTML,
+                    searchRequest: searchRequest,
+                    onSearchResult: { result in
+                        searchResult = result
+                    }
+                )
+            }
+        }
+    }
+
+    private var editorView: some View {
+        TextEditor(text: $document.rawMarkdown)
+            .font(.system(size: fontSize, design: .monospaced))
+            .padding(8)
     }
 
     private var loadingState: some View {
@@ -612,14 +694,7 @@ struct ContentView: View {
     @MainActor
     private func pickFilesToOpen() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [
-            .mdviewerMarkdown,
-            .commaSeparatedText,
-            .json,
-            .xml,
-            .html,
-            .zip
-        ]
+        panel.allowedContentTypes = MarkdownFileDocument.readableContentTypes
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.begin { response in
@@ -654,6 +729,60 @@ struct ContentView: View {
     }
 
     @MainActor
+    private func convertFileToMarkdown() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = MarkdownFileDocument.readableContentTypes
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor [self] in
+                do {
+                    let result = try await DocumentConversionService.shared.convert(url: url)
+                    await MainActor.run {
+                        let savePanel = NSSavePanel()
+                        savePanel.allowedContentTypes = [.mdviewerMarkdown]
+                        savePanel.canCreateDirectories = true
+                        savePanel.nameFieldStringValue = "Documento.md"
+                        guard savePanel.runModal() == .OK, let outputURL = savePanel.url else { return }
+                        do {
+                            let data = result.markdown.data(using: .utf8) ?? Data()
+                            try data.write(to: outputURL)
+                            self.errorMessage = nil
+                        } catch {
+                            self.errorMessage = error.localizedDescription
+                        }
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.errorMessage = error.localizedDescription
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func exportHTML() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.html]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedHTMLName
+
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+
+        Task {
+            let html = await MarkdownRenderPipeline.shared.render(currentRenderRequest)
+            do {
+                try HTMLExporter.export(html: html, outputURL: outputURL)
+                await MainActor.run { errorMessage = nil }
+            } catch {
+                await MainActor.run { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    @MainActor
     private func exportPDF() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
@@ -679,6 +808,14 @@ struct ContentView: View {
     }
 
     private var suggestedPDFName: String {
+        suggestedExportName(withExtension: "pdf")
+    }
+
+    private var suggestedHTMLName: String {
+        suggestedExportName(withExtension: "html")
+    }
+
+    private func suggestedExportName(withExtension extension: String) -> String {
         if let firstHeading = document.rawMarkdown
             .split(separator: "\n")
             .map(String.init)
@@ -688,11 +825,11 @@ struct ContentView: View {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .replacingOccurrences(of: "/", with: "-")
             if !cleanedTitle.isEmpty {
-                return cleanedTitle + ".pdf"
+                return cleanedTitle + ".\(`extension`)"
             }
         }
 
-        return "Markdown.pdf"
+        return "Markdown.\(`extension`)"
     }
 
     @MainActor

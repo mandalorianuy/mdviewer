@@ -4,6 +4,12 @@ import UniformTypeIdentifiers
 
 extension UTType {
     static let mdviewerMarkdown = UTType(importedAs: "net.daringfireball.markdown")
+    static let mdviewerEPUB = UTType(importedAs: "org.idpf.epub-container", conformingTo: .compositeContent)
+    static let mdviewerDOCX = UTType(importedAs: "org.openxmlformats.wordprocessingml.document", conformingTo: .compositeContent)
+    static let mdviewerPPTX = UTType(importedAs: "org.openxmlformats.presentationml.presentation", conformingTo: .compositeContent)
+    static let mdviewerXLSX = UTType(importedAs: "org.openxmlformats.spreadsheetml.sheet", conformingTo: .compositeContent)
+    static let mdviewerURL = UTType(importedAs: "com.apple.url", conformingTo: .plainText)
+    static let mdviewerWebloc = UTType(importedAs: "com.apple.webloc", conformingTo: .plainText)
 }
 
 /// Document model for MDViewer.
@@ -15,7 +21,19 @@ final class MarkdownFileDocument: ReferenceFileDocument, @unchecked Sendable {
         .json,
         .xml,
         .html,
-        .zip
+        .zip,
+        .pdf,
+        .jpeg,
+        .png,
+        .heic,
+        .tiff,
+        .webP,
+        .mdviewerEPUB,
+        .mdviewerDOCX,
+        .mdviewerPPTX,
+        .mdviewerXLSX,
+        .mdviewerURL,
+        .mdviewerWebloc
     ]
     static let writableContentTypes: [UTType] = [.mdviewerMarkdown]
 
@@ -78,7 +96,28 @@ final class MarkdownFileDocument: ReferenceFileDocument, @unchecked Sendable {
     }
 
     func fileWrapper(snapshot: String, configuration: WriteConfiguration) throws -> FileWrapper {
-        let data = snapshot.data(using: .utf8) ?? Data()
+        var content = snapshot
+        if let result = conversionResult {
+            var frontmatter = "---\n"
+            frontmatter += "source_format: \(result.sourceFormat)\n"
+            if let title = result.title {
+                frontmatter += "title: \"\(escapedYAMLString(title))\"\n"
+            }
+            let formatter = ISO8601DateFormatter()
+            frontmatter += "conversion_date: \(formatter.string(from: Date()))\n"
+            for (key, value) in result.metadata {
+                frontmatter += "\(key): \"\(escapedYAMLString(value))\"\n"
+            }
+            frontmatter += "---\n\n"
+            content = frontmatter + snapshot
+        }
+        let data = content.data(using: .utf8) ?? Data()
         return .init(regularFileWithContents: data)
+    }
+
+    private func escapedYAMLString(_ string: String) -> String {
+        string.replacingOccurrences(of: "\\", with: "\\\\")
+              .replacingOccurrences(of: "\"", with: "\\\"")
+              .replacingOccurrences(of: "\n", with: "\\n")
     }
 }

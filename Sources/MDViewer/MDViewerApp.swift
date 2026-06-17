@@ -11,7 +11,7 @@ struct MDViewerApp: App {
         }
         .commands {
             DocumentSearchCommands()
-            SaveAsMarkdownCommands()
+            MarkdownFileCommands()
         }
 
         Settings {

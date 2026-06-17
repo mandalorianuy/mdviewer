@@ -15,15 +15,23 @@ extension FocusedValues {
     }
 }
 
-struct SaveAsMarkdownCommands: Commands {
-    @FocusedValue(\.saveAsMarkdownAction) private var action: SaveAsMarkdownAction?
+struct MarkdownFileCommands: Commands {
+    @FocusedValue(\.saveAsMarkdownAction) private var saveAsMarkdownAction: SaveAsMarkdownAction?
+    @FocusedValue(\.convertToMarkdownAction) private var convertToMarkdownAction: ConvertToMarkdownAction?
 
     var body: some Commands {
         CommandGroup(after: .saveItem) {
             Button("Guardar como Markdown") {
-                action?.handler()
+                saveAsMarkdownAction?.handler()
             }
             .keyboardShortcut("S", modifiers: [.command, .shift])
+        }
+
+        CommandGroup(after: .printItem) {
+            Button("Convertir a Markdown…") {
+                convertToMarkdownAction?.handler()
+            }
+            .disabled(convertToMarkdownAction == nil)
         }
     }
 }

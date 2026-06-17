@@ -17,7 +17,14 @@ actor DocumentConversionService {
             JSONToMarkdownConverter(),
             XMLToMarkdownConverter(),
             HTMLToMarkdownConverter(),
-            ZIPToMarkdownConverter()
+            ZIPToMarkdownConverter(),
+            PDFToMarkdownConverter(),
+            ImageToMarkdownConverter(),
+            EPUBToMarkdownConverter(),
+            DOCXToMarkdownConverter(),
+            PPTXToMarkdownConverter(),
+            XLSXToMarkdownConverter(),
+            YouTubeToMarkdownConverter()
         ]
     }
 
