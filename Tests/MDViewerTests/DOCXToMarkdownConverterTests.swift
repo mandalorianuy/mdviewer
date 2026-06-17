@@ -77,6 +77,119 @@ final class DOCXToMarkdownConverterTests: XCTestCase {
         XCTAssertTrue(result.markdown.contains("| Ana | 30 |"))
     }
 
+    func testConvertsBoldAndItalic() throws {
+        try createDOCX(at: tempURL, entries: [
+            (path: "word/document.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                    <w:body>
+                        <w:p>
+                            <w:r>
+                                <w:rPr><w:b/><w:i/></w:rPr>
+                                <w:t>negrita y cursiva</w:t>
+                            </w:r>
+                        </w:p>
+                        <w:p>
+                            <w:r><w:rPr><w:b/></w:rPr><w:t>negrita</w:t></w:r>
+                            <w:r><w:t> normal </w:t></w:r>
+                            <w:r><w:rPr><w:i/></w:rPr><w:t>cursiva</w:t></w:r>
+                        </w:p>
+                    </w:body>
+                </w:document>
+                """)
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("***negrita y cursiva***"))
+        XCTAssertTrue(result.markdown.contains("**negrita** normal *cursiva*"))
+    }
+
+    func testConvertsHyperlink() throws {
+        try createDOCX(at: tempURL, entries: [
+            (path: "word/_rels/document.xml.rels", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                    <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/>
+                </Relationships>
+                """),
+            (path: "word/document.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                    <w:body>
+                        <w:p>
+                            <w:hyperlink r:id="rId5">
+                                <w:r><w:t>enlace</w:t></w:r>
+                            </w:hyperlink>
+                        </w:p>
+                    </w:body>
+                </w:document>
+                """)
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("[enlace](https://example.com)"))
+    }
+
+    func testConvertsBulletedList() throws {
+        try createDOCX(at: tempURL, entries: [
+            (path: "word/numbering.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                    <w:abstractNum w:abstractNumId="0">
+                        <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl>
+                    </w:abstractNum>
+                    <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+                </w:numbering>
+                """),
+            (path: "word/document.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                    <w:body>
+                        <w:p>
+                            <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                            <w:r><w:t>Primero</w:t></w:r>
+                        </w:p>
+                        <w:p>
+                            <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                            <w:r><w:t>Segundo</w:t></w:r>
+                        </w:p>
+                        <w:p>
+                            <w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                            <w:r><w:t>Anidado</w:t></w:r>
+                        </w:p>
+                    </w:body>
+                </w:document>
+                """)
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("- Primero"))
+        XCTAssertTrue(result.markdown.contains("- Segundo"))
+        XCTAssertTrue(result.markdown.contains("    - Anidado"))
+    }
+
+    func testExtractsTitleFromCoreProperties() throws {
+        try createDOCX(at: tempURL, entries: [
+            (path: "docProps/core.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
+                    <dc:title>Título del documento</dc:title>
+                </cp:coreProperties>
+                """),
+            (path: "word/document.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                    <w:body>
+                        <w:p><w:r><w:t>Contenido</w:t></w:r></w:p>
+                    </w:body>
+                </w:document>
+                """)
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertEqual(result.title, "Título del documento")
+    }
+
     func testMissingDocumentXMLThrowsConversionFailed() throws {
         try createDOCX(at: tempURL, entries: [
             (path: "word/styles.xml", content: "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>")

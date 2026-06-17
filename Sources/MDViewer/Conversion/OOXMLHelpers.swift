@@ -76,6 +76,7 @@ final class OOXMLNode {
     let attributes: [String: String]
     var text: String = ""
     var children: [OOXMLNode] = []
+    weak var parent: OOXMLNode?
 
     init(name: String, attributes: [String: String]) {
         self.name = name
@@ -97,6 +98,15 @@ final class OOXMLNode {
             result.append(contentsOf: child.descendants(named: name))
         }
         return result
+    }
+
+    func elements(named name: String) -> [OOXMLNode] {
+        children.filter { $0.name == name }
+    }
+
+    func siblings() -> [OOXMLNode] {
+        guard let parent = parent else { return [] }
+        return parent.children.filter { $0 !== self }
     }
 
     func allText() -> String {
@@ -155,6 +165,7 @@ private final class OOXMLParserDelegate: NSObject, XMLParserDelegate {
 
         let node = OOXMLNode(name: elementName, attributes: normalizedAttributes)
         if let parent = stack.last {
+            node.parent = parent
             parent.children.append(node)
         } else {
             root = node

@@ -62,6 +62,77 @@ final class PPTXToMarkdownConverterTests: XCTestCase {
         XCTAssertLessThan(slide1Range.lowerBound, slide2Range.lowerBound, "Slides should be ordered numerically")
     }
 
+    func testExtractsSlideTitle() throws {
+        try createPPTX(at: tempURL, entries: [
+            (path: "ppt/slides/slide1.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                    <p:cSld>
+                        <p:spTree>
+                            <p:sp>
+                                <p:nvSpPr>
+                                    <p:cNvPr id="2" name="Title 1"/>
+                                    <p:cNvSpPr/>
+                                    <p:nvPr><p:ph type="title"/></p:nvPr>
+                                </p:nvSpPr>
+                                <p:txBody>
+                                    <a:bodyPr/>
+                                    <a:p><a:r><a:t>Título de diapositiva</a:t></a:r></a:p>
+                                </p:txBody>
+                            </p:sp>
+                            <p:sp>
+                                <p:txBody>
+                                    <a:bodyPr/>
+                                    <a:p><a:r><a:t>Texto del cuerpo.</a:t></a:r></a:p>
+                                </p:txBody>
+                            </p:sp>
+                        </p:spTree>
+                    </p:cSld>
+                </p:sld>
+                """)
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("# Título de diapositiva"))
+        XCTAssertTrue(result.markdown.contains("Texto del cuerpo."))
+        XCTAssertFalse(result.markdown.contains("# Título de diapositiva\n\n# Título de diapositiva"))
+    }
+
+    func testConvertsSlideTable() throws {
+        try createPPTX(at: tempURL, entries: [
+            (path: "ppt/slides/slide1.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                    <p:cSld>
+                        <p:spTree>
+                            <p:graphicFrame>
+                                <a:graphic>
+                                    <a:graphicData>
+                                        <a:tbl>
+                                            <a:tr>
+                                                <a:tc><a:txBody><a:p><a:r><a:t>Nombre</a:t></a:r></a:p></a:txBody></a:tc>
+                                                <a:tc><a:txBody><a:p><a:r><a:t>Edad</a:t></a:r></a:p></a:txBody></a:tc>
+                                            </a:tr>
+                                            <a:tr>
+                                                <a:tc><a:txBody><a:p><a:r><a:t>Ana</a:t></a:r></a:p></a:txBody></a:tc>
+                                                <a:tc><a:txBody><a:p><a:r><a:t>30</a:t></a:r></a:p></a:txBody></a:tc>
+                                            </a:tr>
+                                        </a:tbl>
+                                    </a:graphicData>
+                                </a:graphic>
+                            </p:graphicFrame>
+                        </p:spTree>
+                    </p:cSld>
+                </p:sld>
+                """)
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("| Nombre | Edad |"))
+        XCTAssertTrue(result.markdown.contains("| --- | --- |"))
+        XCTAssertTrue(result.markdown.contains("| Ana | 30 |"))
+    }
+
     func testMissingSlidesThrowsConversionFailed() throws {
         try createPPTX(at: tempURL, entries: [
             (path: "ppt/presentation.xml", content: "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"/>")

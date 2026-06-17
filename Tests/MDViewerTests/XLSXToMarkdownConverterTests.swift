@@ -49,6 +49,66 @@ final class XLSXToMarkdownConverterTests: XCTestCase {
         XCTAssertTrue(result.markdown.contains("| Ana | 30 |"))
     }
 
+    func testUsesSheetNameFromWorkbook() throws {
+        try createXLSX(at: tempURL, entries: [
+            (path: "xl/_rels/workbook.xml.rels", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                    <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+                </Relationships>
+                """),
+            (path: "xl/workbook.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                    <sheets>
+                        <sheet name="Ventas" sheetId="1" r:id="rId1"/>
+                    </sheets>
+                </workbook>
+                """),
+            (path: "xl/worksheets/sheet1.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                    <sheetData>
+                        <row r="1">
+                            <c r="A1"><v>Producto</v></c>
+                            <c r="B1"><v>Precio</v></c>
+                        </row>
+                    </sheetData>
+                </worksheet>
+                """)
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("## Ventas"))
+        XCTAssertTrue(result.markdown.contains("| Producto | Precio |"))
+    }
+
+    func testHandlesMergedCells() throws {
+        try createXLSX(at: tempURL, entries: [
+            (path: "xl/worksheets/sheet1.xml", content: """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                    <sheetData>
+                        <row r="1">
+                            <c r="A1"><v>Total</v></c>
+                            <c r="B1"><v>100</v></c>
+                        </row>
+                        <row r="2">
+                            <c r="A2"><v>Detalle</v></c>
+                        </row>
+                    </sheetData>
+                    <mergeCells>
+                        <mergeCell ref="A1:B1"/>
+                    </mergeCells>
+                </worksheet>
+                """)
+        ])
+
+        let result = try converter.convert(tempURL)
+        XCTAssertTrue(result.markdown.contains("| Total |  |"))
+        XCTAssertTrue(result.markdown.contains("| Detalle |"))
+    }
+
     func testMissingWorksheetsThrowsConversionFailed() throws {
         try createXLSX(at: tempURL, entries: [
             (path: "xl/sharedStrings.xml", content: """
