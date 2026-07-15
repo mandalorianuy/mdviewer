@@ -4,7 +4,18 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 FETCHER="$ROOT/scripts/fetch-pdfium.sh"
 TEMP=$(mktemp -d "${TMPDIR:-/tmp}/mdviewer-fetch-pdfium.XXXXXX")
-trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+LIVE_HOLDER=""
+STALE_HOLDER=""
+cleanup() {
+    for holder in "$LIVE_HOLDER" "$STALE_HOLDER"; do
+        if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+            kill "$holder" 2>/dev/null || true
+            wait "$holder" 2>/dev/null || true
+        fi
+    done
+    rm -rf "$TEMP"
+}
+trap cleanup EXIT HUP INT TERM
 
 make_archive() {
     python3 - "$1" "$2" <<'PY'
@@ -94,6 +105,65 @@ if run_fetch "$VALID" "$VALID_SHA" "$LOCK_CACHE" >"$TEMP/lock.out" 2>&1; then
     echo "contended fetch unexpectedly succeeded" >&2
     exit 1
 fi
-grep -q "another PDFium fetch is active" "$TEMP/lock.out"
+grep -q "malformed PDFium fetch lock owner" "$TEMP/lock.out"
+
+INVALID_PID_CACHE="$TEMP/cache-invalid-pid-lock"
+mkdir -p "$INVALID_PID_CACHE/.fetch.lock"
+printf '%s\n' "999999999999999999999999" > "$INVALID_PID_CACHE/.fetch.lock/owner.pid"
+if run_fetch "$VALID" "$VALID_SHA" "$INVALID_PID_CACHE" >"$TEMP/invalid-pid.out" 2>&1; then
+    echo "invalid lock owner pid unexpectedly reclaimed" >&2
+    exit 1
+fi
+grep -q "malformed PDFium fetch lock owner" "$TEMP/invalid-pid.out"
+
+LIVE_CACHE="$TEMP/cache-live-lock"
+LIVE_READY="$TEMP/live-lock-ready"
+mkdir -p "$LIVE_CACHE"
+sh -c '
+    lock=$1/.fetch.lock
+    mkdir "$lock"
+    owner_tmp="$lock/.owner.pid.$$"
+    printf "%s\n" "$$" > "$owner_tmp"
+    mv "$owner_tmp" "$lock/owner.pid"
+    : > "$2"
+    exec sleep 60
+' sh "$LIVE_CACHE" "$LIVE_READY" &
+LIVE_HOLDER=$!
+while [ ! -f "$LIVE_READY" ]; do
+    kill -0 "$LIVE_HOLDER"
+    sleep 0.01
+done
+if run_fetch "$VALID" "$VALID_SHA" "$LIVE_CACHE" >"$TEMP/live-lock.out" 2>&1; then
+    echo "live lock owner unexpectedly reclaimed" >&2
+    exit 1
+fi
+grep -q "another PDFium fetch is active" "$TEMP/live-lock.out"
+kill "$LIVE_HOLDER"
+wait "$LIVE_HOLDER" 2>/dev/null || true
+LIVE_HOLDER=""
+
+STALE_CACHE="$TEMP/cache-stale-lock"
+STALE_READY="$TEMP/stale-lock-ready"
+mkdir -p "$STALE_CACHE"
+sh -c '
+    lock=$1/.fetch.lock
+    mkdir "$lock"
+    owner_tmp="$lock/.owner.pid.$$"
+    printf "%s\n" "$$" > "$owner_tmp"
+    mv "$owner_tmp" "$lock/owner.pid"
+    : > "$2"
+    exec sleep 60
+' sh "$STALE_CACHE" "$STALE_READY" &
+STALE_HOLDER=$!
+while [ ! -f "$STALE_READY" ]; do
+    kill -0 "$STALE_HOLDER"
+    sleep 0.01
+done
+kill "$STALE_HOLDER"
+wait "$STALE_HOLDER" 2>/dev/null || true
+STALE_HOLDER=""
+STALE_RESULT=$(run_fetch "$VALID" "$VALID_SHA" "$STALE_CACHE")
+printf '%s\n' "$STALE_RESULT" | grep -q "Installed verified PDFium"
+printf 'verified-pdfium\n' | cmp - "$STALE_CACHE/chromium-7947/lib/libpdfium.dylib"
 
 echo "fetch-pdfium shell regressions: PASS"

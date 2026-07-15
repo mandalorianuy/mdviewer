@@ -255,6 +255,77 @@ fn applies_intrinsic_rotation_to_display_dimensions_and_every_raw_rect() {
 }
 
 #[test]
+fn normalizes_offset_effective_page_bounds_before_intrinsic_rotation() {
+    let temp = tempdir().unwrap();
+    let cases = [
+        (
+            0,
+            [260.0, 280.0],
+            [17.314, 27.112, 28.114, 40.0],
+            [16.0, 130.0, 56.0, 160.0],
+            [16.0, 74.0, 92.0, 88.0],
+            [14.0, 188.0, 182.0, 192.0],
+        ),
+        (
+            90,
+            [280.0, 260.0],
+            [240.0, 17.314, 252.888, 28.114],
+            [120.0, 16.0, 150.0, 56.0],
+            [192.0, 16.0, 206.0, 92.0],
+            [88.0, 14.0, 92.0, 182.0],
+        ),
+        (
+            180,
+            [260.0, 280.0],
+            [231.886, 240.0, 242.686, 252.888],
+            [204.0, 120.0, 244.0, 150.0],
+            [168.0, 192.0, 244.0, 206.0],
+            [78.0, 88.0, 246.0, 92.0],
+        ),
+        (
+            270,
+            [280.0, 260.0],
+            [27.112, 231.886, 40.0, 242.686],
+            [130.0, 204.0, 160.0, 244.0],
+            [74.0, 168.0, 88.0, 244.0],
+            [188.0, 78.0, 192.0, 246.0],
+        ),
+    ];
+
+    for (degrees, dimensions, glyph, image, link, rule) in cases {
+        let source = temp.path().join(format!("offset-bounds-{degrees}.pdf"));
+        fs::write(&source, offset_boundary_fixture(degrees)).unwrap();
+        let document = extract_pdf(&request_for(source)).unwrap();
+        let page = &document.pages[0];
+
+        assert_eq!(page.rotation_degrees, degrees);
+        assert_close(page.width, dimensions[0]);
+        assert_close(page.height, dimensions[1]);
+        let bold_b = page
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.text == "B" && glyph.font_name.as_deref() == Some("Helvetica-Bold"))
+            .expect("offset page should retain the bold title glyph");
+        assert_rect_close(&bold_b.bounds, glyph);
+        assert_rect_close(&page.images[0].bounds, image);
+        assert_rect_close(&page.links[0].bounds, link);
+        assert_rect_close(&page.rules[0].bounds, rule);
+
+        for bounds in page
+            .glyphs
+            .iter()
+            .map(|item| &item.bounds)
+            .chain(page.words.iter().map(|item| &item.bounds))
+            .chain(page.images.iter().map(|item| &item.bounds))
+            .chain(page.links.iter().map(|item| &item.bounds))
+            .chain(page.rules.iter().map(|item| &item.bounds))
+        {
+            assert_rect_within_page(bounds, page.width, page.height);
+        }
+    }
+}
+
+#[test]
 fn rejects_asset_count_before_attempting_any_image_decode() {
     let temp = tempdir().unwrap();
     let source = temp.path().join("many-images.pdf");
@@ -421,11 +492,22 @@ fn pdf_with_objects(objects: &[Vec<u8>]) -> Vec<u8> {
 }
 
 fn rotated_fixture(degrees: i16) -> Vec<u8> {
+    page_box_fixture("/MediaBox [0 0 400 500]", degrees)
+}
+
+fn offset_boundary_fixture(degrees: i16) -> Vec<u8> {
+    page_box_fixture(
+        "/MediaBox [10 90 300 400] /CropBox [20 100 280 380]",
+        degrees,
+    )
+}
+
+fn page_box_fixture(page_boxes: &str, degrees: i16) -> Vec<u8> {
     let base = fs::read(workspace_path("tests/fixtures/pdf/digital-basic.pdf")).unwrap();
     let xref = find_bytes(&base, b"xref\n").unwrap();
     let mut objects = base[..xref].to_vec();
     let media_box = find_bytes(&objects, b"/MediaBox [0 0 300 400]").unwrap();
-    let replacement = format!("/MediaBox [0 0 400 500] /Rotate {degrees}");
+    let replacement = format!("{page_boxes} /Rotate {degrees}");
     objects.splice(
         media_box..media_box + b"/MediaBox [0 0 300 400]".len(),
         replacement.bytes(),

@@ -17,29 +17,135 @@ ARCHIVE="$CACHE_ROOT/$RELEASE-$ASSET"
 INSTALL="$CACHE_ROOT/$RELEASE"
 LIBRARY="$INSTALL/lib/libpdfium.dylib"
 LOCK="$CACHE_ROOT/.fetch.lock"
+OWNER_FILE="$LOCK/owner.pid"
 LOCK_HELD=0
 TEMP=""
 NEW_LIBRARY=""
+LOCK_OWNER=""
+
+read_lock_owner() {
+    owner_file="$1/owner.pid"
+    if [ ! -f "$owner_file" ] || [ -L "$owner_file" ]; then
+        return 1
+    fi
+    owner_size=$(wc -c < "$owner_file" | tr -d '[:space:]') || return 1
+    case "$owner_size" in
+        "" | *[!0-9]*) return 1 ;;
+    esac
+    if [ "$owner_size" -gt 11 ]; then
+        return 1
+    fi
+    LOCK_OWNER=$(cat "$owner_file") || return 1
+    case "$LOCK_OWNER" in
+        "" | 0 | *[!0-9]*) return 1 ;;
+    esac
+    if [ "$LOCK_OWNER" -gt 2147483647 ]; then
+        return 1
+    fi
+    return 0
+}
+
+lock_owner_is_verifiably_dead() {
+    python3 - "$1" <<'PY'
+import os
+import sys
+
+pid = int(sys.argv[1])
+try:
+    os.kill(pid, 0)
+except ProcessLookupError:
+    raise SystemExit(0)
+except (PermissionError, OSError, OverflowError):
+    raise SystemExit(1)
+else:
+    raise SystemExit(1)
+PY
+}
+
+write_lock_owner() {
+    owner_temp="$LOCK/.owner.pid.$$"
+    if ! (umask 077 && printf '%s\n' "$$" > "$owner_temp"); then
+        rm -f "$owner_temp"
+        return 1
+    fi
+    if ! mv -f "$owner_temp" "$OWNER_FILE"; then
+        rm -f "$owner_temp"
+        return 1
+    fi
+}
+
+acquire_lock() {
+    if mkdir "$LOCK" 2>/dev/null; then
+        if ! write_lock_owner; then
+            rmdir "$LOCK" 2>/dev/null || true
+            echo "could not record PDFium fetch lock owner" >&2
+            return 1
+        fi
+        LOCK_HELD=1
+        return 0
+    fi
+
+    if ! read_lock_owner "$LOCK"; then
+        echo "malformed PDFium fetch lock owner at $LOCK; refusing recovery" >&2
+        return 1
+    fi
+    dead_owner=$LOCK_OWNER
+    if ! lock_owner_is_verifiably_dead "$dead_owner"; then
+        echo "another PDFium fetch is active or unverifiable at $LOCK (pid $dead_owner)" >&2
+        return 1
+    fi
+
+    stale_lock="$CACHE_ROOT/.fetch.lock.stale.$$"
+    if [ -e "$stale_lock" ] || ! mv "$LOCK" "$stale_lock" 2>/dev/null; then
+        echo "PDFium fetch lock changed during stale-owner recovery" >&2
+        return 1
+    fi
+    if ! read_lock_owner "$stale_lock" || [ "$LOCK_OWNER" != "$dead_owner" ]; then
+        if [ ! -e "$LOCK" ]; then
+            mv "$stale_lock" "$LOCK" 2>/dev/null || true
+        fi
+        echo "PDFium fetch lock owner changed during stale-owner recovery" >&2
+        return 1
+    fi
+    rm -rf "$stale_lock"
+
+    if ! mkdir "$LOCK" 2>/dev/null; then
+        echo "another PDFium fetch acquired the lock during stale-owner recovery" >&2
+        return 1
+    fi
+    if ! write_lock_owner; then
+        rmdir "$LOCK" 2>/dev/null || true
+        echo "could not record PDFium fetch lock owner" >&2
+        return 1
+    fi
+    LOCK_HELD=1
+}
 
 cleanup() {
     if [ -n "$NEW_LIBRARY" ]; then
-        rm -f "$NEW_LIBRARY"
+        cleanup_library=$NEW_LIBRARY
+        NEW_LIBRARY=""
+        rm -f "$cleanup_library"
     fi
     if [ -n "$TEMP" ]; then
-        rm -rf "$TEMP"
+        cleanup_temp=$TEMP
+        TEMP=""
+        rm -rf "$cleanup_temp"
     fi
     if [ "$LOCK_HELD" = "1" ]; then
-        rm -rf "$LOCK"
+        LOCK_HELD=0
+        if read_lock_owner "$LOCK" && [ "$LOCK_OWNER" = "$$" ]; then
+            rm -rf "$LOCK"
+        fi
     fi
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 mkdir -p "$CACHE_ROOT"
-if ! mkdir "$LOCK" 2>/dev/null; then
-    echo "another PDFium fetch is active at $LOCK" >&2
+if ! acquire_lock; then
     exit 1
 fi
-LOCK_HELD=1
 TEMP=$(mktemp -d "$CACHE_ROOT/.fetch-$RELEASE.XXXXXX")
 
 verify_archive() {

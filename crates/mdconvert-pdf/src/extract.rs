@@ -15,13 +15,13 @@ use crate::{
 static PDFIUM_EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn extract_pdf(request: &ConversionRequest) -> Result<RawDocument, ConversionError> {
+    let bytes = read_source(request)?;
     let _extraction_guard =
         PDFIUM_EXTRACTION_LOCK
             .lock()
             .map_err(|_| ConversionError::ConversionFailed {
                 message: "PDFium extraction state is unavailable".into(),
             })?;
-    let bytes = read_source(request)?;
     let pdfium = load_pdfium()?;
     let document = pdfium
         .load_pdf_from_byte_vec(bytes, None)
@@ -236,12 +236,14 @@ fn extract_metadata(document: &PdfDocument<'_>, page_count: u32) -> DocumentMeta
 }
 
 fn extract_page(index: usize, page: &PdfPage<'_>) -> Result<RawPage, ConversionError> {
-    let reported_width = finite_value("page width", page.width().value)?;
-    let reported_height = finite_value("page height", page.height().value)?;
     let rotation = page
         .rotation()
         .map_err(|error| pdfium_error("read page rotation", error))?;
-    let geometry = PageGeometry::new(reported_width, reported_height, rotation);
+    let boundary = page
+        .boundaries()
+        .bounding()
+        .map_err(|error| pdfium_error("read effective page boundary", error))?;
+    let geometry = PageGeometry::new(boundary.bounds, rotation)?;
     let glyphs = extract_glyphs(page, geometry)?;
     let words = group_words(&glyphs);
     let (images, rules) = extract_objects(page, geometry)?;
@@ -264,6 +266,8 @@ fn extract_page(index: usize, page: &PdfPage<'_>) -> Result<RawPage, ConversionE
 
 #[derive(Clone, Copy)]
 struct PageGeometry {
+    source_left: f32,
+    source_bottom: f32,
     source_width: f32,
     source_height: f32,
     display_width: f32,
@@ -272,24 +276,38 @@ struct PageGeometry {
 }
 
 impl PageGeometry {
-    fn new(reported_width: f32, reported_height: f32, rotation: PdfPageRenderRotation) -> Self {
-        // PDFium reports the displayed page size, including intrinsic quarter-turns,
-        // while page object coordinates remain in the unrotated page coordinate system.
-        let (source_width, source_height) = match rotation {
+    fn new(boundary: PdfRect, rotation: PdfPageRenderRotation) -> Result<Self, ConversionError> {
+        let source_left = finite_value("effective page boundary left", boundary.left().value)?;
+        let source_bottom =
+            finite_value("effective page boundary bottom", boundary.bottom().value)?;
+        let source_right = finite_value("effective page boundary right", boundary.right().value)?;
+        let source_top = finite_value("effective page boundary top", boundary.top().value)?;
+        if source_right <= source_left || source_top <= source_bottom {
+            return Err(ConversionError::ConversionFailed {
+                message: "PDFium returned an empty or inverted effective page boundary".into(),
+            });
+        }
+        let source_width =
+            finite_value("effective page boundary width", source_right - source_left)?;
+        let source_height =
+            finite_value("effective page boundary height", source_top - source_bottom)?;
+        let (display_width, display_height) = match rotation {
             PdfPageRenderRotation::None | PdfPageRenderRotation::Degrees180 => {
-                (reported_width, reported_height)
+                (source_width, source_height)
             }
             PdfPageRenderRotation::Degrees90 | PdfPageRenderRotation::Degrees270 => {
-                (reported_height, reported_width)
+                (source_height, source_width)
             }
         };
-        Self {
+        Ok(Self {
+            source_left,
+            source_bottom,
             source_width,
             source_height,
-            display_width: reported_width,
-            display_height: reported_height,
+            display_width,
+            display_height,
             rotation,
-        }
+        })
     }
 }
 
@@ -558,10 +576,10 @@ fn extract_links(
 
 fn rect_from_pdf(rect: PdfRect, geometry: PageGeometry) -> Result<RawRect, ConversionError> {
     let unrotated = RawRect::try_new(
-        rect.left().value,
-        geometry.source_height - rect.top().value,
-        rect.right().value,
-        geometry.source_height - rect.bottom().value,
+        rect.left().value - geometry.source_left,
+        geometry.source_height - (rect.top().value - geometry.source_bottom),
+        rect.right().value - geometry.source_left,
+        geometry.source_height - (rect.bottom().value - geometry.source_bottom),
     )
     .ok_or_else(|| ConversionError::ConversionFailed {
         message: "PDFium returned non-finite rectangle coordinates".into(),
