@@ -2,7 +2,13 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::{DelimiterDetectionError, detect_delimiter};
+use crate::{
+    StructuredLimits,
+    csv::{DelimiterDetectionError, detect_delimiter_with_limits},
+    json::validate_json_candidate,
+    strip_utf8_bom,
+    xml::validate_xml_candidate,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructuredFormat {
@@ -35,70 +41,107 @@ pub enum DetectionError {
     },
     #[error("no supported structured format signature was found")]
     Unsupported,
+    #[error("limit {limit} exceeded: actual {actual}, maximum {maximum}")]
+    LimitExceeded {
+        limit: &'static str,
+        actual: u64,
+        maximum: u64,
+    },
 }
 
 pub fn detect_format(path: &Path, bytes: &[u8]) -> Result<StructuredFormat, DetectionError> {
-    let input = std::str::from_utf8(bytes).map_err(|error| DetectionError::InvalidUtf8 {
-        message: error.to_string(),
+    detect_format_with_limits(path, bytes, &StructuredLimits::default())
+}
+
+pub(crate) fn detect_format_with_limits(
+    path: &Path,
+    bytes: &[u8],
+    limits: &StructuredLimits,
+) -> Result<StructuredFormat, DetectionError> {
+    let input = std::str::from_utf8(strip_utf8_bom(bytes)).map_err(|error| {
+        DetectionError::InvalidUtf8 {
+            message: error.to_string(),
+        }
     })?;
     let extension = StructuredFormat::from_extension(path);
-    let trimmed = input.trim_start_matches('\u{feff}').trim_start();
-    let strong_signature = if trimmed.starts_with('<') {
-        Some(StructuredFormat::Xml)
-    } else if trimmed.starts_with(['{', '[']) || is_json_scalar(trimmed) {
-        Some(StructuredFormat::Json)
-    } else {
-        None
-    };
+    let mut candidates = Vec::new();
+    let mut first_limit = None;
 
-    if let Some(signature) = strong_signature {
-        if let Some(extension) = extension
-            && extension != signature
-        {
-            return Err(DetectionError::Conflict {
-                extension,
-                signature,
+    match validate_json_candidate(input, limits) {
+        Ok(true) => candidates.push(StructuredFormat::Json),
+        Ok(false) => {}
+        Err(error) => remember_limit(&mut first_limit, error),
+    }
+    match validate_xml_candidate(input, limits) {
+        Ok(true) => candidates.push(StructuredFormat::Xml),
+        Ok(false) => {}
+        Err(error) => remember_limit(&mut first_limit, error),
+    }
+    match detect_delimiter_with_limits(bytes, limits) {
+        Ok(_) => candidates.push(StructuredFormat::Csv),
+        Err(DelimiterDetectionError::Ambiguous { .. }) => {
+            return Err(DetectionError::Ambiguous {
+                candidates: vec![StructuredFormat::Csv],
             });
         }
-        return Ok(signature);
-    }
+        Err(DelimiterDetectionError::LimitExceeded {
+            limit,
+            actual,
+            maximum,
+        }) => {
+            first_limit.get_or_insert((limit, actual, maximum));
+        }
+        Err(
+            DelimiterDetectionError::InvalidUtf8 { .. }
+            | DelimiterDetectionError::NoDelimiter
+            | DelimiterDetectionError::Corrupt { .. },
+        ) => {}
+    };
 
-    match detect_delimiter(bytes) {
-        Ok(_) => {
-            if let Some(extension) = extension
-                && extension != StructuredFormat::Csv
-            {
-                return Err(DetectionError::Conflict {
-                    extension,
-                    signature: StructuredFormat::Csv,
-                });
+    candidates.sort_by_key(|format| match format {
+        StructuredFormat::Csv => 0,
+        StructuredFormat::Json => 1,
+        StructuredFormat::Xml => 2,
+    });
+    candidates.dedup();
+    match candidates.as_slice() {
+        [] => {
+            if let Some((limit, actual, maximum)) = first_limit {
+                Err(DetectionError::LimitExceeded {
+                    limit,
+                    actual,
+                    maximum,
+                })
+            } else {
+                extension.ok_or(DetectionError::Unsupported)
             }
-            Ok(StructuredFormat::Csv)
         }
-        Err(DelimiterDetectionError::Ambiguous { .. }) => Err(DetectionError::Ambiguous {
-            candidates: vec![StructuredFormat::Csv],
-        }),
-        Err(DelimiterDetectionError::InvalidUtf8 { message }) => {
-            Err(DetectionError::InvalidUtf8 { message })
+        [signature] => {
+            if let Some(extension) = extension
+                && extension != *signature
+            {
+                Err(DetectionError::Conflict {
+                    extension,
+                    signature: *signature,
+                })
+            } else {
+                Ok(*signature)
+            }
         }
-        Err(DelimiterDetectionError::NoDelimiter) => extension.ok_or(DetectionError::Unsupported),
-        Err(DelimiterDetectionError::Corrupt { .. }) => {
-            extension.ok_or(DetectionError::Unsupported)
-        }
+        _ => Err(DetectionError::Ambiguous { candidates }),
     }
 }
 
-fn is_json_scalar(input: &str) -> bool {
-    if input.is_empty() {
-        return false;
+fn remember_limit(
+    slot: &mut Option<(&'static str, u64, u64)>,
+    error: mdconvert_core::ConversionError,
+) {
+    if let mdconvert_core::ConversionError::LimitExceeded {
+        limit,
+        actual,
+        maximum,
+    } = error
+    {
+        slot.get_or_insert((limit, actual, maximum));
     }
-    let mut deserializer = serde_json::Deserializer::from_str(input);
-    let parsed = serde::Deserialize::deserialize(&mut deserializer);
-    matches!(
-        parsed,
-        Ok(serde_json::Value::Null
-            | serde_json::Value::Bool(_)
-            | serde_json::Value::Number(_)
-            | serde_json::Value::String(_))
-    ) && deserializer.end().is_ok()
 }

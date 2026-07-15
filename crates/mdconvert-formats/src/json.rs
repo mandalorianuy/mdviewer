@@ -9,21 +9,28 @@ use mdconvert_core::{
 };
 use serde::{
     Deserialize, Deserializer,
-    de::{MapAccess, SeqAccess, Visitor},
+    de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
 };
 
-use crate::{StructuredFormat, ensure_format, read_input, strip_utf8_bom, utf8};
+use crate::{
+    StructuredFormat, StructuredLimits, ensure_format, limit_exceeded, read_input, strip_utf8_bom,
+    utf8,
+};
 
-const MAX_JSON_DEPTH: usize = 128;
 const SERDE_JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct JsonConverter;
 
-impl Converter for JsonConverter {
-    fn convert(&self, request: &ConversionRequest) -> Result<Document, ConversionError> {
+impl JsonConverter {
+    pub fn convert_with_limits(
+        &self,
+        request: &ConversionRequest,
+        limits: &StructuredLimits,
+    ) -> Result<Document, ConversionError> {
+        limits.validate()?;
         let bytes = read_input(request)?;
-        ensure_format(request, &bytes, StructuredFormat::Json)?;
+        ensure_format(request, &bytes, StructuredFormat::Json, limits)?;
         let input = utf8(strip_utf8_bom(&bytes), &request.source)?;
         if contains_reserved_number_key(input) {
             return Err(ConversionError::CorruptInput {
@@ -32,9 +39,23 @@ impl Converter for JsonConverter {
                 ),
             });
         }
-        enforce_nesting_limit(input, MAX_JSON_DEPTH)?;
+        enforce_nesting_limit(input, limits.max_json_depth)?;
         let mut deserializer = serde_json::Deserializer::from_str(input);
-        let value = JsonValue::deserialize(&mut deserializer).map_err(json_error)?;
+        deserializer.disable_recursion_limit();
+        let mut budget = JsonBudget::new(limits);
+        let parsed = JsonSeed {
+            budget: &mut budget,
+        }
+        .deserialize(&mut deserializer);
+        let value = match parsed {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(exceeded) = budget.exceeded {
+                    return Err(exceeded.into_conversion());
+                }
+                return Err(json_error(error));
+            }
+        };
         deserializer.end().map_err(json_error)?;
 
         let mut properties = BTreeMap::new();
@@ -50,6 +71,23 @@ impl Converter for JsonConverter {
             warnings: Vec::new(),
         })
     }
+}
+
+impl Converter for JsonConverter {
+    fn convert(&self, request: &ConversionRequest) -> Result<Document, ConversionError> {
+        self.convert_with_limits(request, &StructuredLimits::default())
+    }
+}
+
+pub(crate) fn validate_json_candidate(
+    input: &str,
+    limits: &StructuredLimits,
+) -> Result<bool, ConversionError> {
+    enforce_nesting_limit(input, limits.max_json_depth)?;
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    deserializer.disable_recursion_limit();
+    let parsed = serde::de::IgnoredAny::deserialize(&mut deserializer);
+    Ok(parsed.is_ok() && deserializer.end().is_ok())
 }
 
 fn contains_reserved_number_key(input: &str) -> bool {
@@ -99,18 +137,101 @@ enum JsonValue {
     Object(Vec<(String, Self)>),
 }
 
-impl<'de> Deserialize<'de> for JsonValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(JsonVisitor)
+#[derive(Debug, Clone, Copy)]
+struct BudgetExceeded {
+    limit: &'static str,
+    actual: u64,
+    maximum: u64,
+}
+
+impl BudgetExceeded {
+    fn into_conversion(self) -> ConversionError {
+        limit_exceeded(self.limit, self.actual, self.maximum)
     }
 }
 
-struct JsonVisitor;
+struct JsonBudget<'a> {
+    limits: &'a StructuredLimits,
+    nodes: u64,
+    exceeded: Option<BudgetExceeded>,
+}
 
-impl<'de> Visitor<'de> for JsonVisitor {
+impl<'a> JsonBudget<'a> {
+    fn new(limits: &'a StructuredLimits) -> Self {
+        Self {
+            limits,
+            nodes: 0,
+            exceeded: None,
+        }
+    }
+
+    fn add_node<E: serde::de::Error>(&mut self) -> Result<(), E> {
+        let actual = match self.nodes.checked_add(1) {
+            Some(actual) => actual,
+            None => {
+                self.exceeded = Some(BudgetExceeded {
+                    limit: "json_nodes",
+                    actual: u64::MAX,
+                    maximum: self.limits.max_json_nodes,
+                });
+                return Err(E::custom("JSON node counter overflowed"));
+            }
+        };
+        if actual > self.limits.max_json_nodes {
+            let exceeded = BudgetExceeded {
+                limit: "json_nodes",
+                actual,
+                maximum: self.limits.max_json_nodes,
+            };
+            self.exceeded = Some(exceeded);
+            return Err(E::custom("JSON node budget exceeded"));
+        }
+        self.nodes = actual;
+        Ok(())
+    }
+
+    fn check_entries<E: serde::de::Error>(
+        &mut self,
+        limit: &'static str,
+        actual: u64,
+        maximum: u64,
+    ) -> Result<(), E> {
+        if actual > maximum {
+            let exceeded = BudgetExceeded {
+                limit,
+                actual,
+                maximum,
+            };
+            self.exceeded = Some(exceeded);
+            return Err(E::custom(format!("{limit} budget exceeded")));
+        }
+        Ok(())
+    }
+}
+
+struct JsonSeed<'a, 'limits> {
+    budget: &'a mut JsonBudget<'limits>,
+}
+
+impl<'de> DeserializeSeed<'de> for JsonSeed<'_, '_> {
+    type Value = JsonValue;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.budget.add_node()?;
+        deserializer.deserialize_any(JsonVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct JsonVisitor<'a, 'limits> {
+    budget: &'a mut JsonBudget<'limits>,
+}
+
+impl<'de> Visitor<'de> for JsonVisitor<'_, '_> {
     type Value = JsonValue;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -154,8 +275,29 @@ impl<'de> Visitor<'de> for JsonVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0));
-        while let Some(value) = sequence.next_element()? {
+        let mut values = Vec::new();
+        let mut entries = 0u64;
+        while let Some(value) = sequence.next_element_seed(JsonSeed {
+            budget: self.budget,
+        })? {
+            entries = match entries.checked_add(1) {
+                Some(actual) => actual,
+                None => {
+                    self.budget.exceeded = Some(BudgetExceeded {
+                        limit: "json_array_entries",
+                        actual: u64::MAX,
+                        maximum: self.budget.limits.max_json_array_entries,
+                    });
+                    return Err(serde::de::Error::custom(
+                        "json_array_entries counter overflowed",
+                    ));
+                }
+            };
+            self.budget.check_entries(
+                "json_array_entries",
+                entries,
+                self.budget.limits.max_json_array_entries,
+            )?;
             values.push(value);
         }
         Ok(JsonValue::Array(values))
@@ -165,7 +307,7 @@ impl<'de> Visitor<'de> for JsonVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut values = Vec::with_capacity(map.size_hint().unwrap_or(0));
+        let mut values = Vec::new();
         let mut keys = HashSet::new();
         let Some(first_key) = map.next_key::<String>()? else {
             return Ok(JsonValue::Object(values));
@@ -181,15 +323,49 @@ impl<'de> Visitor<'de> for JsonVisitor {
                 .map_err(serde::de::Error::custom)?;
             return Ok(JsonValue::Number(number));
         }
+        let mut entries = 1u64;
+        self.budget.check_entries(
+            "json_object_entries",
+            entries,
+            self.budget.limits.max_json_object_entries,
+        )?;
         keys.insert(first_key.clone());
-        values.push((first_key, map.next_value()?));
+        values.push((
+            first_key,
+            map.next_value_seed(JsonSeed {
+                budget: self.budget,
+            })?,
+        ));
         while let Some(key) = map.next_key::<String>()? {
             if !keys.insert(key.clone()) {
                 return Err(serde::de::Error::custom(format!(
                     "duplicate JSON object key {key:?}"
                 )));
             }
-            values.push((key, map.next_value()?));
+            entries = match entries.checked_add(1) {
+                Some(actual) => actual,
+                None => {
+                    self.budget.exceeded = Some(BudgetExceeded {
+                        limit: "json_object_entries",
+                        actual: u64::MAX,
+                        maximum: self.budget.limits.max_json_object_entries,
+                    });
+                    return Err(serde::de::Error::custom(
+                        "json_object_entries counter overflowed",
+                    ));
+                }
+            };
+            self.budget.check_entries(
+                "json_object_entries",
+                entries,
+                self.budget.limits.max_json_object_entries,
+            )?;
+            values.push((
+                key,
+                map.next_value_seed(JsonSeed {
+                    budget: self.budget,
+                })?,
+            ));
         }
         Ok(JsonValue::Object(values))
     }
@@ -205,8 +381,8 @@ fn json_error(error: serde_json::Error) -> ConversionError {
     }
 }
 
-fn enforce_nesting_limit(input: &str, maximum: usize) -> Result<(), ConversionError> {
-    let mut depth = 0usize;
+fn enforce_nesting_limit(input: &str, maximum: u64) -> Result<(), ConversionError> {
+    let mut depth = 0u64;
     let mut in_string = false;
     let mut escaped = false;
     for character in input.chars() {
@@ -223,12 +399,17 @@ fn enforce_nesting_limit(input: &str, maximum: usize) -> Result<(), ConversionEr
         match character {
             '"' => in_string = true,
             '{' | '[' => {
-                depth = depth.saturating_add(1);
+                depth = match depth.checked_add(1) {
+                    Some(actual) => actual,
+                    None => {
+                        return Err(limit_exceeded("json_nesting_depth", u64::MAX, maximum));
+                    }
+                };
                 if depth > maximum {
                     return Err(ConversionError::LimitExceeded {
                         limit: "json_nesting_depth",
-                        actual: u64::try_from(depth).unwrap_or(u64::MAX),
-                        maximum: u64::try_from(maximum).unwrap_or(u64::MAX),
+                        actual: depth,
+                        maximum,
                     });
                 }
             }

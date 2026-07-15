@@ -6,11 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-csv = "=1.4.0"
 mdconvert-core = { path = "../mdconvert-core" }
-quick-xml = "=0.39.2"
+quick-xml = "=0.41.0"
 serde = "=1.0.228"
-serde_json = { version = "=1.0.150", features = ["arbitrary_precision", "preserve_order"] }
+serde_json = { version = "=1.0.150", features = ["arbitrary_precision", "preserve_order", "unbounded_depth"] }
 thiserror = "=2.0.18"
 
 [dev-dependencies]
