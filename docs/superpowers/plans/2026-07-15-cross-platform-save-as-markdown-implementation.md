@@ -98,7 +98,7 @@ La salida programática queda versionada como `mdviewer.convert/v1`; un cambio i
 
 Run `swift test` and `git status --short`.
 
-Expected: 90 tests execute with 0 failures; only the approved spec correction and the preexisting untracked June plan appear.
+Expected: 90 tests execute with 0 failures and the isolated worktree is clean. El archivo no versionado del worktree principal no se copia ni se altera.
 
 - [ ] **Step 2: Move the Swift product mechanically**
 
@@ -778,7 +778,7 @@ Reject non-Apple-Silicon output, unsigned app/workflow, missing PDFium checksum 
 
 - [ ] **Step 2: Configure portable CI**
 
-On macOS, Windows and Linux run Rust formatting, clippy, tests, frontend lint/typecheck/tests/build and Tauri smoke build. Cache PDFium by exact release and checksum. Run `cargo audit` and npm audit with reviewed allowlists stored as data.
+On macOS, Windows and Linux run Rust formatting, clippy, all pure unit tests (including layout PDF), frontend lint/typecheck/tests/build and Tauri smoke build. Run PDFium extraction and golden integration tests on macOS Apple Silicon with the asset and checksum pinned in Task 7; Windows and Linux compile `mdconvert-pdf` against dynamic loading but do not download an unpublished v1 runtime. Run `cargo audit` and npm audit with reviewed allowlists stored as data.
 
 - [ ] **Step 3: Configure `aarch64-apple-darwin` release only**
 
