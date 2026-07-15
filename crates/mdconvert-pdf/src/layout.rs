@@ -1,4 +1,4 @@
-use crate::{HeuristicConfig, RawGlyph, RawPage, RawRect};
+use crate::{HeuristicConfig, RawGlyph, RawPage, RawRect, RawWord};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Line {
@@ -13,11 +13,20 @@ pub(crate) struct Line {
 }
 
 pub(crate) fn group_page_lines(page: &RawPage, config: &HeuristicConfig) -> Vec<Line> {
+    if !page.words.is_empty() {
+        return group_page_words(page, config);
+    }
+
     let glyphs = page
         .glyphs
         .iter()
         .enumerate()
-        .filter(|(_, glyph)| !glyph.text.chars().all(char::is_whitespace))
+        .filter(|(_, glyph)| {
+            !glyph
+                .text
+                .chars()
+                .all(|character| matches!(character, '\r' | '\n'))
+        })
         .map(|(index, glyph)| (index, glyph.clone()))
         .collect::<Vec<_>>();
 
@@ -50,8 +59,7 @@ pub(crate) fn group_page_lines(page: &RawPage, config: &HeuristicConfig) -> Vec<
             }
             segments.last_mut().unwrap().push(glyph);
         }
-        for mut segment in segments {
-            segment.sort_by_key(|(source_index, _)| *source_index);
+        for segment in segments {
             let segment = segment
                 .into_iter()
                 .map(|(_, glyph)| glyph)
@@ -66,12 +74,107 @@ pub(crate) fn group_page_lines(page: &RawPage, config: &HeuristicConfig) -> Vec<
     lines
 }
 
+fn group_page_words(page: &RawPage, config: &HeuristicConfig) -> Vec<Line> {
+    let mut rows: Vec<Vec<&RawWord>> = Vec::new();
+    for word in &page.words {
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|row| same_rect_line(row[0].bounds, word.bounds, config))
+        {
+            row.push(word);
+        } else {
+            rows.push(vec![word]);
+        }
+    }
+
+    let mut lines = Vec::new();
+    for mut row in rows {
+        row.sort_by(|left, right| left.bounds.left.total_cmp(&right.bounds.left));
+        let mut segments: Vec<Vec<&RawWord>> = Vec::new();
+        for word in row {
+            let splits = segments
+                .last()
+                .and_then(|segment| segment.last())
+                .is_some_and(|previous| {
+                    word.bounds.left - previous.bounds.right > config.line_segment_gap_points
+                });
+            if splits || segments.is_empty() {
+                segments.push(Vec::new());
+            }
+            segments.last_mut().unwrap().push(word);
+        }
+        lines.extend(
+            segments
+                .into_iter()
+                .filter(|segment| !segment.is_empty())
+                .map(|segment| build_word_line(page, &segment)),
+        );
+    }
+    lines.sort_by(line_position_cmp);
+    lines
+}
+
+fn build_word_line(page: &RawPage, words: &[&RawWord]) -> Line {
+    let mut bounds = words[0].bounds;
+    let mut text = String::new();
+    let mut glyph_spans = Vec::new();
+    let mut size_sum = 0.0;
+    let mut visible_count = 0_usize;
+    let mut weights = Vec::new();
+    for (word_index, word) in words.iter().enumerate() {
+        if word_index > 0 {
+            text.push(' ');
+        }
+        bounds = bounds.union(word.bounds);
+        let word_start = text.len();
+        text.push_str(&word.text);
+        let mut offset = 0_usize;
+        for glyph in page
+            .glyphs
+            .get(word.glyph_start..word.glyph_end)
+            .unwrap_or_default()
+            .iter()
+            .filter(|glyph| !glyph.text.chars().all(char::is_whitespace))
+        {
+            let start = word_start.saturating_add(offset);
+            offset = offset.saturating_add(glyph.text.len());
+            let end = word_start.saturating_add(offset).min(text.len());
+            if start < end {
+                glyph_spans.push((start, end, glyph.bounds));
+            }
+            size_sum += glyph.font_size;
+            visible_count += 1;
+            if let Some(weight) = glyph.font_weight {
+                weights.push(weight);
+            }
+        }
+    }
+    weights.sort_unstable();
+    Line {
+        page: page.number,
+        page_width: page.width,
+        page_height: page.height,
+        text,
+        bounds,
+        font_size: if visible_count == 0 {
+            0.0
+        } else {
+            size_sum / visible_count as f32
+        },
+        font_weight: weights.get(weights.len() / 2).copied(),
+        glyph_spans,
+    }
+}
+
 fn same_visual_line(left: &RawGlyph, right: &RawGlyph, config: &HeuristicConfig) -> bool {
-    let overlap =
-        left.bounds.bottom.min(right.bounds.bottom) - left.bounds.top.max(right.bounds.top);
-    let minimum_height = left.bounds.height().min(right.bounds.height());
+    same_rect_line(left.bounds, right.bounds, config)
+}
+
+fn same_rect_line(left: RawRect, right: RawRect, config: &HeuristicConfig) -> bool {
+    let overlap = left.bottom.min(right.bottom) - left.top.max(right.top);
+    let minimum_height = left.height().min(right.height());
     (minimum_height > 0.0 && overlap / minimum_height >= config.line_vertical_overlap_ratio)
-        || (left.bounds.top - right.bounds.top).abs() <= config.line_y_tolerance_points
+        || (left.top - right.top).abs() <= config.line_y_tolerance_points
 }
 
 fn build_line(page: &RawPage, glyphs: Vec<RawGlyph>, config: &HeuristicConfig) -> Line {
@@ -80,25 +183,30 @@ fn build_line(page: &RawPage, glyphs: Vec<RawGlyph>, config: &HeuristicConfig) -
     let mut glyph_spans = Vec::with_capacity(glyphs.len());
     let mut size_sum = 0.0;
     let mut weights = Vec::new();
-    let mut previous: Option<&RawGlyph> = None;
+    let mut previous_visible: Option<&RawGlyph> = None;
     for glyph in &glyphs {
         bounds = bounds.union(glyph.bounds);
-        if previous.is_some_and(|previous| {
+        if glyph.text.chars().all(char::is_whitespace) {
+            if !text.is_empty() && !text.ends_with(' ') {
+                text.push(' ');
+            }
+            continue;
+        }
+        if previous_visible.is_some_and(|previous| {
             glyph.bounds.left - previous.bounds.right
                 > previous.font_size.max(glyph.font_size) * config.word_gap_ratio
-        }) {
+        }) && !text.ends_with(' ')
+        {
             text.push(' ');
         }
         let start = text.len();
         text.push_str(&glyph.text);
         glyph_spans.push((start, text.len(), glyph.bounds));
-        if !glyph.text.chars().all(char::is_whitespace) {
-            size_sum += glyph.font_size;
-            if let Some(weight) = glyph.font_weight {
-                weights.push(weight);
-            }
+        size_sum += glyph.font_size;
+        if let Some(weight) = glyph.font_weight {
+            weights.push(weight);
         }
-        previous = Some(glyph);
+        previous_visible = Some(glyph);
     }
     let visible_count = glyphs
         .iter()

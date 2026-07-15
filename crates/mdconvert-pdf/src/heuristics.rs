@@ -35,6 +35,8 @@ pub struct HeuristicConfig {
     pub table_alignment_tolerance_points: f32,
     /// Maximum baseline drift, in PDF points, within one table row.
     pub table_row_y_tolerance_points: f32,
+    /// Maximum adjacent table-row distance as a ratio of row font size.
+    pub table_max_row_gap_ratio: f32,
     /// Minimum repeated row count required for table inference.
     pub table_min_rows: usize,
     /// Minimum aligned column count required for table inference.
@@ -70,6 +72,7 @@ impl Default for HeuristicConfig {
             list_indent_tolerance_points: 8.0,
             table_alignment_tolerance_points: 8.0,
             table_row_y_tolerance_points: 2.0,
+            table_max_row_gap_ratio: 4.5,
             table_min_rows: 2,
             table_min_columns: 2,
             rule_axis_tolerance_points: 2.0,
@@ -125,6 +128,7 @@ impl HeuristicConfig {
                 "table_row_y_tolerance_points",
                 self.table_row_y_tolerance_points,
             ),
+            ("table_max_row_gap_ratio", self.table_max_row_gap_ratio),
             (
                 "rule_axis_tolerance_points",
                 self.rule_axis_tolerance_points,
@@ -147,6 +151,43 @@ impl HeuristicConfig {
         }
         for (name, value) in [
             (
+                "line_vertical_overlap_ratio",
+                self.line_vertical_overlap_ratio,
+            ),
+            (
+                "column_ambiguity_span_ratio",
+                self.column_ambiguity_span_ratio,
+            ),
+            ("link_intersection_ratio", self.link_intersection_ratio),
+        ] {
+            if value <= 0.0 || value > 1.0 {
+                return Err(ConversionError::ConversionFailed {
+                    message: format!("invalid PDF heuristic {name}: expected a ratio in (0, 1]"),
+                });
+            }
+        }
+        if !(0.0..0.5).contains(&self.chrome_edge_ratio) {
+            return Err(ConversionError::ConversionFailed {
+                message: "invalid PDF heuristic chrome_edge_ratio: top and bottom ranges must not overlap"
+                    .into(),
+            });
+        }
+        if self.heading_level_2_size_ratio < 1.0
+            || self.heading_level_1_size_ratio < self.heading_level_2_size_ratio
+        {
+            return Err(ConversionError::ConversionFailed {
+                message: "invalid PDF heading ratios: level 1 must be at least level 2 and both must be at least 1"
+                    .into(),
+                });
+        }
+        if !(1..=1_000).contains(&self.heading_bold_weight) {
+            return Err(ConversionError::ConversionFailed {
+                message: "invalid PDF heuristic heading_bold_weight: expected a weight from 1 through 1000"
+                    .into(),
+            });
+        }
+        for (name, value) in [
+            (
                 "column_min_lines_per_column",
                 self.column_min_lines_per_column,
             ),
@@ -154,9 +195,11 @@ impl HeuristicConfig {
             ("table_min_columns", self.table_min_columns),
             ("chrome_min_pages", self.chrome_min_pages),
         ] {
-            if value == 0 {
+            if value < 2 {
                 return Err(ConversionError::ConversionFailed {
-                    message: format!("invalid PDF heuristic {name}: expected a positive count"),
+                    message: format!(
+                        "invalid PDF heuristic {name}: expected a count of at least 2"
+                    ),
                 });
             }
         }

@@ -44,9 +44,12 @@ pub fn reconstruct_with_config(
     let mut warnings = Vec::new();
     let body_size = body_font_size(page_lines.values().flatten());
     let mut positioned = Vec::new();
+    let mut column_boundaries = BTreeMap::new();
     for page in &raw.pages {
         let lines = page_lines.remove(&page.number).unwrap_or_default();
-        positioned.extend(infer_page(page, lines, body_size, config, &mut warnings));
+        let inference = infer_page(page, lines, body_size, config, &mut warnings);
+        column_boundaries.insert(page.number, inference.column_boundary);
+        positioned.extend(inference.blocks);
     }
 
     let mut assets = Vec::new();
@@ -56,8 +59,17 @@ pub fn reconstruct_with_config(
         .flat_map(|page| page.images.iter().map(move |image| (page.number, image)))
         .collect::<Vec<_>>();
     images.sort_by(|(left_page, left), (right_page, right)| {
+        let left_region = reading_region(
+            column_boundaries.get(left_page).copied().flatten(),
+            left.bounds.left,
+        );
+        let right_region = reading_region(
+            column_boundaries.get(right_page).copied().flatten(),
+            right.bounds.left,
+        );
         left_page
             .cmp(right_page)
+            .then_with(|| left_region.cmp(&right_region))
             .then_with(|| left.bounds.top.total_cmp(&right.bounds.top))
             .then_with(|| left.bounds.left.total_cmp(&right.bounds.left))
             .then_with(|| left.index.cmp(&right.index))
@@ -76,11 +88,10 @@ pub fn reconstruct_with_config(
             page,
             top: image.bounds.top,
             left: image.bounds.left,
-            order: positioned
-                .iter()
-                .filter(|block| block.page == page && block.top < image.bounds.top)
-                .count()
-                .saturating_mul(2),
+            region: reading_region(
+                column_boundaries.get(&page).copied().flatten(),
+                image.bounds.left,
+            ),
             block: Block::Image {
                 asset_id: id,
                 alt: String::new(),
@@ -107,16 +118,21 @@ struct PositionedBlock {
     page: u32,
     top: f32,
     left: f32,
-    order: usize,
+    region: usize,
     block: Block,
 }
 
 fn positioned_cmp(left: &PositionedBlock, right: &PositionedBlock) -> std::cmp::Ordering {
     left.page
         .cmp(&right.page)
-        .then_with(|| left.order.cmp(&right.order))
+        .then_with(|| left.region.cmp(&right.region))
         .then_with(|| left.top.total_cmp(&right.top))
         .then_with(|| left.left.total_cmp(&right.left))
+}
+
+struct PageInference {
+    blocks: Vec<PositionedBlock>,
+    column_boundary: Option<f32>,
 }
 
 fn infer_page(
@@ -125,7 +141,7 @@ fn infer_page(
     body_size: f32,
     config: &HeuristicConfig,
     warnings: &mut Vec<ConversionWarning>,
-) -> Vec<PositionedBlock> {
+) -> PageInference {
     let mut output = Vec::new();
     let table_block = if let Some(table) = infer_table(page, &lines, config, warnings) {
         let table_bounds = table.bounds;
@@ -139,14 +155,14 @@ fn infer_page(
             page: page.number,
             top: table_bounds.top,
             left: table_bounds.left,
-            order: 0,
+            region: 0,
             block: table.block,
         })
     } else {
         None
     };
 
-    order_columns(&mut lines, config, warnings);
+    let column_boundary = order_columns(&mut lines, config, warnings);
     let links = &page.links;
     let mut index = 0;
     while index < lines.len() {
@@ -185,7 +201,7 @@ fn infer_page(
                 page: page.number,
                 top,
                 left: list_left,
-                order: 0,
+                region: 0,
                 block: Block::List {
                     ordered,
                     start: ordered.then_some(start),
@@ -202,7 +218,7 @@ fn infer_page(
                 page: page.number,
                 top: line.bounds.top,
                 left: line.bounds.left,
-                order: 0,
+                region: 0,
                 block: Block::Heading {
                     level,
                     content: linked_inlines(&line.text, line, links, config, warnings),
@@ -229,7 +245,7 @@ fn infer_page(
             page: page.number,
             top,
             left,
-            order: 0,
+            region: 0,
             block: Block::Paragraph { content },
         });
     }
@@ -240,10 +256,17 @@ fn infer_page(
             .unwrap_or(output.len());
         output.insert(position, table);
     }
-    for (index, block) in output.iter_mut().enumerate() {
-        block.order = index.saturating_mul(2).saturating_add(1);
+    for block in &mut output {
+        block.region = reading_region(column_boundary, block.left);
     }
-    output
+    PageInference {
+        blocks: output,
+        column_boundary,
+    }
+}
+
+fn reading_region(column_boundary: Option<f32>, left: f32) -> usize {
+    column_boundary.map_or(0, |boundary| usize::from(left >= boundary))
 }
 
 fn line_without_prefix(line: &Line, prefix_bytes: usize) -> Line {
@@ -289,8 +312,10 @@ fn infer_table(
     config: &HeuristicConfig,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Option<TableInference> {
-    if let Some(table) = ruled_table(page, lines, config, warnings) {
-        return Some(table);
+    match ruled_table(page, lines, config, warnings) {
+        Ok(Some(table)) => return Some(table),
+        Err(()) => return None,
+        Ok(None) => {}
     }
     let rows = group_rows(lines, config.table_row_y_tolerance_points);
     let multi_rows = rows
@@ -309,8 +334,46 @@ fn infer_table(
                             <= config.table_alignment_tolerance_points
                     })
         });
-        if aligned {
+        let compact = multi_rows.windows(2).all(|pair| {
+            let previous = pair[0];
+            let next = pair[1];
+            let row_font_size = previous
+                .iter()
+                .chain(next.iter())
+                .map(|line| line.font_size)
+                .max_by(f32::total_cmp)
+                .unwrap_or(0.0);
+            next[0].bounds.top - previous[0].bounds.top
+                <= row_font_size * config.table_max_row_gap_ratio
+        });
+        if aligned && compact {
+            let first_top = multi_rows[0][0].bounds.top;
+            let last_top = multi_rows.last().unwrap()[0].bounds.top;
+            let edge_allowance = multi_rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(|line| line.font_size)
+                .max_by(f32::total_cmp)
+                .unwrap_or(0.0)
+                * config.table_max_row_gap_ratio;
+            let has_incomplete_local_row = rows.iter().any(|row| {
+                row.len() != width
+                    && row[0].bounds.top >= first_top - edge_allowance
+                    && row[0].bounds.top <= last_top + edge_allowance
+            });
+            if has_incomplete_local_row {
+                warnings.push(ConversionWarning {
+                    code: WarningCode::TableDegraded,
+                    message: "borderless table candidate contained an incomplete local row; preserved as text"
+                        .into(),
+                    page: Some(page.number),
+                });
+                return None;
+            }
             return Some(table_from_rows(page, &multi_rows, config, warnings));
+        }
+        if !compact {
+            return None;
         }
     }
     if rows.iter().any(|row| row.len() >= config.table_min_columns) {
@@ -329,7 +392,7 @@ fn ruled_table(
     lines: &[Line],
     config: &HeuristicConfig,
     warnings: &mut Vec<ConversionWarning>,
-) -> Option<TableInference> {
+) -> Result<Option<TableInference>, ()> {
     let (mut vertical, mut horizontal) = (Vec::new(), Vec::new());
     for rule in &page.rules {
         classify_axis(rule, config, &mut vertical, &mut horizontal);
@@ -338,7 +401,7 @@ fn ruled_table(
     deduplicate(&mut horizontal, config.rule_axis_tolerance_points);
     if vertical.len() < config.table_min_columns + 1 || horizontal.len() < config.table_min_rows + 1
     {
-        return None;
+        return Ok(None);
     }
     vertical.sort_by(f32::total_cmp);
     horizontal.sort_by(f32::total_cmp);
@@ -367,42 +430,84 @@ fn ruled_table(
             config.rule_axis_tolerance_points,
         )
     }) {
-        return None;
+        return Ok(None);
     }
-    let mut rows = Vec::new();
-    let mut consumed = Vec::new();
-    for y_pair in horizontal.windows(2) {
-        let mut row = Vec::new();
-        for x_pair in vertical.windows(2) {
-            let cell_lines = lines
+    let ambiguous_boundary = lines.iter().any(|line| {
+        (center_y(line.bounds) >= bounds.top
+            && center_y(line.bounds) <= bounds.bottom
+            && vertical
                 .iter()
-                .filter(|line| {
-                    center_x(line.bounds) >= x_pair[0]
-                        && center_x(line.bounds) <= x_pair[1]
-                        && center_y(line.bounds) >= y_pair[0]
-                        && center_y(line.bounds) <= y_pair[1]
-                })
-                .collect::<Vec<_>>();
-            for line in &cell_lines {
-                consumed.push(line_identity(line));
-            }
-            row.push(table_cell_inlines(
+                .skip(1)
+                .take(vertical.len() - 2)
+                .any(|rule| {
+                    line.bounds.left < *rule - config.rule_axis_tolerance_points
+                        && line.bounds.right > *rule + config.rule_axis_tolerance_points
+                }))
+            || (center_x(line.bounds) >= bounds.left
+                && center_x(line.bounds) <= bounds.right
+                && horizontal
+                    .iter()
+                    .skip(1)
+                    .take(horizontal.len() - 2)
+                    .any(|rule| {
+                        line.bounds.top < *rule - config.rule_axis_tolerance_points
+                            && line.bounds.bottom > *rule + config.rule_axis_tolerance_points
+                    }))
+    });
+    if ambiguous_boundary {
+        warnings.push(ConversionWarning {
+            code: WarningCode::TableDegraded,
+            message: "ruled table text straddled an internal rule; preserved as text".into(),
+            page: Some(page.number),
+        });
+        return Err(());
+    }
+
+    let mut cells = vec![vec![Vec::<&Line>::new(); vertical.len() - 1]; horizontal.len() - 1];
+    let mut consumed = Vec::new();
+    for line in lines {
+        let Some(column) = grid_cell_index(center_x(line.bounds), &vertical) else {
+            continue;
+        };
+        let Some(row) = grid_cell_index(center_y(line.bounds), &horizontal) else {
+            continue;
+        };
+        cells[row][column].push(line);
+        consumed.push(line_identity(line));
+    }
+    let mut rows = Vec::with_capacity(cells.len());
+    for row in cells {
+        let mut model_row = Vec::with_capacity(row.len());
+        for cell_lines in row {
+            model_row.push(table_cell_inlines(
                 &cell_lines,
                 &page.links,
                 config,
                 warnings,
             ));
         }
-        rows.push(row);
+        rows.push(model_row);
     }
-    Some(TableInference {
+    Ok(Some(TableInference {
         bounds,
         block: Block::Table {
             alignments: vec![Alignment::None; vertical.len() - 1],
             rows,
         },
         consumed,
-    })
+    }))
+}
+
+fn grid_cell_index(value: f32, boundaries: &[f32]) -> Option<usize> {
+    if value < boundaries[0] || value > *boundaries.last()? {
+        return None;
+    }
+    Some(
+        boundaries
+            .partition_point(|boundary| *boundary <= value)
+            .saturating_sub(1)
+            .min(boundaries.len() - 2),
+    )
 }
 
 fn rule_axis_covered(
@@ -546,27 +651,24 @@ fn order_columns(
     lines: &mut [Line],
     config: &HeuristicConfig,
     warnings: &mut Vec<ConversionWarning>,
-) {
+) -> Option<f32> {
     lines.sort_by(line_position_cmp);
     if lines.len() < 2 {
-        return;
+        return None;
     }
     let mut lefts = lines
         .iter()
         .map(|line| line.bounds.left)
         .collect::<Vec<_>>();
     lefts.sort_by(f32::total_cmp);
-    let Some((_, split)) = lefts
+    let (_, split) = lefts
         .windows(2)
         .enumerate()
         .map(|(index, pair)| (pair[1] - pair[0], index))
-        .max_by(|left, right| left.0.total_cmp(&right.0))
-    else {
-        return;
-    };
+        .max_by(|left, right| left.0.total_cmp(&right.0))?;
     let gap = lefts[split + 1] - lefts[split];
     if gap < config.column_min_gap_points {
-        return;
+        return None;
     }
     let boundary = (lefts[split] + lefts[split + 1]) / 2.0;
     let left_count = lines
@@ -598,6 +700,9 @@ fn order_columns(
         .min_by(f32::total_cmp)
         .unwrap_or(boundary);
     let has_empty_gutter = right_left - left_right >= config.column_min_gap_points;
+    let has_spanning_line = lines
+        .iter()
+        .any(|line| line.bounds.width() / line.page_width >= config.column_ambiguity_span_ratio);
     if left_count >= config.column_min_lines_per_column
         && right_count >= config.column_min_lines_per_column
         && clustered
@@ -610,17 +715,25 @@ fn order_columns(
                 .cmp(&right_column)
                 .then_with(|| left.bounds.top.total_cmp(&right.bounds.top))
         });
-    } else if lines
-        .iter()
-        .any(|line| line.bounds.width() / line.page_width >= config.column_ambiguity_span_ratio)
-    {
-        warnings.push(ConversionWarning {
-            code: WarningCode::AmbiguousReadingOrder,
-            message: "possible columns lacked enough independent lines; preserved geometric order"
-                .into(),
-            page: Some(lines[0].page),
-        });
+        return Some(boundary);
     }
+    let reason = if left_count < config.column_min_lines_per_column
+        || right_count < config.column_min_lines_per_column
+    {
+        "too few lines in one or both candidate columns"
+    } else if !clustered {
+        "weak edge clustering within candidate columns"
+    } else if has_spanning_line {
+        "occupied gutter caused by a spanning candidate line"
+    } else {
+        "occupied gutter between candidate columns"
+    };
+    warnings.push(ConversionWarning {
+        code: WarningCode::AmbiguousReadingOrder,
+        message: format!("rejected plausible column split: {reason}; preserved geometric order"),
+        page: Some(lines[0].page),
+    });
+    None
 }
 
 fn edge_spread(edges: &[f32]) -> f32 {

@@ -800,3 +800,357 @@ fn scanned_fixture_reaches_task_7_ocr_required_through_pdf_converter() {
         .unwrap_err();
     assert!(matches!(error, ConversionError::OcrRequired));
 }
+
+#[test]
+fn aligned_two_column_prose_is_not_invented_as_a_borderless_table() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Left first", 20.0, 20.0, 10.0, 400),
+            ("Right first", 180.0, 20.0, 10.0, 400),
+            ("Left second", 20.0, 70.0, 10.0, 400),
+            ("Right second", 180.0, 70.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(
+        !output
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    assert_eq!(
+        output.blocks.iter().map(block_text).collect::<Vec<_>>(),
+        ["Left first", "Left second", "Right first", "Right second"]
+    );
+}
+
+#[test]
+fn incomplete_borderless_table_row_preserves_all_text_and_degrades() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Key", 20.0, 20.0, 10.0, 700),
+            ("Amount", 130.0, 20.0, 10.0, 700),
+            ("Alpha", 20.0, 40.0, 10.0, 400),
+            ("10", 130.0, 40.0, 10.0, 400),
+            ("Incomplete", 20.0, 60.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(
+        !output
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    let text = all_text(&output.blocks);
+    for expected in ["Key", "Amount", "Alpha", "10", "Incomplete"] {
+        assert_eq!(text.matches(expected).count(), 1, "{text}");
+    }
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.code == WarningCode::TableDegraded)
+    );
+}
+
+#[test]
+fn glyphs_shuffled_within_one_segment_are_reconstructed_geometrically() {
+    let mut source = page(1, &[]);
+    source.glyphs = vec![
+        RawGlyph {
+            text: "C".into(),
+            bounds: rect(30.0, 20.0, 35.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: "A".into(),
+            bounds: rect(20.0, 20.0, 25.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: "B".into(),
+            bounds: rect(25.0, 20.0, 30.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+    ];
+
+    let output = reconstruct(document(vec![source])).unwrap();
+    assert_eq!(all_text(&output.blocks), "ABC");
+}
+
+#[test]
+fn explicit_narrow_space_is_preserved_below_inferred_word_gap_threshold() {
+    let mut source = page(1, &[]);
+    source.glyphs = vec![
+        RawGlyph {
+            text: "A".into(),
+            bounds: rect(20.0, 20.0, 25.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: " ".into(),
+            bounds: rect(25.0, 20.0, 26.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: "B".into(),
+            bounds: rect(26.0, 20.0, 31.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+    ];
+
+    let output = reconstruct(document(vec![source])).unwrap();
+    assert_eq!(all_text(&output.blocks), "A B");
+}
+
+#[test]
+fn images_share_the_detected_column_reading_order_with_text() {
+    let mut source = page(
+        1,
+        &[
+            ("Left above", 20.0, 20.0, 10.0, 400),
+            ("Right above", 180.0, 20.0, 10.0, 400),
+            ("Left below", 20.0, 100.0, 10.0, 400),
+            ("Right below", 180.0, 100.0, 10.0, 400),
+        ],
+    );
+    source.images = vec![
+        RawImage {
+            index: 1,
+            bounds: rect(20.0, 60.0, 30.0, 70.0),
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba: vec![255, 0, 0, 255],
+        },
+        RawImage {
+            index: 2,
+            bounds: rect(180.0, 60.0, 190.0, 70.0),
+            pixel_width: 1,
+            pixel_height: 1,
+            rgba: vec![0, 0, 255, 255],
+        },
+    ];
+
+    let output = reconstruct(document(vec![source])).unwrap();
+    assert_eq!(
+        output
+            .blocks
+            .iter()
+            .map(|block| match block {
+                Block::Image { asset_id, .. } => asset_id.as_str().to_owned(),
+                _ => block_text(block),
+            })
+            .collect::<Vec<_>>(),
+        [
+            "Left above",
+            "pdf-image-001",
+            "Left below",
+            "Right above",
+            "pdf-image-002",
+            "Right below",
+        ]
+    );
+}
+
+#[test]
+fn plausible_column_split_with_too_few_lines_warns_with_reason() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Left", 20.0, 20.0, 10.0, 400),
+            ("Right", 180.0, 20.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+    assert!(output.warnings.iter().any(|warning| {
+        warning.code == WarningCode::AmbiguousReadingOrder && warning.message.contains("too few")
+    }));
+}
+
+#[test]
+fn plausible_column_split_with_weak_edge_clusters_warns_with_reason() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Left one", 20.0, 20.0, 10.0, 400),
+            ("Left two", 50.0, 60.0, 10.0, 400),
+            ("Right one", 180.0, 25.0, 10.0, 400),
+            ("Right two", 210.0, 65.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+    assert!(output.warnings.iter().any(|warning| {
+        warning.code == WarningCode::AmbiguousReadingOrder && warning.message.contains("cluster")
+    }));
+}
+
+#[test]
+fn plausible_column_split_with_occupied_gutter_warns_with_reason() {
+    let config = HeuristicConfig {
+        column_ambiguity_span_ratio: 0.8,
+        ..HeuristicConfig::default()
+    };
+    let output = reconstruct_with_config(
+        document(vec![page(
+            1,
+            &[
+                ("Left reaches the gutter", 20.0, 20.0, 10.0, 400),
+                ("Left short", 20.0, 60.0, 10.0, 400),
+                ("Right one", 180.0, 25.0, 10.0, 400),
+                ("Right two", 180.0, 65.0, 10.0, 400),
+            ],
+        )]),
+        &config,
+    )
+    .unwrap();
+    assert!(output.warnings.iter().any(|warning| {
+        warning.code == WarningCode::AmbiguousReadingOrder && warning.message.contains("gutter")
+    }));
+}
+
+#[test]
+fn semantic_config_domains_reject_invalid_unit_ratios_and_heading_order() {
+    let invalid = [
+        HeuristicConfig {
+            chrome_edge_ratio: 2.0,
+            ..HeuristicConfig::default()
+        },
+        HeuristicConfig {
+            link_intersection_ratio: 1.1,
+            ..HeuristicConfig::default()
+        },
+        HeuristicConfig {
+            heading_level_1_size_ratio: 1.2,
+            heading_level_2_size_ratio: 1.5,
+            ..HeuristicConfig::default()
+        },
+        HeuristicConfig {
+            line_vertical_overlap_ratio: 1.01,
+            ..HeuristicConfig::default()
+        },
+        HeuristicConfig {
+            heading_bold_weight: 0,
+            ..HeuristicConfig::default()
+        },
+        HeuristicConfig {
+            table_min_rows: 1,
+            ..HeuristicConfig::default()
+        },
+    ];
+    for config in invalid {
+        assert!(matches!(
+            reconstruct_with_config(document(vec![]), &config),
+            Err(ConversionError::ConversionFailed { .. })
+        ));
+    }
+}
+
+#[test]
+fn text_straddling_an_internal_rule_degrades_without_duplication() {
+    let mut source = page(
+        1,
+        &[
+            ("A", 20.0, 15.0, 10.0, 700),
+            ("Wide", 70.0, 15.0, 10.0, 700),
+            ("B", 20.0, 35.0, 10.0, 400),
+            ("Y", 90.0, 35.0, 10.0, 400),
+        ],
+    );
+    for x in [10.0, 80.0, 150.0] {
+        source.rules.push(RawRule {
+            kind: RuleKind::Line,
+            bounds: rect(x, 10.0, x, 50.0),
+            stroke_width: 1.0,
+        });
+    }
+    for y in [10.0, 30.0, 50.0] {
+        source.rules.push(RawRule {
+            kind: RuleKind::Line,
+            bounds: rect(10.0, y, 150.0, y),
+            stroke_width: 1.0,
+        });
+    }
+
+    let output = reconstruct(document(vec![source])).unwrap();
+    assert!(
+        !output
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    let text = all_text(&output.blocks);
+    for expected in ["A", "Wide", "B", "Y"] {
+        assert_eq!(text.matches(expected).count(), 1, "{text}");
+    }
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.code == WarningCode::TableDegraded)
+    );
+}
+
+#[test]
+fn text_outside_a_ruled_grid_does_not_create_a_false_boundary_ambiguity() {
+    let mut source = page(
+        1,
+        &[
+            ("A", 20.0, 15.0, 10.0, 700),
+            ("X", 90.0, 15.0, 10.0, 700),
+            ("B", 20.0, 35.0, 10.0, 400),
+            ("Y", 90.0, 35.0, 10.0, 400),
+            ("Outside straddles", 70.0, 70.0, 10.0, 400),
+        ],
+    );
+    for x in [10.0, 80.0, 150.0] {
+        source.rules.push(RawRule {
+            kind: RuleKind::Line,
+            bounds: rect(x, 10.0, x, 50.0),
+            stroke_width: 1.0,
+        });
+    }
+    for y in [10.0, 30.0, 50.0] {
+        source.rules.push(RawRule {
+            kind: RuleKind::Line,
+            bounds: rect(10.0, y, 150.0, y),
+            stroke_width: 1.0,
+        });
+    }
+
+    let output = reconstruct(document(vec![source])).unwrap();
+    assert!(
+        output
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    assert_eq!(
+        all_text(&output.blocks)
+            .matches("Outside straddles")
+            .count(),
+        1
+    );
+    assert!(
+        output
+            .warnings
+            .iter()
+            .all(|warning| warning.code != WarningCode::TableDegraded)
+    );
+}
