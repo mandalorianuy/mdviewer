@@ -238,6 +238,11 @@ fn reports_io_error_when_destination_directory_cannot_be_written() {
     fs::create_dir(&destination).unwrap();
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o500)).unwrap();
     let _restore = RestorePermissions(destination.clone());
+    let probe = destination.join("privilege-probe");
+    if fs::write(&probe, b"probe").is_ok() {
+        fs::remove_file(probe).unwrap();
+        return;
+    }
     let markdown_path = destination.join("output.md");
 
     let error = publish(
@@ -372,6 +377,21 @@ fn rejects_unsafe_or_duplicate_asset_file_names() {
         "a/b.png",
         "a\\b.png",
         "C:drive.png",
+        ".MDVIEWER-ASSETS.JSON",
+        "trailing.",
+        "trailing ",
+        "name:stream.png",
+        "control\u{7}.png",
+        "CON",
+        "prn.txt",
+        "AuX.png",
+        "nul.dat",
+        "COM1.txt",
+        "com9",
+        "LPT1.log",
+        "lpt9",
+        "CONIN$.txt",
+        "conout$.png",
     ] {
         let error = publish(
             &document_with_asset(unsafe_name, b"asset"),
@@ -396,6 +416,57 @@ fn rejects_unsafe_or_duplicate_asset_file_names() {
     )
     .expect_err("duplicate name should fail");
     assert!(matches!(error, OutputError::DuplicateAssetFileName(name) if name == "same.png"));
+}
+
+#[test]
+fn rejects_case_insensitive_and_unicode_normalized_duplicate_asset_names() {
+    let temp = TestDir::new();
+    for (index, (first, second)) in [
+        ("Image.PNG", "image.png"),
+        ("caf\u{e9}.png", "cafe\u{301}.png"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut document = document_with_asset(first, b"one");
+        document.assets.push(Asset {
+            id: AssetId::new(format!("other-{index}")).unwrap(),
+            file_name: second.into(),
+            media_type: "image/png".into(),
+            data: b"two".to_vec(),
+        });
+
+        let error = publish(
+            &document,
+            &target(
+                temp.path().join(format!("foo-{index}.md")),
+                OverwritePolicy::Deny,
+            ),
+            &NeverCancel,
+        )
+        .expect_err("canonical duplicate should fail");
+
+        assert!(matches!(error, OutputError::DuplicateAssetFileName(name) if name == second));
+    }
+}
+
+#[test]
+fn an_existing_per_target_lock_prevents_publication_and_is_not_removed() {
+    let temp = TestDir::new();
+    let markdown_path = temp.path().join("foo.md");
+    let lock_path = temp.path().join(".foo.md.mdviewer.lock");
+    fs::write(&lock_path, b"another transaction").unwrap();
+
+    let error = publish(
+        &document_without_assets(),
+        &target(markdown_path.clone(), OverwritePolicy::Deny),
+        &NeverCancel,
+    )
+    .expect_err("existing lock should prevent publication");
+
+    assert!(matches!(error, OutputError::OutputExists(path) if path == lock_path));
+    assert_eq!(fs::read(&lock_path).unwrap(), b"another transaction");
+    assert!(!markdown_path.exists());
 }
 
 #[cfg(unix)]
