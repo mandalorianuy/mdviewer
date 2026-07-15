@@ -283,6 +283,30 @@ fn preserves_literal_gfm_punctuation_entities_and_indented_markers() {
 }
 
 #[test]
+fn escapes_literal_hyphen_rules_after_zero_through_three_leading_spaces() {
+    let document = empty_document(vec![Block::Paragraph {
+        content: text("---\n---\n ---\n  ---\n   ---\n    ---"),
+    }]);
+
+    assert_eq!(
+        emit(&document),
+        "\\---\n\\---\n \\---\n  \\---\n   \\---\n    ---\n"
+    );
+}
+
+#[test]
+fn escapes_literal_setext_rules_after_zero_through_three_leading_spaces() {
+    let document = empty_document(vec![Block::Paragraph {
+        content: text("paragraph\n===\n ===\n  ===\n   ===\n    ==="),
+    }]);
+
+    assert_eq!(
+        emit(&document),
+        "paragraph\n\\===\n \\===\n  \\===\n   \\===\n    ===\n"
+    );
+}
+
+#[test]
 fn uses_a_long_enough_tilde_fence_when_the_language_contains_a_backtick() {
     let document = empty_document(vec![Block::Code {
         language: Some("rust`edition".into()),

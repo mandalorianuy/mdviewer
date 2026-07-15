@@ -288,6 +288,10 @@ fn escape_text(text: &str, context: InlineContext) -> String {
             && leading_spaces <= 3
             && matches!(character, '-' | '+')
             && next_is_whitespace;
+        let starts_rule_marker = at_line_start
+            && leading_spaces <= 3
+            && matches!(character, '-' | '=')
+            && begins_rule_line(character, characters.clone());
         let ends_ordered_marker = matches!(character, '.' | ')')
             && leading_spaces <= 3
             && line_prefix_is_digits
@@ -298,6 +302,7 @@ fn escape_text(text: &str, context: InlineContext) -> String {
             '\\' | '`' | '*' | '_' | '~' | '[' | ']' | '<' | '>' | '#' | '!'
         ) || (context == InlineContext::Table && character == '|')
             || starts_block_marker
+            || starts_rule_marker
             || ends_ordered_marker
         {
             escaped.push('\\');
@@ -327,6 +332,19 @@ fn escape_text(text: &str, context: InlineContext) -> String {
         }
     }
     escaped
+}
+
+fn begins_rule_line(marker: char, mut remaining: std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let mut run_length = 1;
+    while remaining.peek() == Some(&marker) {
+        remaining.next();
+        run_length += 1;
+    }
+
+    run_length >= 3
+        && remaining
+            .take_while(|character| *character != '\n')
+            .all(char::is_whitespace)
 }
 
 fn escape_destination(destination: &str, context: InlineContext) -> String {
