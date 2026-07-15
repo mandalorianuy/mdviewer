@@ -1,3 +1,7 @@
-| Key | Amount |
-| --- | --- |
-| Alpha | 10 |
+Key
+
+Alpha
+
+Amount
+
+10

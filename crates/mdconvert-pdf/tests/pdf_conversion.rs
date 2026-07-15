@@ -340,19 +340,88 @@ fn table_keeps_its_geometric_position_after_preceding_text() {
 }
 
 #[test]
-fn infers_borderless_table_only_from_repeated_alignment_across_two_rows() {
+fn ambiguous_two_by_two_alignment_preserves_text_and_warns() {
     let output = reconstruct(document(vec![page(
         1,
         &[
-            ("Key", 20.0, 20.0, 10.0, 700),
-            ("Amount", 130.0, 20.0, 10.0, 700),
+            ("Key", 20.0, 20.0, 10.0, 400),
+            ("Amount", 130.0, 20.0, 10.0, 400),
             ("Alpha", 20.0, 40.0, 10.0, 400),
             ("10", 130.0, 40.0, 10.0, 400),
         ],
     )]))
     .unwrap();
 
-    assert!(matches!(output.blocks.as_slice(), [Block::Table { rows, .. }] if rows.len() == 2));
+    assert!(
+        !output
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    for expected in ["Key", "Amount", "Alpha", "10"] {
+        assert_eq!(all_text(&output.blocks).matches(expected).count(), 1);
+    }
+    assert!(output.warnings.iter().any(|warning| {
+        warning.code == WarningCode::TableDegraded
+            && warning.message
+                == "aligned borderless layout lacked table-specific multi-row column-type consistency; preserved as text"
+            && warning.page == Some(1)
+    }));
+}
+
+#[test]
+fn bold_per_column_headings_do_not_turn_compact_columns_into_a_table() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Left heading", 20.0, 20.0, 10.0, 700),
+            ("Right heading", 180.0, 20.0, 10.0, 700),
+            ("Left body", 20.0, 40.0, 10.0, 400),
+            ("Right body", 180.0, 40.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(
+        !output
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    assert_eq!(
+        output.blocks.iter().map(block_text).collect::<Vec<_>>(),
+        ["Left heading", "Left body", "Right heading", "Right body"]
+    );
+    assert!(output.warnings.iter().any(|warning| {
+        warning.code == WarningCode::TableDegraded
+            && warning.message
+                == "aligned borderless layout lacked table-specific multi-row column-type consistency; preserved as text"
+            && warning.page == Some(1)
+    }));
+}
+
+#[test]
+fn infers_borderless_table_from_repeated_heterogeneous_column_types() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Key", 20.0, 20.0, 10.0, 400),
+            ("Amount", 130.0, 20.0, 10.0, 400),
+            ("Alpha", 20.0, 40.0, 10.0, 400),
+            ("10", 130.0, 40.0, 10.0, 400),
+            ("Beta", 20.0, 60.0, 10.0, 400),
+            ("20", 130.0, 60.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(matches!(output.blocks.as_slice(), [Block::Table { rows, .. }] if rows.len() == 3));
+    assert!(
+        output
+            .warnings
+            .iter()
+            .all(|warning| warning.code != WarningCode::TableDegraded)
+    );
 }
 
 #[test]
@@ -364,6 +433,8 @@ fn links_intersecting_table_cell_text_remain_inside_that_cell() {
             ("Amount", 130.0, 20.0, 10.0, 700),
             ("Alpha", 20.0, 40.0, 10.0, 400),
             ("10", 130.0, 40.0, 10.0, 400),
+            ("Beta", 20.0, 60.0, 10.0, 400),
+            ("20", 130.0, 60.0, 10.0, 400),
         ],
     );
     source.links.push(RawLink {
@@ -770,11 +841,25 @@ fn fixture_models_cover_columns_headings_lists_tables_chrome_images_and_links() 
             .any(|block| matches!(block, Block::List { ordered: true, .. }))
     );
 
-    for fixture in ["table-bordered", "table-aligned"] {
-        assert!(
-            matches!(convert(fixture).blocks.as_slice(), [Block::Table { rows, .. }] if rows.len() == 2)
-        );
+    assert!(
+        matches!(convert("table-bordered").blocks.as_slice(), [Block::Table { rows, .. }] if rows.len() == 2)
+    );
+    let aligned = convert("table-aligned");
+    assert!(
+        !aligned
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    for expected in ["Key", "Amount", "Alpha", "10"] {
+        assert_eq!(all_text(&aligned.blocks).matches(expected).count(), 1);
     }
+    assert!(
+        aligned
+            .warnings
+            .iter()
+            .any(|warning| warning.code == WarningCode::TableDegraded)
+    );
 
     let chrome = convert("repeated-chrome");
     assert_eq!(all_text(&chrome.blocks), "First body Second body");

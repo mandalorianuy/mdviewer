@@ -347,18 +347,6 @@ fn infer_table(
                 <= row_font_size * config.table_max_row_gap_ratio
         });
         if aligned && compact {
-            let has_header_signal = multi_rows[0].iter().all(|line| {
-                line.font_weight
-                    .is_some_and(|weight| weight >= config.heading_bold_weight)
-            }) && multi_rows.iter().skip(1).flat_map(|row| row.iter()).any(
-                |line| {
-                    line.font_weight
-                        .is_none_or(|weight| weight < config.heading_bold_weight)
-                },
-            );
-            if !has_header_signal {
-                return None;
-            }
             let first_top = multi_rows[0][0].bounds.top;
             let last_top = multi_rows.last().unwrap()[0].bounds.top;
             let edge_allowance = multi_rows
@@ -382,7 +370,16 @@ fn infer_table(
                 });
                 return None;
             }
-            return Some(table_from_rows(page, &multi_rows, config, warnings));
+            if has_borderless_table_shape(&multi_rows) {
+                return Some(table_from_rows(page, &multi_rows, config, warnings));
+            }
+            warnings.push(ConversionWarning {
+                code: WarningCode::TableDegraded,
+                message: "aligned borderless layout lacked table-specific multi-row column-type consistency; preserved as text"
+                    .into(),
+                page: Some(page.number),
+            });
+            return None;
         }
         if !compact {
             return None;
@@ -397,6 +394,45 @@ fn infer_table(
         });
     }
     None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BorderlessCellShape {
+    Numeric,
+    Text,
+}
+
+fn has_borderless_table_shape(rows: &[&Vec<&Line>]) -> bool {
+    if rows.len() < 3 {
+        return false;
+    }
+    let width = rows[0].len();
+    let mut column_shapes = Vec::with_capacity(width);
+    for column in 0..width {
+        let expected = borderless_cell_shape(&rows[1][column].text);
+        if !rows
+            .iter()
+            .skip(2)
+            .all(|row| borderless_cell_shape(&row[column].text) == expected)
+        {
+            return false;
+        }
+        column_shapes.push(expected);
+    }
+    column_shapes.contains(&BorderlessCellShape::Numeric)
+        && column_shapes.contains(&BorderlessCellShape::Text)
+}
+
+fn borderless_cell_shape(text: &str) -> BorderlessCellShape {
+    if text
+        .trim()
+        .parse::<f64>()
+        .is_ok_and(|value| value.is_finite())
+    {
+        BorderlessCellShape::Numeric
+    } else {
+        BorderlessCellShape::Text
+    }
 }
 
 fn ruled_table(
