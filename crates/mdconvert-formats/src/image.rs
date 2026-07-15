@@ -13,6 +13,9 @@ use crate::{limit_exceeded, read_input};
 pub struct ImageLimits {
     pub max_chunks_or_segments: u64,
     pub max_metadata_bytes: u64,
+    pub max_width: u64,
+    pub max_height: u64,
+    pub max_pixels: u64,
 }
 
 impl Default for ImageLimits {
@@ -20,13 +23,21 @@ impl Default for ImageLimits {
         Self {
             max_chunks_or_segments: 16_384,
             max_metadata_bytes: 1024 * 1024,
+            max_width: 100_000,
+            max_height: 100_000,
+            max_pixels: 100_000_000,
         }
     }
 }
 
 impl ImageLimits {
     fn validate(&self) -> Result<(), ConversionError> {
-        if self.max_chunks_or_segments == 0 || self.max_metadata_bytes == 0 {
+        if self.max_chunks_or_segments == 0
+            || self.max_metadata_bytes == 0
+            || self.max_width == 0
+            || self.max_height == 0
+            || self.max_pixels == 0
+        {
             return Err(ConversionError::ConversionFailed {
                 message: "image limits must be greater than zero".into(),
             });
@@ -75,6 +86,7 @@ fn convert(request: &ConversionRequest, limits: &ImageLimits) -> Result<Document
             format: "local image (PNG/JPEG only in v1)".into(),
         });
     };
+    validate_dimensions(parsed.width, parsed.height, limits)?;
     let extension = request
         .source
         .extension()
@@ -127,6 +139,26 @@ fn convert(request: &ConversionRequest, limits: &ImageLimits) -> Result<Document
         }],
         warnings,
     })
+}
+
+fn validate_dimensions(
+    width: u32,
+    height: u32,
+    limits: &ImageLimits,
+) -> Result<(), ConversionError> {
+    let width = u64::from(width);
+    let height = u64::from(height);
+    if width > limits.max_width {
+        return Err(limit_exceeded("image_width", width, limits.max_width));
+    }
+    if height > limits.max_height {
+        return Err(limit_exceeded("image_height", height, limits.max_height));
+    }
+    let pixels = width.saturating_mul(height);
+    if pixels > limits.max_pixels {
+        return Err(limit_exceeded("image_pixels", pixels, limits.max_pixels));
+    }
+    Ok(())
 }
 
 struct ParsedImage {
@@ -192,7 +224,7 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
                 let key = latin1(key);
                 let value = latin1(value);
                 validate_png_keyword(&key)?;
-                if !value.trim().is_empty() {
+                if semantic_png_keyword(&key) && !value.trim().is_empty() {
                     semantic_text = true;
                 }
                 metadata.insert(format!("png.{key}"), value);
@@ -211,7 +243,7 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
                 let key = latin1(key);
                 validate_png_keyword(&key)?;
                 let value = latin1(&decoded);
-                if !value.trim().is_empty() {
+                if semantic_png_keyword(&key) && !value.trim().is_empty() {
                     semantic_text = true;
                 }
                 metadata.insert(format!("png.{key}"), value);
@@ -251,7 +283,7 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
                 let value = std::str::from_utf8(text).map_err(|error| {
                     corrupt_error(format!("PNG iTXt text is not UTF-8: {error}"))
                 })?;
-                if !value.trim().is_empty() {
+                if semantic_png_keyword(key) && !value.trim().is_empty() {
                     semantic_text = true;
                 }
                 metadata.insert(format!("png.{key}"), value.into());
@@ -299,6 +331,8 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
     let mut metadata = BTreeMap::new();
     let mut comments = 0u64;
     let mut ended = false;
+    let mut saw_scan = false;
+    let mut entropy_bytes = 0u64;
     while cursor < bytes.len() {
         while bytes.get(cursor) == Some(&0xff) {
             cursor += 1;
@@ -312,6 +346,12 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
             break;
         }
         if marker == 0xda {
+            if dimensions.is_none() || saw_scan {
+                return Err(corrupt_error(
+                    "JPEG scan must follow exactly one supported frame",
+                ));
+            }
+            saw_scan = true;
             let length = usize::from(read_be_u16(bytes, cursor)?);
             if length < 2 {
                 return Err(corrupt_error("invalid JPEG scan header length"));
@@ -329,6 +369,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
                 {
                     return Err(corrupt_error("unsupported marker inside JPEG entropy data"));
                 }
+                entropy_bytes = entropy_bytes.saturating_add(1);
                 cursor += 1;
             }
             break;
@@ -347,6 +388,11 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
         if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
             if data.len() < 5 {
                 return Err(corrupt_error("truncated JPEG frame header"));
+            }
+            if dimensions.is_some() {
+                return Err(corrupt_error(
+                    "JPEG contains multiple supported frame headers",
+                ));
             }
             dimensions = Some((
                 u32::from(u16::from_be_bytes([data[3], data[4]])),
@@ -372,7 +418,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
         }
         cursor = data_end;
     }
-    if !ended {
+    if !ended || !saw_scan || entropy_bytes == 0 {
         return Err(corrupt_error("JPEG is truncated or has trailing bytes"));
     }
     let (width, height) =
@@ -380,7 +426,9 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
     if width == 0 || height == 0 {
         return Err(corrupt_error("JPEG dimensions must be nonzero"));
     }
-    let semantic_text = metadata.values().any(|value| !value.trim().is_empty());
+    let semantic_text = metadata.iter().any(|(key, value)| {
+        (key.starts_with("jpeg.comment") || key == "exif.description") && !value.trim().is_empty()
+    });
     Ok(ParsedImage {
         format: "jpeg",
         extensions: &["jpg", "jpeg"],
@@ -492,6 +540,13 @@ fn validate_png_keyword(keyword: &str) -> Result<(), ConversionError> {
         return Err(corrupt_error("invalid PNG text keyword"));
     }
     Ok(())
+}
+
+fn semantic_png_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword.to_ascii_lowercase().as_str(),
+        "title" | "description" | "comment" | "caption" | "subject" | "author"
+    )
 }
 
 fn latin1(bytes: &[u8]) -> String {

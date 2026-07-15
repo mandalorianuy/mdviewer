@@ -1,5 +1,3 @@
-# Portable EPUB
-
-Local chapter.
+# Chapter
 
 ![Pixel](image-001.png)

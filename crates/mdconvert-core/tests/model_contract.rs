@@ -340,6 +340,7 @@ fn warning_codes_have_stable_snake_case_values() {
             WarningCode::AdditionalArchiveEntriesSkipped,
             "additional_archive_entries_skipped",
         ),
+        (WarningCode::ExternalLinkSkipped, "external_link_skipped"),
         (WarningCode::OcrDeferred, "ocr_deferred"),
     ];
 

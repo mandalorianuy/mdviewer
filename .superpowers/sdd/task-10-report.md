@@ -14,40 +14,56 @@ Markdown strings.
 ## Implemented behavior
 
 - ZIP: validates the central directory and matching local headers entirely in
-  memory, sorts normalized names deterministically, converts the first local
-  CSV/JSON/XML/HTML entry, warns when additional convertible entries are
-  skipped, and otherwise emits a deterministic inventory.
+  memory, authenticates a complete gap-free sequence of physical local records
+  and data descriptors, caps archive budgets by the request input budget, sorts
+  normalized names deterministically, converts the first local CSV/JSON/XML/HTML
+  entry, warns when additional convertible entries are skipped, and otherwise
+  emits a deterministic inventory.
 - EPUB: requires the literal first stored entry to be the exact EPUB mimetype,
-  resolves `container.xml`, OPF manifest/spine/navigation, and local assets
-  inside the package, validates XHTML as strict XML, then reuses the bounded
-  HTML byte converter.
+  using physical local-record order, resolves namespace-authenticated
+  `container.xml`, OPF manifest/spine/navigation, and local assets inside the
+  package, validates XHTML as strict XML, and passes direct bounded asset
+  references to the HTML byte converter without data-URL round trips.
 - DOCX: reads relationships, metadata, styles with `basedOn` inheritance,
-  numbering, headings, nested lists, paragraphs, bold/italic runs, tables,
-  safe local links, and local images.
+  bounded iterative `basedOn` inheritance, numbering, headings, every
+  successive nested-list run, paragraphs, bold/italic runs, tables, safe local
+  links, and authenticated local image parts.
 - PPTX: follows presentation relationship order, preserves slide titles/body,
-  tables, local images, safe run links, notes, and page count.
+  shape-tree order across text/tables/images/groups, authenticated local images,
+  safe run links, unambiguous notes, and page count. Skipped-link warnings are
+  page-scoped and deduplicated.
 - XLSX: follows workbook relationship order, supports shared and inline
   strings, percentage display styles, and emits formulas as code alongside
-  cached displayed values. Formula contents are never evaluated.
+  cached displayed values. A1 references, row/cell ordering, dimensions, sparse
+  allocation, and external-data parts/relationships fail closed. Formula
+  contents are never evaluated.
 - PNG/JPEG: preserves original local image assets, dimensions, and bounded
-  semantic metadata without decoding pixels. Pixel-only images emit
-  `OcrDeferred`; Task 10 never invokes or requires OCR.
+  document-semantic metadata without decoding pixels. Width, height, and pixel
+  count are checked before allocation; JPEG requires a frame, scan, entropy,
+  and terminal EOI. Technical-only metadata does not suppress `OcrDeferred`;
+  Task 10 never invokes or requires OCR.
 
 The HTML crate gained a bounded `convert_bytes` entry point so EPUB and ZIP can
 reuse its semantic conversion without writing package members to disk.
 
 ## Security properties
 
-The archive reader performs no filesystem extraction. It rejects NUL names,
+The archive reader performs no filesystem extraction. It rejects preambles,
+unexplained gaps/overlaps/trailing local-record bytes, invalid descriptors, NUL names,
 absolute/drive/UNC paths, `..`, duplicate normalized paths, symlinks and other
 special entries, encryption, unsupported flags/compression, AES/ZIP64,
 central/local metadata disagreement, CRC mismatch, truncation, corrupt EOCD,
 deflate trailing bytes, and nested archives. Configurable non-zero limits cover
 entry count, per-entry compressed/uncompressed bytes, total expanded bytes, and
-expansion ratio. EPUB and OOXML relationship resolution is package-local and
-cannot escape the archive root. EPUB asset limits are cumulative across spine
-items. XLSX external-link parts fail closed. External package links/assets are
-not fetched.
+expansion ratio, and are never looser than the request input budget. Backslashes
+are normalized before rejecting UNC, drive, absolute, scheme, and escaping
+package paths. Expanded XML names authenticate EPUB/OOXML envelopes,
+relationships, content types, main parts, and supported content. EPUB asset
+limits are cumulative across spine items and deduplicate only repeated part
+references. OOXML images require declared media types and matching binary
+signatures; SVG and external images fail closed. External links are never
+fetched. XLSX external links, connections, queries, and any external
+relationship fail closed.
 
 The production dependency graph passes:
 
@@ -62,7 +78,7 @@ claimed as passed.
 
 ## TDD evidence
 
-Initial RED:
+Initial Task 10 RED:
 
 ```text
 cargo test -p mdconvert-formats --test container_formats --test image_without_ocr
@@ -75,6 +91,16 @@ entry ordering, DOCX inherited styles, deflate trailing bytes, PNG iTXt, and
 generic ZIP selection/warnings. Each focused case failed before its production
 change and passed afterward.
 
+Review-fix RED cases then reproduced the reported gaps before each production
+change: request-budget bypass; missing/corrupt ZIP descriptors and physical
+record gaps; physical EPUB mimetype ordering; UNC package targets; forged XML
+namespaces/attributes and missing OPC envelopes; bogus, external, and SVG OOXML
+images; dropped DOCX list runs and deep style chains; equal-but-distinct EPUB
+assets; invalid/out-of-order/sparse XLSX references, dimensions, connections,
+and external relationships; oversized image dimensions, malformed JPEG scans,
+and technical-only metadata; PPTX shape order, warning scope/deduplication, and
+ambiguous notes. Each is now covered by a passing regression.
+
 Final focused ZIP GREEN:
 
 ```text
@@ -86,14 +112,15 @@ Result: 1 passed, 0 failed.
 
 ## Final validation
 
-- `cargo test -p mdconvert-formats`: 52 passed, 0 failed (20 container, 5 image,
+- `cargo test -p mdconvert-formats`: 67 passed, 0 failed (32 container, 8 image,
   27 structured-format tests).
-- `cargo test -p mdconvert-core --test model_contract`: 16 passed, 0 failed.
+- `cargo test -p mdconvert-core`: 63 passed, 0 failed.
+- `cargo test -p mdconvert-html`: 18 passed, 0 failed.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
 - `cargo fmt --all -- --check`: passed.
 - Network dependency gate above: passed.
 - `PDFIUM_DYNAMIC_LIB_PATH="$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib" ./scripts/verify-workspace.sh`:
-  passed, including 194 Rust tests, doc tests, TypeScript checking, 3 frontend
+  passed, including 209 Rust tests, doc tests, TypeScript checking, 3 frontend
   tests, and the production frontend build.
 - `./scripts/verify-legacy-swift.sh`: 90 executed, 0 failures.
 - `git diff --check`: passed.
@@ -104,23 +131,23 @@ Portable authored fixtures:
 
 | File | SHA-256 |
 | --- | --- |
-| `bounded.zip` | `69cd980ef996f02fd33f59f2cb9e91ba5df72d0265076a96edfa1d795a53bcfd` |
-| `semantic.docx` | `0f45feccbf38c601c691b9cbac779b8a93f425734b9eafccf13b312093d675aa` |
-| `ordered.pptx` | `504277327962f2b45dc20d3b2776f120a49b50903f29115da9704cdefff0fd6f` |
-| `displayed.xlsx` | `398c7261e89d86bd73d987cdfb66d2aa15dbbcd7009e64274b68d766924bf396` |
-| `spine.epub` | `515b5b8c96399c79f79226b19886a6bfd6a1eb3b8bcc95bdbec94592669c3b9b` |
+| `bounded.zip` | `788aae8ff3a1f48853876d132d8b2b4d24314291ce315783deb1e2831b420cb1` |
+| `semantic.docx` | `9efd96a953f356ee200b5cefdfe6c2c0f78003817697579594b2ef9fab25810d` |
+| `ordered.pptx` | `34117f8143fcae8f8090bdbe1e867240225170cffe29ad137db4a2dd05016cb7` |
+| `displayed.xlsx` | `f6fcf0b389320a861993e9207905886429349b6bf349553e2d67a0dad5a5aa77` |
+| `spine.epub` | `a81fd9e379a9673cb00ce5ab18f6f6554b369010e0c1e1aa7f1cacaa861cea09` |
 | `metadata.png` | `f04e818d291f20fbe6dec8ec1ad52452a7c810a9caa944d35478b57ba40bfbc9` |
-| `metadata.jpg` | `82c99cea987ee571b2c0a6bd538a302dac359bf44e6eb9baa40d7748091d2547` |
+| `metadata.jpg` | `14f7a5e76f7cb0210ae140c4fbcd2ad77a9605bdc281a0557fd00dbb6024ad31` |
 
 Shared-emitter goldens:
 
 | File | SHA-256 |
 | --- | --- |
-| `bounded.zip.md` | `238df5ea782e7bbb8dc6b7eaeebc72aca6cfa0e3f573bcda76a9c7d487a4b43b` |
-| `semantic.docx.md` | `d05d0a342e9a5f61cecfae27fd3b79b6fbe91388d62cb3549804b1070c96489d` |
-| `ordered.pptx.md` | `d904be79359fcb001eff7915475aa5f168da3d3d3c595d830532e5aee560f214` |
-| `displayed.xlsx.md` | `f1ddd1811e01afe7739075aa5c78714a2a6eab5ad1110cbb48a3a9332b28d15d` |
-| `spine.epub.md` | `c1cd011d226f70bb8b9a744a2942cdf0ee01323b1fe3875c272cae8b0a389ef3` |
+| `bounded.zip.md` | `9df4545ab5f134847669f0d4ed7aec437ba0db33b1362bba1e3f5bc7a26abfa2` |
+| `semantic.docx.md` | `eaebffd780016a7c8fc91e602a9be9f9c703eef1d4fe5c1db5de3e88de4b2951` |
+| `ordered.pptx.md` | `b990fc7e3e00736c7bcc2c1ba72d2a08af4917903546be7bca8d3abdf559c748` |
+| `displayed.xlsx.md` | `c577f85f2daffa4d5edaac5985b167fb3c7d15ba0a9dbc02aae99e00f67e7139` |
+| `spine.epub.md` | `b0c0f04e6295bc08190c5b1f9bcbea2c8a69efc013fb6c319b361fcf7fb3b0e4` |
 | `metadata.png.md` | `65e169ea70f1c364f4e8f3aee620b98ba0d91384d537890b6f84fed583fcd281` |
 | `metadata.jpg.md` | `034e39df56dae237605dc09cc387b1be4d8aedcf76108f85bab974822a17e2f6` |
 

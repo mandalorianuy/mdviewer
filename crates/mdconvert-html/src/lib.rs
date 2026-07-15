@@ -1,7 +1,9 @@
 mod convert;
 mod dom;
 
-use mdconvert_core::{ConversionError, ConversionRequest, Converter, Document};
+use std::collections::HashMap;
+
+use mdconvert_core::{AssetId, ConversionError, ConversionRequest, Converter, Document};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HtmlConverter;
@@ -23,5 +25,17 @@ impl HtmlConverter {
     ) -> Result<Document, ConversionError> {
         let dom = dom::parse_bytes(bytes, request.limits.max_input_bytes)?;
         convert::document_from_dom(dom, request)
+    }
+
+    /// Converts bounded HTML bytes whose selected image sources already refer
+    /// to caller-owned local assets. No source is decoded or loaded again.
+    pub fn convert_bytes_with_asset_refs(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+        asset_refs: &HashMap<String, AssetId>,
+    ) -> Result<Document, ConversionError> {
+        let dom = dom::parse_bytes(bytes, request.limits.max_input_bytes)?;
+        convert::document_from_dom_with_asset_refs(dom, request, asset_refs)
     }
 }

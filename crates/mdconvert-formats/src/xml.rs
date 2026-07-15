@@ -78,36 +78,36 @@ pub(crate) fn validate_xml_candidate(
 pub(crate) struct XmlNode {
     pub(crate) name: String,
     pub(crate) attributes: Vec<(String, String)>,
+    namespace_uri: Option<String>,
+    local_name: String,
+    expanded_attributes: Vec<ExpandedAttribute>,
     pub(crate) content: Vec<XmlContent>,
 }
 
+#[derive(Debug)]
+struct ExpandedAttribute {
+    namespace_uri: Option<String>,
+    local_name: String,
+    value: String,
+}
+
 impl XmlNode {
-    pub(crate) fn local_name(&self) -> &str {
-        self.name
-            .rsplit_once(':')
-            .map_or(&self.name, |(_, local)| local)
+    pub(crate) fn is(&self, namespace_uri: &str, local_name: &str) -> bool {
+        self.namespace_uri.as_deref() == Some(namespace_uri) && self.local_name == local_name
     }
 
-    pub(crate) fn attr(&self, wanted: &str) -> Option<&str> {
-        self.attributes
-            .iter()
-            .find(|(name, _)| {
-                name == wanted
-                    || name
-                        .rsplit_once(':')
-                        .is_some_and(|(_, local)| local == wanted)
-            })
-            .map(|(_, value)| value.as_str())
+    pub(crate) fn namespace_uri(&self) -> Option<&str> {
+        self.namespace_uri.as_deref()
     }
 
-    pub(crate) fn attr_prefixed(&self, wanted_local: &str) -> Option<&str> {
-        self.attributes
+    pub(crate) fn attr_ns(&self, namespace_uri: Option<&str>, local_name: &str) -> Option<&str> {
+        self.expanded_attributes
             .iter()
-            .find(|(name, _)| {
-                name.rsplit_once(':')
-                    .is_some_and(|(_, local)| local == wanted_local)
+            .find(|attribute| {
+                attribute.namespace_uri.as_deref() == namespace_uri
+                    && attribute.local_name == local_name
             })
-            .map(|(_, value)| value.as_str())
+            .map(|attribute| attribute.value.as_str())
     }
 
     pub(crate) fn children(&self) -> impl Iterator<Item = &XmlNode> {
@@ -117,14 +117,23 @@ impl XmlNode {
         })
     }
 
-    pub(crate) fn child(&self, wanted: &str) -> Option<&XmlNode> {
-        self.children().find(|node| node.local_name() == wanted)
+    pub(crate) fn child_ns(&self, namespace_uri: &str, local_name: &str) -> Option<&XmlNode> {
+        self.children()
+            .find(|node| node.is(namespace_uri, local_name))
     }
 
-    pub(crate) fn descendants<'a>(&'a self, wanted: &'a str) -> Descendants<'a> {
+    pub(crate) fn descendants_ns<'a>(
+        &'a self,
+        namespace_uri: &'a str,
+        local_name: &'a str,
+    ) -> ExpandedDescendants<'a> {
         let mut stack: Vec<_> = self.children().collect();
         stack.reverse();
-        Descendants { stack, wanted }
+        ExpandedDescendants {
+            stack,
+            namespace_uri,
+            local_name,
+        }
     }
 
     pub(crate) fn text(&self) -> String {
@@ -143,12 +152,13 @@ impl XmlNode {
     }
 }
 
-pub(crate) struct Descendants<'a> {
+pub(crate) struct ExpandedDescendants<'a> {
     stack: Vec<&'a XmlNode>,
-    wanted: &'a str,
+    namespace_uri: &'a str,
+    local_name: &'a str,
 }
 
-impl<'a> Iterator for Descendants<'a> {
+impl<'a> Iterator for ExpandedDescendants<'a> {
     type Item = &'a XmlNode;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -156,7 +166,7 @@ impl<'a> Iterator for Descendants<'a> {
             let mut children: Vec<_> = node.children().collect();
             children.reverse();
             self.stack.extend(children);
-            if node.local_name() == self.wanted {
+            if node.is(self.namespace_uri, self.local_name) {
                 return Some(node);
             }
         }
@@ -759,14 +769,66 @@ fn frame_from_start(
     let namespace_bindings = namespace_bindings(&attributes)?;
     validate_element_namespace(&name, &namespace_bindings, ancestors)?;
     validate_expanded_attribute_names(&attributes, &namespace_bindings, ancestors)?;
+    let (namespace_uri, local_name) = expanded_element_name(&name, &namespace_bindings, ancestors)?;
+    let expanded_attributes = expanded_attributes(&attributes, &namespace_bindings, ancestors)?;
     Ok(XmlFrame {
         node: XmlNode {
             name,
             attributes,
+            namespace_uri,
+            local_name,
+            expanded_attributes,
             content: Vec::new(),
         },
         namespace_bindings,
     })
+}
+
+fn expanded_element_name(
+    name: &str,
+    current: &[NamespaceBinding],
+    ancestors: &[XmlFrame],
+) -> Result<(Option<String>, String), ConversionError> {
+    let (prefix, local) = name
+        .split_once(':')
+        .map_or(("", name), |(prefix, local)| (prefix, local));
+    let namespace = resolve_namespace(prefix, current, ancestors)
+        .filter(|uri| !uri.is_empty())
+        .map(ToOwned::to_owned);
+    if !prefix.is_empty() && namespace.is_none() {
+        return corrupt(format!(
+            "element prefix {prefix:?} is not declared in scope"
+        ));
+    }
+    Ok((namespace, local.to_owned()))
+}
+
+fn expanded_attributes(
+    attributes: &[(String, String)],
+    current: &[NamespaceBinding],
+    ancestors: &[XmlFrame],
+) -> Result<Vec<ExpandedAttribute>, ConversionError> {
+    attributes
+        .iter()
+        .filter(|(name, _)| name != "xmlns" && !name.starts_with("xmlns:"))
+        .map(|(name, value)| {
+            let (namespace_uri, local_name) = if let Some((prefix, local)) = name.split_once(':') {
+                let uri = resolve_namespace(prefix, current, ancestors).ok_or_else(|| {
+                    ConversionError::CorruptInput {
+                        message: format!("attribute prefix {prefix:?} is not declared in scope"),
+                    }
+                })?;
+                (Some(uri.to_owned()), local.to_owned())
+            } else {
+                (None, name.clone())
+            };
+            Ok(ExpandedAttribute {
+                namespace_uri,
+                local_name,
+                value: value.clone(),
+            })
+        })
+        .collect()
 }
 
 fn namespace_bindings(

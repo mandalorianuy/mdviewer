@@ -1,5 +1,4 @@
 ## Summary
 
-| Formula | Displayed |
-| --- | --- |
-| `=SUM(1,2)` (3) | 3 |
+| `=SUM(1,2)` (3) |
+| --- |

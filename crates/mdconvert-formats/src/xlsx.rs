@@ -6,11 +6,22 @@ use mdconvert_core::{
 };
 
 use crate::{
-    archive::{Archive, ArchiveLimits, parse_xml_bytes, relationships, resolve_package_path},
+    archive::{
+        Archive, ArchiveLimits, authenticate_ooxml, parse_xml_bytes, relationships,
+        resolve_package_path,
+    },
     xml::XmlNode,
 };
 
+const XLSX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+const WORKSHEET_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
+const S_NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
 const MAX_WORKSHEET_ROWS: u64 = 1_048_576;
+const MAX_MATERIALIZED_ROWS: u64 = 100_000;
 const MAX_WORKSHEET_COLUMNS: u64 = 16_384;
 const MAX_WORKSHEET_CELLS: u64 = 1_000_000;
 
@@ -20,6 +31,9 @@ pub struct XlsxConverter;
 impl Converter for XlsxConverter {
     fn convert(&self, request: &ConversionRequest) -> Result<Document, ConversionError> {
         let archive = Archive::open(request, &ArchiveLimits::default())?;
+        let content_types =
+            authenticate_ooxml(&archive, "xl/workbook.xml", XLSX_MAIN_CONTENT_TYPE)?;
+        reject_external_data(&archive, &content_types)?;
         if archive
             .entries
             .iter()
@@ -37,12 +51,18 @@ impl Converter for XlsxConverter {
         let shared = shared_strings(&archive)?;
         let styles = styles(&archive)?;
         let mut sheets = Vec::new();
-        for sheet in workbook.roots[0].descendants("sheet") {
+        let workbook_root = &workbook.roots[0];
+        if !workbook_root.is(S_NS, "workbook") {
+            return Err(corrupt_error(
+                "XLSX workbook root has the wrong expanded name",
+            ));
+        }
+        for sheet in workbook_root.descendants_ns(S_NS, "sheet") {
             let name = sheet
-                .attr("name")
+                .attr_ns(None, "name")
                 .ok_or_else(|| corrupt_error("workbook sheet is missing its name"))?;
             let id = sheet
-                .attr_prefixed("id")
+                .attr_ns(Some(R_NS), "id")
                 .ok_or_else(|| corrupt_error("workbook sheet is missing its relationship ID"))?;
             let relationship = rels.get(id).ok_or_else(|| {
                 corrupt_error(format!(
@@ -51,6 +71,11 @@ impl Converter for XlsxConverter {
             })?;
             if relationship.external {
                 return Err(corrupt_error("external XLSX worksheets are unsupported"));
+            }
+            if relationship.kind != WORKSHEET_REL {
+                return Err(corrupt_error(
+                    "workbook sheet relationship is not a worksheet",
+                ));
             }
             sheets.push((
                 name.to_owned(),
@@ -95,15 +120,61 @@ impl Converter for XlsxConverter {
     }
 }
 
+fn reject_external_data(
+    archive: &Archive,
+    content_types: &crate::archive::ContentTypes,
+) -> Result<(), ConversionError> {
+    let forbidden = [
+        "externallink",
+        "externaldata",
+        "connections",
+        "querytable",
+        "webquery",
+        "oleobject",
+        "linkeddata",
+        "datamodel",
+    ];
+    if content_types.media_types().any(|media_type| {
+        let lower = media_type.to_ascii_lowercase();
+        forbidden.iter().any(|needle| lower.contains(needle))
+    }) {
+        return Err(corrupt_error(
+            "XLSX external-data content types are unsupported",
+        ));
+    }
+    for part in archive
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .filter(|name| name.starts_with("xl/") && name.ends_with(".rels"))
+    {
+        for relationship in relationships(archive, part)? {
+            let lower = relationship.kind.to_ascii_lowercase();
+            if relationship.external || forbidden.iter().any(|needle| lower.contains(needle)) {
+                return Err(corrupt_error(format!(
+                    "XLSX relationship {:?} is external or external-data",
+                    relationship.kind
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn shared_strings(archive: &Archive) -> Result<Vec<String>, ConversionError> {
     let Some(entry) = archive.optional("xl/sharedStrings.xml") else {
         return Ok(Vec::new());
     };
     let parsed = parse_xml_bytes(&entry.data, "xl/sharedStrings.xml")?;
+    if !parsed.roots[0].is(S_NS, "sst") {
+        return Err(corrupt_error(
+            "XLSX shared strings root has the wrong expanded name",
+        ));
+    }
     Ok(parsed.roots[0]
         .children()
-        .filter(|node| node.local_name() == "si")
-        .map(|node| node.descendants("t").map(XmlNode::text).collect())
+        .filter(|node| node.is(S_NS, "si"))
+        .map(|node| node.descendants_ns(S_NS, "t").map(XmlNode::text).collect())
         .collect())
 }
 
@@ -119,22 +190,27 @@ fn styles(archive: &Archive) -> Result<Styles, ConversionError> {
     };
     let parsed = parse_xml_bytes(&entry.data, "xl/styles.xml")?;
     let root = &parsed.roots[0];
+    if !root.is(S_NS, "styleSheet") {
+        return Err(corrupt_error(
+            "XLSX styles root has the wrong expanded name",
+        ));
+    }
     let custom = root
-        .descendants("numFmt")
+        .descendants_ns(S_NS, "numFmt")
         .filter_map(|node| {
             Some((
-                node.attr("numFmtId")?.parse().ok()?,
-                node.attr("formatCode")?.to_owned(),
+                node.attr_ns(None, "numFmtId")?.parse().ok()?,
+                node.attr_ns(None, "formatCode")?.to_owned(),
             ))
         })
         .collect();
     let formats = root
-        .child("cellXfs")
+        .child_ns(S_NS, "cellXfs")
         .map(|node| {
             node.children()
-                .filter(|node| node.local_name() == "xf")
+                .filter(|node| node.is(S_NS, "xf"))
                 .map(|node| {
-                    node.attr("numFmtId")
+                    node.attr_ns(None, "numFmtId")
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(0)
                 })
@@ -152,29 +228,40 @@ fn worksheet_table(
 ) -> Result<Block, ConversionError> {
     let parsed = parse_xml_bytes(&archive.entry(path)?.data, path)?;
     let root = &parsed.roots[0];
+    if !root.is(S_NS, "worksheet") {
+        return Err(corrupt_error(
+            "XLSX worksheet root has the wrong expanded name",
+        ));
+    }
+    validate_dimension(root)?;
     let sheet_data = root
-        .child("sheetData")
+        .child_ns(S_NS, "sheetData")
         .ok_or_else(|| corrupt_error(format!("worksheet {path:?} has no sheetData")))?;
-    let mut rows = Vec::new();
+    let mut sparse_rows = Vec::new();
     let mut cell_count = 0u64;
     let mut maximum_columns = 0usize;
-    for row in sheet_data
-        .children()
-        .filter(|node| node.local_name() == "row")
-    {
+    let mut previous_row = 0u64;
+    for row in sheet_data.children().filter(|node| node.is(S_NS, "row")) {
         let row_number = row
-            .attr("r")
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_else(|| u64::try_from(rows.len() + 1).unwrap_or(u64::MAX));
+            .attr_ns(None, "r")
+            .ok_or_else(|| corrupt_error("worksheet row is missing its r attribute"))?
+            .parse::<u64>()
+            .map_err(|_| corrupt_error("worksheet row has an invalid r attribute"))?;
         if row_number == 0 || row_number > MAX_WORKSHEET_ROWS {
             return Err(limit("worksheet_rows", row_number, MAX_WORKSHEET_ROWS));
         }
-        let row_index = usize::try_from(row_number - 1)
-            .map_err(|_| corrupt_error("worksheet row number does not fit this platform"))?;
-        while rows.len() <= row_index {
-            rows.push(Vec::new());
+        if row_number > MAX_MATERIALIZED_ROWS {
+            return Err(limit("worksheet_rows", row_number, MAX_MATERIALIZED_ROWS));
         }
-        for cell in row.children().filter(|node| node.local_name() == "c") {
+        if row_number <= previous_row {
+            return Err(corrupt_error(
+                "worksheet rows must be unique and strictly increasing",
+            ));
+        }
+        previous_row = row_number;
+        let mut output_row = Vec::new();
+        let mut previous_column = None;
+        for cell in row.children().filter(|node| node.is(S_NS, "c")) {
             cell_count = cell_count
                 .checked_add(1)
                 .ok_or_else(|| limit("worksheet_cells", u64::MAX, MAX_WORKSHEET_CELLS))?;
@@ -182,9 +269,14 @@ fn worksheet_table(
                 return Err(limit("worksheet_cells", cell_count, MAX_WORKSHEET_CELLS));
             }
             let reference = cell
-                .attr("r")
+                .attr_ns(None, "r")
                 .ok_or_else(|| corrupt_error("worksheet cell is missing its reference"))?;
-            let column = column_index(reference)?;
+            let (column, reference_row) = parse_a1(reference)?;
+            if reference_row != row_number {
+                return Err(corrupt_error(format!(
+                    "worksheet cell reference {reference:?} disagrees with containing row {row_number}"
+                )));
+            }
             if u64::try_from(column + 1).unwrap_or(u64::MAX) > MAX_WORKSHEET_COLUMNS {
                 return Err(limit(
                     "worksheet_columns",
@@ -192,16 +284,33 @@ fn worksheet_table(
                     MAX_WORKSHEET_COLUMNS,
                 ));
             }
-            while rows[row_index].len() <= column {
-                rows[row_index].push(Vec::new());
+            if previous_column.is_some_and(|previous| column <= previous) {
+                return Err(corrupt_error(
+                    "worksheet cells must be unique and strictly column-ordered",
+                ));
             }
-            rows[row_index][column] = cell_value(cell, shared, styles)?;
+            previous_column = Some(column);
+            while output_row.len() <= column {
+                output_row.push(Vec::new());
+            }
+            output_row[column] = cell_value(cell, shared, styles)?;
             maximum_columns = maximum_columns.max(column + 1);
         }
+        sparse_rows.push((row_number, output_row));
     }
-    if rows.is_empty() {
-        rows.push(vec![Vec::new()]);
+    if sparse_rows.is_empty() {
+        sparse_rows.push((1, vec![Vec::new()]));
         maximum_columns = 1;
+    }
+    let maximum_row = sparse_rows.last().map_or(1, |(row, _)| *row);
+    let row_count = usize::try_from(maximum_row).map_err(|_| ConversionError::LimitExceeded {
+        limit: "worksheet_rows",
+        actual: maximum_row,
+        maximum: MAX_MATERIALIZED_ROWS,
+    })?;
+    let mut rows = vec![Vec::new(); row_count];
+    for (row_number, row) in sparse_rows {
+        rows[usize::try_from(row_number - 1).expect("bounded worksheet row")] = row;
     }
     for row in &mut rows {
         row.resize(maximum_columns, Vec::new());
@@ -212,13 +321,52 @@ fn worksheet_table(
     })
 }
 
+fn validate_dimension(root: &XmlNode) -> Result<(), ConversionError> {
+    let Some(reference) = root
+        .child_ns(S_NS, "dimension")
+        .and_then(|node| node.attr_ns(None, "ref"))
+    else {
+        return Ok(());
+    };
+    let (start, end) = reference.split_once(':').unwrap_or((reference, reference));
+    let (start_column, start_row) = parse_a1(start)?;
+    let (end_column, end_row) = parse_a1(end)?;
+    if start_row > end_row || start_column > end_column {
+        return Err(corrupt_error("worksheet dimension is reversed"));
+    }
+    if end_row > MAX_MATERIALIZED_ROWS {
+        return Err(limit("worksheet_rows", end_row, MAX_MATERIALIZED_ROWS));
+    }
+    let columns = u64::try_from(end_column - start_column + 1).unwrap_or(u64::MAX);
+    if u64::try_from(end_column + 1).unwrap_or(u64::MAX) > MAX_WORKSHEET_COLUMNS {
+        return Err(limit(
+            "worksheet_columns",
+            u64::try_from(end_column + 1).unwrap_or(u64::MAX),
+            MAX_WORKSHEET_COLUMNS,
+        ));
+    }
+    let rows = end_row - start_row + 1;
+    let cells = rows.saturating_mul(columns);
+    if cells > MAX_WORKSHEET_CELLS {
+        return Err(limit(
+            "worksheet_dimension_cells",
+            cells,
+            MAX_WORKSHEET_CELLS,
+        ));
+    }
+    Ok(())
+}
+
 fn cell_value(
     cell: &XmlNode,
     shared: &[String],
     styles: &Styles,
 ) -> Result<Vec<Inline>, ConversionError> {
-    let kind = cell.attr("t").unwrap_or("n");
-    let raw = cell.child("v").map(XmlNode::text).unwrap_or_default();
+    let kind = cell.attr_ns(None, "t").unwrap_or("n");
+    let raw = cell
+        .child_ns(S_NS, "v")
+        .map(XmlNode::text)
+        .unwrap_or_default();
     let display = match kind {
         "s" => {
             let index = raw
@@ -228,7 +376,7 @@ fn cell_value(
                 corrupt_error(format!("shared-string index {index} is out of range"))
             })?
         }
-        "inlineStr" => cell.descendants("t").map(XmlNode::text).collect(),
+        "inlineStr" => cell.descendants_ns(S_NS, "t").map(XmlNode::text).collect(),
         "b" => match raw.as_str() {
             "0" => "FALSE".into(),
             "1" => "TRUE".into(),
@@ -242,7 +390,7 @@ fn cell_value(
         }
     };
     if let Some(formula) = cell
-        .child("f")
+        .child_ns(S_NS, "f")
         .map(XmlNode::text)
         .filter(|value| !value.is_empty())
     {
@@ -259,7 +407,9 @@ fn cell_value(
 }
 
 fn format_display(raw: &str, cell: &XmlNode, styles: &Styles) -> String {
-    let style_index = cell.attr("s").and_then(|value| value.parse::<usize>().ok());
+    let style_index = cell
+        .attr_ns(None, "s")
+        .and_then(|value| value.parse::<usize>().ok());
     let format = style_index
         .and_then(|index| styles.formats.get(index))
         .copied()
@@ -278,30 +428,35 @@ fn format_display(raw: &str, cell: &XmlNode, styles: &Styles) -> String {
     raw.to_owned()
 }
 
-fn column_index(reference: &str) -> Result<usize, ConversionError> {
+fn parse_a1(reference: &str) -> Result<(usize, u64), ConversionError> {
     let mut value = 0u64;
     let mut letters = 0usize;
     for byte in reference.bytes() {
-        if !byte.is_ascii_alphabetic() {
+        if !byte.is_ascii_uppercase() {
             break;
         }
         letters += 1;
         value = value
             .checked_mul(26)
-            .and_then(|value| value.checked_add(u64::from(byte.to_ascii_uppercase() - b'A' + 1)))
+            .and_then(|value| value.checked_add(u64::from(byte - b'A' + 1)))
             .ok_or_else(|| corrupt_error("worksheet column reference overflow"))?;
     }
+    let suffix = &reference[letters..];
     if letters == 0
-        || !reference[letters..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit())
+        || suffix.is_empty()
+        || suffix.starts_with('0')
+        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
     {
         return Err(corrupt_error(format!(
             "invalid worksheet cell reference {reference:?}"
         )));
     }
-    usize::try_from(value - 1)
-        .map_err(|_| corrupt_error("worksheet column reference does not fit this platform"))
+    let column = usize::try_from(value - 1)
+        .map_err(|_| corrupt_error("worksheet column reference does not fit this platform"))?;
+    let row = suffix
+        .parse::<u64>()
+        .map_err(|_| corrupt_error("worksheet row reference overflow"))?;
+    Ok((column, row))
 }
 
 fn limit(name: &'static str, actual: u64, maximum: u64) -> ConversionError {

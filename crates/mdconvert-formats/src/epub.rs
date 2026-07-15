@@ -16,6 +16,11 @@ use crate::{
     xml::XmlNode,
 };
 
+const CONTAINER_NS: &str = "urn:oasis:names:tc:opendocument:xmlns:container";
+const OPF_NS: &str = "http://www.idpf.org/2007/opf";
+const DC_NS: &str = "http://purl.org/dc/elements/1.1/";
+const XHTML_NS: &str = "http://www.w3.org/1999/xhtml";
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EpubConverter;
 
@@ -24,6 +29,85 @@ struct ManifestItem {
     path: String,
     media_type: String,
     properties: HashSet<String>,
+}
+
+struct EpubAssets {
+    assets: Vec<Asset>,
+    refs: HashMap<String, AssetId>,
+    by_part: HashMap<String, String>,
+    total_bytes: u64,
+}
+
+impl EpubAssets {
+    fn new() -> Self {
+        Self {
+            assets: Vec::new(),
+            refs: HashMap::new(),
+            by_part: HashMap::new(),
+            total_bytes: 0,
+        }
+    }
+
+    fn reference(
+        &mut self,
+        archive: &Archive,
+        part: &str,
+        media_type: &str,
+        request: &ConversionRequest,
+    ) -> Result<String, ConversionError> {
+        if let Some(source) = self.by_part.get(part) {
+            return Ok(source.clone());
+        }
+        let actual = u64::try_from(self.assets.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        if actual > u64::from(request.limits.max_assets) {
+            return Err(ConversionError::LimitExceeded {
+                limit: "assets",
+                actual,
+                maximum: u64::from(request.limits.max_assets),
+            });
+        }
+        let entry = archive.entry(part)?;
+        let bytes = u64::try_from(entry.data.len()).unwrap_or(u64::MAX);
+        let total = self.total_bytes.saturating_add(bytes);
+        if total > request.limits.max_input_bytes {
+            return Err(ConversionError::LimitExceeded {
+                limit: "asset_bytes",
+                actual: total,
+                maximum: request.limits.max_input_bytes,
+            });
+        }
+        let extension = epub_image_extension(media_type, &entry.data)?;
+        let id = AssetId::new(format!("epub-image-{actual:03}"))?;
+        let source = format!("mdconvert-asset:epub-{actual:03}");
+        self.refs.insert(source.clone(), id.clone());
+        self.by_part.insert(part.to_owned(), source.clone());
+        self.assets.push(Asset {
+            id,
+            file_name: format!("image-{actual:03}.{extension}"),
+            media_type: media_type.to_owned(),
+            data: entry.data.clone(),
+        });
+        self.total_bytes = total;
+        Ok(source)
+    }
+}
+
+fn epub_image_extension(media_type: &str, bytes: &[u8]) -> Result<&'static str, ConversionError> {
+    match media_type {
+        "image/png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Ok("png"),
+        "image/jpeg" if bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]) => {
+            Ok("jpg")
+        }
+        "image/gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Ok("gif"),
+        "image/webp" if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => {
+            Ok("webp")
+        }
+        _ => Err(corrupt_error(format!(
+            "unsupported or signature-mismatched EPUB image type {media_type:?}"
+        ))),
+    }
 }
 
 impl Converter for EpubConverter {
@@ -42,10 +126,15 @@ impl Converter for EpubConverter {
             &archive.entry("META-INF/container.xml")?.data,
             "META-INF/container.xml",
         )?;
+        if !container.roots[0].is(CONTAINER_NS, "container") {
+            return Err(corrupt_error(
+                "EPUB container root has the wrong expanded name",
+            ));
+        }
         let rootfile = container.roots[0]
-            .descendants("rootfile")
+            .descendants_ns(CONTAINER_NS, "rootfile")
             .find(|node| {
-                node.attr("media-type")
+                node.attr_ns(None, "media-type")
                     .is_none_or(|value| value == "application/oebps-package+xml")
             })
             .ok_or_else(|| corrupt_error("EPUB container has no package rootfile"))?;
@@ -53,25 +142,25 @@ impl Converter for EpubConverter {
         let opf_path = package_root_path(opf_path)?;
         let opf = parse_xml_bytes(&archive.entry(&opf_path)?.data, &opf_path)?;
         let package = &opf.roots[0];
-        if package.local_name() != "package" {
+        if !package.is(OPF_NS, "package") {
             return Err(corrupt_error("EPUB package root must be package"));
         }
-        let metadata_node = package.child("metadata");
+        let metadata_node = package.child_ns(OPF_NS, "metadata");
         let title = metadata_node
-            .and_then(|node| node.descendants("title").next())
+            .and_then(|node| node.descendants_ns(DC_NS, "title").next())
             .map(XmlNode::text)
             .filter(|value| !value.trim().is_empty());
         let author = metadata_node
-            .and_then(|node| node.descendants("creator").next())
+            .and_then(|node| node.descendants_ns(DC_NS, "creator").next())
             .map(XmlNode::text)
             .filter(|value| !value.trim().is_empty());
         let manifest_node = package
-            .child("manifest")
+            .child_ns(OPF_NS, "manifest")
             .ok_or_else(|| corrupt_error("EPUB package has no manifest"))?;
         let mut manifest = HashMap::new();
         for item in manifest_node
             .children()
-            .filter(|node| node.local_name() == "item")
+            .filter(|node| node.is(OPF_NS, "item"))
         {
             let id = required_attr(item, "id", "EPUB manifest item")?.to_owned();
             if manifest.contains_key(&id) {
@@ -86,7 +175,7 @@ impl Converter for EpubConverter {
                     path,
                     media_type: required_attr(item, "media-type", "EPUB manifest item")?.to_owned(),
                     properties: item
-                        .attr("properties")
+                        .attr_ns(None, "properties")
                         .unwrap_or("")
                         .split_whitespace()
                         .map(ToOwned::to_owned)
@@ -95,12 +184,12 @@ impl Converter for EpubConverter {
             );
         }
         let spine_node = package
-            .child("spine")
+            .child_ns(OPF_NS, "spine")
             .ok_or_else(|| corrupt_error("EPUB package has no spine"))?;
         let mut spine = Vec::new();
         for itemref in spine_node
             .children()
-            .filter(|node| node.local_name() == "itemref")
+            .filter(|node| node.is(OPF_NS, "itemref"))
         {
             let id = required_attr(itemref, "idref", "EPUB spine item")?;
             let item = manifest.get(id).ok_or_else(|| {
@@ -126,7 +215,7 @@ impl Converter for EpubConverter {
         }
 
         let mut blocks = Vec::new();
-        let mut assets = Vec::new();
+        let mut assets = EpubAssets::new();
         let mut warnings = Vec::new();
         if let Some(nav) = manifest
             .values()
@@ -136,24 +225,14 @@ impl Converter for EpubConverter {
                 level: 2,
                 content: vec![Inline::Text("Navigation".into())],
             });
-            let mut converted = convert_xhtml(&archive, nav, request)?;
-            merge_document(
-                &mut blocks,
-                &mut assets,
-                &mut warnings,
-                &mut converted,
-                request,
-            )?;
+            let mut converted = convert_xhtml(&archive, nav, &manifest, request, &mut assets)?;
+            blocks.append(&mut converted.blocks);
+            warnings.append(&mut converted.warnings);
         }
         for item in &spine {
-            let mut converted = convert_xhtml(&archive, item, request)?;
-            merge_document(
-                &mut blocks,
-                &mut assets,
-                &mut warnings,
-                &mut converted,
-                request,
-            )?;
+            let mut converted = convert_xhtml(&archive, item, &manifest, request, &mut assets)?;
+            blocks.append(&mut converted.blocks);
+            warnings.append(&mut converted.warnings);
         }
         Ok(Document {
             metadata: DocumentMetadata {
@@ -170,7 +249,7 @@ impl Converter for EpubConverter {
                 ..DocumentMetadata::default()
             },
             blocks,
-            assets,
+            assets: assets.assets,
             warnings,
         })
     }
@@ -179,11 +258,19 @@ impl Converter for EpubConverter {
 fn convert_xhtml(
     archive: &Archive,
     item: &ManifestItem,
+    manifest: &HashMap<String, ManifestItem>,
     request: &ConversionRequest,
+    assets: &mut EpubAssets,
 ) -> Result<Document, ConversionError> {
     let entry = archive.entry(&item.path)?;
-    parse_xml_bytes(&entry.data, &item.path)?;
-    let sanitized = sanitize_xhtml(&entry.data, &item.path, archive)?;
+    let parsed = parse_xml_bytes(&entry.data, &item.path)?;
+    if !parsed.roots[0].is(XHTML_NS, "html") || !only_xhtml_elements(&parsed.roots[0]) {
+        return Err(corrupt_error(format!(
+            "EPUB XHTML {:?} contains a foreign expanded element name",
+            item.path
+        )));
+    }
+    let sanitized = sanitize_xhtml(&entry.data, &item.path, archive, manifest, request, assets)?;
     let mut embedded_request = request.clone();
     embedded_request.source_url = Some(
         Url::parse(&format!("epub://local/{}", percent_path(&item.path))).map_err(|error| {
@@ -192,10 +279,21 @@ fn convert_xhtml(
             }
         })?,
     );
-    HtmlConverter.convert_bytes(&sanitized, &embedded_request)
+    HtmlConverter.convert_bytes_with_asset_refs(&sanitized, &embedded_request, &assets.refs)
 }
 
-fn sanitize_xhtml(bytes: &[u8], part: &str, archive: &Archive) -> Result<Vec<u8>, ConversionError> {
+fn only_xhtml_elements(node: &XmlNode) -> bool {
+    node.namespace_uri() == Some(XHTML_NS) && node.children().all(only_xhtml_elements)
+}
+
+fn sanitize_xhtml(
+    bytes: &[u8],
+    part: &str,
+    archive: &Archive,
+    manifest: &HashMap<String, ManifestItem>,
+    request: &ConversionRequest,
+    assets: &mut EpubAssets,
+) -> Result<Vec<u8>, ConversionError> {
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().enable_all_checks(true);
     let mut writer = Writer::new(Vec::new());
@@ -205,13 +303,15 @@ fn sanitize_xhtml(bytes: &[u8], part: &str, archive: &Archive) -> Result<Vec<u8>
             .map_err(|error| corrupt_error(format!("invalid EPUB XHTML {part:?}: {error}")))?;
         match event {
             Event::Start(start) => {
-                let rebuilt = sanitize_start(&reader, &start, part, archive)?;
+                let rebuilt =
+                    sanitize_start(&reader, &start, part, archive, manifest, request, assets)?;
                 writer
                     .write_event(Event::Start(rebuilt))
                     .map_err(io_error)?;
             }
             Event::Empty(start) => {
-                let rebuilt = sanitize_start(&reader, &start, part, archive)?;
+                let rebuilt =
+                    sanitize_start(&reader, &start, part, archive, manifest, request, assets)?;
                 writer
                     .write_event(Event::Empty(rebuilt))
                     .map_err(io_error)?;
@@ -229,6 +329,9 @@ fn sanitize_start(
     start: &BytesStart<'_>,
     part: &str,
     archive: &Archive,
+    manifest: &HashMap<String, ManifestItem>,
+    request: &ConversionRequest,
+    assets: &mut EpubAssets,
 ) -> Result<BytesStart<'static>, ConversionError> {
     let name = std::str::from_utf8(start.name().as_ref())
         .map_err(|error| corrupt_error(format!("EPUB XHTML element name is not UTF-8: {error}")))?
@@ -266,8 +369,15 @@ fn sanitize_start(
                 value
             } else {
                 let path = resolve_package_path(part, value.split('#').next().unwrap_or(""))?;
-                let image = archive.entry(&path)?;
-                data_url(&path, &image.data)?
+                let item = manifest
+                    .values()
+                    .find(|item| item.path == path)
+                    .ok_or_else(|| {
+                        corrupt_error(format!(
+                            "EPUB image {path:?} is not authenticated by the manifest"
+                        ))
+                    })?;
+                assets.reference(archive, &path, &item.media_type, request)?
             }
         } else {
             value
@@ -287,123 +397,17 @@ fn external_reference(value: &str) -> bool {
         })
 }
 
-fn data_url(path: &str, bytes: &[u8]) -> Result<String, ConversionError> {
-    let media = match path
-        .rsplit_once('.')
-        .map(|(_, extension)| extension.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        _ => {
-            return Err(corrupt_error(format!(
-                "unsupported EPUB image type {path:?}"
-            )));
-        }
-    };
-    let mut value = format!("data:{media},");
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut value, "%{byte:02X}").expect("writing to a string cannot fail");
-    }
-    Ok(value)
-}
-
-fn merge_document(
-    blocks: &mut Vec<Block>,
-    assets: &mut Vec<Asset>,
-    warnings: &mut Vec<mdconvert_core::ConversionWarning>,
-    document: &mut Document,
-    request: &ConversionRequest,
-) -> Result<(), ConversionError> {
-    let mut remap = HashMap::new();
-    for asset in document.assets.drain(..) {
-        let replacement = if let Some(existing) = assets
-            .iter()
-            .find(|existing| existing.media_type == asset.media_type && existing.data == asset.data)
-        {
-            existing.id.clone()
-        } else {
-            let actual = assets
-                .len()
-                .checked_add(1)
-                .ok_or(ConversionError::LimitExceeded {
-                    limit: "assets",
-                    actual: u64::MAX,
-                    maximum: u64::MAX - 1,
-                })?;
-            if u64::try_from(actual).unwrap_or(u64::MAX) > u64::from(request.limits.max_assets) {
-                return Err(ConversionError::LimitExceeded {
-                    limit: "assets",
-                    actual: u64::try_from(actual).unwrap_or(u64::MAX),
-                    maximum: u64::from(request.limits.max_assets),
-                });
-            }
-            let id = AssetId::new(format!("asset-{actual:03}"))?;
-            assets.push(Asset {
-                id: id.clone(),
-                file_name: format!(
-                    "image-{actual:03}.{}",
-                    extension_for_media(&asset.media_type)
-                ),
-                media_type: asset.media_type,
-                data: asset.data,
-            });
-            id
-        };
-        remap.insert(asset.id.as_str().to_owned(), replacement);
-    }
-    for block in &mut document.blocks {
-        remap_block(block, &remap);
-    }
-    blocks.append(&mut document.blocks);
-    warnings.append(&mut document.warnings);
-    Ok(())
-}
-
-fn remap_block(block: &mut Block, remap: &HashMap<String, AssetId>) {
-    match block {
-        Block::Image { asset_id, .. } => {
-            if let Some(replacement) = remap.get(asset_id.as_str()) {
-                *asset_id = replacement.clone();
-            }
-        }
-        Block::List { items, .. } => {
-            for item in items {
-                for block in &mut item.blocks {
-                    remap_block(block, remap);
-                }
-            }
-        }
-        Block::Quote { blocks } => {
-            for block in blocks {
-                remap_block(block, remap);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn extension_for_media(media: &str) -> &'static str {
-    match media {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        "image/svg+xml" => "svg",
-        _ => "bin",
-    }
-}
-
 fn package_root_path(path: &str) -> Result<String, ConversionError> {
-    if path.contains('\0') || path.starts_with('/') || path.starts_with("//") || path.contains(':')
+    let normalized = path.replace('\\', "/");
+    if normalized.contains('\0')
+        || normalized.starts_with('/')
+        || normalized.starts_with("//")
+        || normalized.contains(':')
+        || (normalized.as_bytes().get(1) == Some(&b':')
+            && normalized.as_bytes()[0].is_ascii_alphabetic())
     {
         return Err(corrupt_error(format!("unsafe EPUB rootfile path {path:?}")));
     }
-    let normalized = path.replace('\\', "/");
     if normalized.split('/').any(|part| part == "..") {
         return Err(corrupt_error(format!(
             "traversing EPUB rootfile path {path:?}"

@@ -19,7 +19,51 @@ fn request(path: impl Into<PathBuf>) -> ConversionRequest {
 }
 
 fn write_zip(path: &Path, entries: &[TestEntry<'_>]) {
-    fs::write(path, stored_zip(entries)).unwrap();
+    let mut entries = entries.to_vec();
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("docx") => entries.extend(package_envelope(
+            "word/document.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+        )),
+        Some("pptx") => entries.extend(package_envelope(
+            "ppt/presentation.xml",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+        )),
+        Some("xlsx") => entries.extend(package_envelope(
+            "xl/workbook.xml",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+        )),
+        _ => {}
+    }
+    fs::write(path, stored_zip(&entries)).unwrap();
+}
+
+fn package_envelope(
+    main_part: &'static str,
+    main_content_type: &'static str,
+) -> [TestEntry<'static>; 2] {
+    let content_types = match main_content_type {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml" => {
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.as_slice()
+        }
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml" => {
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/></Types>"#.as_slice()
+        }
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" => {
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#.as_slice()
+        }
+        _ => unreachable!(),
+    };
+    let root_rels = match main_part {
+        "word/document.xml" => br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="root" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.as_slice(),
+        "ppt/presentation.xml" => br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="root" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#.as_slice(),
+        "xl/workbook.xml" => br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="root" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.as_slice(),
+        _ => unreachable!(),
+    };
+    [
+        TestEntry::file("[Content_Types].xml", content_types),
+        TestEntry::file("_rels/.rels", root_rels),
+    ]
 }
 
 #[derive(Clone, Copy)]
@@ -177,6 +221,174 @@ fn deflated_zip_with_trailing_data(name: &str, data: &[u8]) -> Vec<u8> {
     push_u32(&mut output, central_size);
     push_u32(&mut output, central_offset);
     push_u16(&mut output, 0);
+    output
+}
+
+fn descriptor_zip(name: &str, data: &[u8], descriptor: Option<(bool, u32, u32, u32)>) -> Vec<u8> {
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let mut output = Vec::new();
+    let name = name.as_bytes();
+    let crc = crc32(data);
+    push_u32(&mut output, 0x0403_4b50);
+    push_u16(&mut output, 20);
+    push_u16(&mut output, (1 << 11) | (1 << 3));
+    push_u16(&mut output, 8);
+    push_u16(&mut output, 0);
+    push_u16(&mut output, 0);
+    push_u32(&mut output, 0);
+    push_u32(&mut output, 0);
+    push_u32(&mut output, 0);
+    push_u16(&mut output, u16::try_from(name.len()).unwrap());
+    push_u16(&mut output, 0);
+    output.extend_from_slice(name);
+    output.extend_from_slice(&compressed);
+    if let Some((signature, descriptor_crc, descriptor_compressed, descriptor_uncompressed)) =
+        descriptor
+    {
+        if signature {
+            push_u32(&mut output, 0x0807_4b50);
+        }
+        push_u32(&mut output, descriptor_crc);
+        push_u32(&mut output, descriptor_compressed);
+        push_u32(&mut output, descriptor_uncompressed);
+    }
+    let central_offset = u32::try_from(output.len()).unwrap();
+    push_u32(&mut output, 0x0201_4b50);
+    push_u16(&mut output, (3 << 8) | 20);
+    push_u16(&mut output, 20);
+    push_u16(&mut output, (1 << 11) | (1 << 3));
+    push_u16(&mut output, 8);
+    push_u16(&mut output, 0);
+    push_u16(&mut output, 0);
+    push_u32(&mut output, crc);
+    push_u32(&mut output, u32::try_from(compressed.len()).unwrap());
+    push_u32(&mut output, u32::try_from(data.len()).unwrap());
+    push_u16(&mut output, u16::try_from(name.len()).unwrap());
+    push_u16(&mut output, 0);
+    push_u16(&mut output, 0);
+    push_u16(&mut output, 0);
+    push_u16(&mut output, 0);
+    push_u32(&mut output, 0o100644 << 16);
+    push_u32(&mut output, 0);
+    output.extend_from_slice(name);
+    let central_size = u32::try_from(output.len()).unwrap() - central_offset;
+    push_u32(&mut output, 0x0605_4b50);
+    push_u16(&mut output, 0);
+    push_u16(&mut output, 0);
+    push_u16(&mut output, 1);
+    push_u16(&mut output, 1);
+    push_u32(&mut output, central_size);
+    push_u32(&mut output, central_offset);
+    push_u16(&mut output, 0);
+    output
+}
+
+fn eocd_offset(bytes: &[u8]) -> usize {
+    bytes
+        .windows(4)
+        .rposition(|window| window == 0x0605_4b50u32.to_le_bytes())
+        .unwrap()
+}
+
+fn central_offset(bytes: &[u8]) -> usize {
+    let eocd = eocd_offset(bytes);
+    usize::try_from(u32::from_le_bytes(
+        bytes[eocd + 16..eocd + 20].try_into().unwrap(),
+    ))
+    .unwrap()
+}
+
+fn prepend_valid_zip_preamble(bytes: &[u8], prefix: &[u8]) -> Vec<u8> {
+    let old_central = central_offset(bytes);
+    let old_eocd = eocd_offset(bytes);
+    let mut output = prefix.to_vec();
+    output.extend_from_slice(bytes);
+    let delta = u32::try_from(prefix.len()).unwrap();
+    let mut cursor = old_central + prefix.len();
+    while cursor < old_eocd + prefix.len() {
+        let local = u32::from_le_bytes(output[cursor + 42..cursor + 46].try_into().unwrap());
+        output[cursor + 42..cursor + 46].copy_from_slice(&(local + delta).to_le_bytes());
+        let name = usize::from(u16::from_le_bytes(
+            output[cursor + 28..cursor + 30].try_into().unwrap(),
+        ));
+        let extra = usize::from(u16::from_le_bytes(
+            output[cursor + 30..cursor + 32].try_into().unwrap(),
+        ));
+        let comment = usize::from(u16::from_le_bytes(
+            output[cursor + 32..cursor + 34].try_into().unwrap(),
+        ));
+        cursor += 46 + name + extra + comment;
+    }
+    let new_eocd = old_eocd + prefix.len();
+    output[new_eocd + 16..new_eocd + 20]
+        .copy_from_slice(&(u32::try_from(old_central).unwrap() + delta).to_le_bytes());
+    output
+}
+
+fn insert_valid_local_gap(bytes: &[u8], gap: &[u8]) -> Vec<u8> {
+    let old_central = central_offset(bytes);
+    let old_eocd = eocd_offset(bytes);
+    let first_name = usize::from(u16::from_le_bytes(bytes[26..28].try_into().unwrap()));
+    let first_extra = usize::from(u16::from_le_bytes(bytes[28..30].try_into().unwrap()));
+    let first_compressed =
+        usize::try_from(u32::from_le_bytes(bytes[18..22].try_into().unwrap())).unwrap();
+    let insertion = 30 + first_name + first_extra + first_compressed;
+    let mut output = bytes.to_vec();
+    output.splice(insertion..insertion, gap.iter().copied());
+    let delta = u32::try_from(gap.len()).unwrap();
+    let mut cursor = old_central + gap.len();
+    while cursor < old_eocd + gap.len() {
+        let local = u32::from_le_bytes(output[cursor + 42..cursor + 46].try_into().unwrap());
+        if usize::try_from(local).unwrap() >= insertion {
+            output[cursor + 42..cursor + 46].copy_from_slice(&(local + delta).to_le_bytes());
+        }
+        let name = usize::from(u16::from_le_bytes(
+            output[cursor + 28..cursor + 30].try_into().unwrap(),
+        ));
+        let extra = usize::from(u16::from_le_bytes(
+            output[cursor + 30..cursor + 32].try_into().unwrap(),
+        ));
+        let comment = usize::from(u16::from_le_bytes(
+            output[cursor + 32..cursor + 34].try_into().unwrap(),
+        ));
+        cursor += 46 + name + extra + comment;
+    }
+    let new_eocd = old_eocd + gap.len();
+    output[new_eocd + 16..new_eocd + 20]
+        .copy_from_slice(&(u32::try_from(old_central).unwrap() + delta).to_le_bytes());
+    output
+}
+
+fn reorder_central_records(bytes: &[u8], order: &[usize]) -> Vec<u8> {
+    let central = central_offset(bytes);
+    let eocd = eocd_offset(bytes);
+    let mut cursor = central;
+    let mut records = Vec::new();
+    while cursor < eocd {
+        assert_eq!(&bytes[cursor..cursor + 4], &0x0201_4b50u32.to_le_bytes());
+        let name = usize::from(u16::from_le_bytes(
+            bytes[cursor + 28..cursor + 30].try_into().unwrap(),
+        ));
+        let extra = usize::from(u16::from_le_bytes(
+            bytes[cursor + 30..cursor + 32].try_into().unwrap(),
+        ));
+        let comment = usize::from(u16::from_le_bytes(
+            bytes[cursor + 32..cursor + 34].try_into().unwrap(),
+        ));
+        let end = cursor + 46 + name + extra + comment;
+        records.push(bytes[cursor..end].to_vec());
+        cursor = end;
+    }
+    assert_eq!(order.len(), records.len());
+    let mut output = bytes.to_vec();
+    let mut cursor = central;
+    for index in order {
+        let record = &records[*index];
+        output[cursor..cursor + record.len()].copy_from_slice(record);
+        cursor += record.len();
+    }
     output
 }
 
@@ -501,29 +713,357 @@ fn zip_rejects_encryption_unsupported_compression_truncation_and_entry_limits() 
 }
 
 #[test]
+fn archive_limits_are_capped_by_the_request_input_budget() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("request-budget.zip");
+    let data = vec![0; 4_096];
+    let bytes = descriptor_zip(
+        "large.txt",
+        &data,
+        Some((true, crc32(&data), 20, u32::try_from(data.len()).unwrap())),
+    );
+    // Correct the compressed length in the descriptor from the central record.
+    let central = central_offset(&bytes);
+    let compressed = u32::from_le_bytes(bytes[central + 20..central + 24].try_into().unwrap());
+    let mut bytes = bytes;
+    let descriptor = central - 16;
+    bytes[descriptor + 8..descriptor + 12].copy_from_slice(&compressed.to_le_bytes());
+    fs::write(&path, &bytes).unwrap();
+    let mut request = request(path);
+    request.limits.max_input_bytes = u64::try_from(bytes.len()).unwrap();
+
+    assert!(matches!(
+        ZipConverter.convert(&request),
+        Err(ConversionError::LimitExceeded {
+            limit: "archive_entry_uncompressed_bytes" | "archive_total_uncompressed_bytes",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn zip_requires_complete_ordered_local_records_and_valid_data_descriptors() {
+    let temp = TempDir::new().unwrap();
+    let data = b"payload";
+    let valid = descriptor_zip(
+        "file.txt",
+        data,
+        Some((true, crc32(data), 9, u32::try_from(data.len()).unwrap())),
+    );
+    let central = central_offset(&valid);
+    let compressed = u32::from_le_bytes(valid[central + 20..central + 24].try_into().unwrap());
+    let mut valid = valid;
+    let descriptor = central - 16;
+    valid[descriptor + 8..descriptor + 12].copy_from_slice(&compressed.to_le_bytes());
+
+    let valid_path = temp.path().join("descriptor.zip");
+    fs::write(&valid_path, &valid).unwrap();
+    ZipConverter.convert(&request(valid_path)).unwrap();
+
+    let no_signature = descriptor_zip(
+        "file.txt",
+        data,
+        Some((
+            false,
+            crc32(data),
+            compressed,
+            u32::try_from(data.len()).unwrap(),
+        )),
+    );
+    let no_signature_path = temp.path().join("descriptor-no-signature.zip");
+    fs::write(&no_signature_path, no_signature).unwrap();
+    ZipConverter.convert(&request(no_signature_path)).unwrap();
+
+    let missing = temp.path().join("missing-descriptor.zip");
+    fs::write(&missing, descriptor_zip("file.txt", data, None)).unwrap();
+    assert!(matches!(
+        ZipConverter.convert(&request(missing)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let corrupt_descriptor = temp.path().join("corrupt-descriptor.zip");
+    fs::write(
+        &corrupt_descriptor,
+        descriptor_zip(
+            "file.txt",
+            data,
+            Some((true, 0, compressed, u32::try_from(data.len()).unwrap())),
+        ),
+    )
+    .unwrap();
+    assert!(matches!(
+        ZipConverter.convert(&request(corrupt_descriptor)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let preamble = temp.path().join("preamble.zip");
+    fs::write(
+        &preamble,
+        prepend_valid_zip_preamble(&valid, b"polyglot-prefix"),
+    )
+    .unwrap();
+    assert!(matches!(
+        ZipConverter.convert(&request(preamble)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let gap = temp.path().join("gap.zip");
+    let two = stored_zip(&[
+        TestEntry::file("one.txt", b"one"),
+        TestEntry::file("two.txt", b"two"),
+    ]);
+    fs::write(&gap, insert_valid_local_gap(&two, b"unexplained-gap")).unwrap();
+    assert!(matches!(
+        ZipConverter.convert(&request(gap)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn epub_mimetype_order_is_authenticated_from_physical_local_records() {
+    let temp = TempDir::new().unwrap();
+    let entries = [
+        TestEntry::file("mimetype", b"application/epub+zip"),
+        TestEntry::file(
+            "META-INF/container.xml",
+            br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+        ),
+        TestEntry::file(
+            "OPS/content.opf",
+            br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="c" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c"/></spine></package>"#,
+        ),
+        TestEntry::file("OPS/chapter.xhtml", br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Body</p></body></html>"#),
+    ];
+    let physical_first = reorder_central_records(&stored_zip(&entries), &[1, 2, 3, 0]);
+    let path = temp.path().join("physical-first.epub");
+    fs::write(&path, physical_first).unwrap();
+    EpubConverter.convert(&request(path)).unwrap();
+
+    let physical_second_entries = [entries[1], entries[0], entries[2], entries[3]];
+    let central_first =
+        reorder_central_records(&stored_zip(&physical_second_entries), &[1, 0, 2, 3]);
+    let path = temp.path().join("central-first.epub");
+    fs::write(&path, central_first).unwrap();
+    assert!(matches!(
+        EpubConverter.convert(&request(path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn package_targets_normalize_backslashes_before_rejecting_unc_and_drive_paths() {
+    let temp = TempDir::new().unwrap();
+    let epub = temp.path().join("unc-root.epub");
+    write_zip(
+        &epub,
+        &[
+            TestEntry::file("mimetype", b"application/epub+zip"),
+            TestEntry::file(
+                "META-INF/container.xml",
+                br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="\\server\content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            TestEntry::file(
+                "server/content.opf",
+                br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="c" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c"/></spine></package>"#,
+            ),
+            TestEntry::file("server/chapter.xhtml", br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Body</p></body></html>"#),
+        ],
+    );
+    assert!(matches!(
+        EpubConverter.convert(&request(epub)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let docx = temp.path().join("unc-relationship.docx");
+    write_zip(
+        &docx,
+        &[
+            TestEntry::file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="\\media\pixel.png"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:blip r:embed="img"/></w:drawing></w:r></w:p></w:body></w:document>"#,
+            ),
+            TestEntry::file("word/media/pixel.png", b"png"),
+        ],
+    );
+    assert!(matches!(
+        DocxConverter.convert(&request(docx)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn package_queries_require_the_expected_expanded_namespaces() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("foreign-namespaces.pptx");
+    write_zip(
+        &path,
+        &[
+            TestEntry::file(
+                "ppt/presentation.xml",
+                br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:evil="urn:evil"><p:sldIdLst><p:sldId evil:id="evilSlide" r:id="missingSlide"/></p:sldIdLst></p:presentation>"#,
+            ),
+            TestEntry::file(
+                "ppt/_rels/presentation.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:evil="urn:evil"><evil:Relationship Id="evilSlide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Injected</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            ),
+        ],
+    );
+
+    assert!(matches!(
+        PptxConverter.convert(&request(path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn ooxml_requires_authenticated_package_envelope_and_real_image_parts() {
+    let temp = TempDir::new().unwrap();
+    let missing_envelope = temp.path().join("missing-envelope.docx");
+    fs::write(
+        &missing_envelope,
+        stored_zip(&[TestEntry::file(
+            "word/document.xml",
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:body></w:document>"#,
+        )]),
+    )
+    .unwrap();
+    assert!(matches!(
+        DocxConverter.convert(&request(missing_envelope)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let bogus_image = temp.path().join("bogus-image.docx");
+    write_zip(
+        &bogus_image,
+        &[
+            TestEntry::file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/pixel.png"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:blip r:embed="img"/></w:drawing></w:r></w:p></w:body></w:document>"#,
+            ),
+            TestEntry::file("word/media/pixel.png", b"not a png"),
+        ],
+    );
+    assert!(matches!(
+        DocxConverter.convert(&request(bogus_image)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let wrong_image_type = temp.path().join("wrong-image-type.docx");
+    write_zip(
+        &wrong_image_type,
+        &[
+            TestEntry::file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="media/pixel.png"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:blip r:embed="img"/></w:drawing></w:r></w:p></w:body></w:document>"#,
+            ),
+            TestEntry::file(
+                "word/media/pixel.png",
+                include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+            ),
+        ],
+    );
+    assert!(matches!(
+        DocxConverter.convert(&request(wrong_image_type)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let external_image = temp.path().join("external-image.pptx");
+    write_zip(
+        &external_image,
+        &[
+            TestEntry::file(
+                "ppt/presentation.xml",
+                br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="slide"/></p:sldIdLst></p:presentation>"#,
+            ),
+            TestEntry::file(
+                "ppt/_rels/presentation.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:pic><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic></p:spTree></p:cSld></p:sld>"#,
+            ),
+            TestEntry::file(
+                "ppt/slides/_rels/slide1.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://example.invalid/image.png" TargetMode="External"/></Relationships>"#,
+            ),
+        ],
+    );
+    assert!(matches!(
+        PptxConverter.convert(&request(external_image)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let active_svg = temp.path().join("active-svg.docx");
+    let svg_entries = vec![
+        TestEntry::file(
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="svg" ContentType="image/svg+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+        ),
+        package_envelope(
+            "word/document.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+        )[1],
+        TestEntry::file(
+            "word/_rels/document.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/active.svg"/></Relationships>"#,
+        ),
+        TestEntry::file(
+            "word/document.xml",
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:blip r:embed="img"/></w:drawing></w:r></w:p></w:body></w:document>"#,
+        ),
+        TestEntry::file(
+            "word/media/active.svg",
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+        ),
+    ];
+    fs::write(&active_svg, stored_zip(&svg_entries)).unwrap();
+    assert!(matches!(
+        DocxConverter.convert(&request(active_svg)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
 fn docx_preserves_headings_lists_tables_images_and_safe_links() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("semantic.docx");
     let entries = [
         TestEntry::file(
             "docProps/core.xml",
-            br#"<cp:coreProperties xmlns:cp="urn:cp" xmlns:dc="urn:dc"><dc:title>Contract</dc:title><dc:creator>Ada</dc:creator></cp:coreProperties>"#,
+            br#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Contract</dc:title><dc:creator>Ada</dc:creator></cp:coreProperties>"#,
         ),
         TestEntry::file(
             "word/styles.xml",
-            br#"<w:styles xmlns:w="urn:w"><w:style w:styleId="CustomHeading"><w:name w:val="Section title"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style></w:styles>"#,
+            br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:styleId="CustomHeading"><w:name w:val="Section title"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style></w:styles>"#,
         ),
         TestEntry::file(
             "word/numbering.xml",
-            br#"<w:numbering xmlns:w="urn:w"><w:abstractNum w:abstractNumId="5"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:num w:numId="9"><w:abstractNumId w:val="5"/></w:num></w:numbering>"#,
+            br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="5"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:num w:numId="9"><w:abstractNumId w:val="5"/></w:num></w:numbering>"#,
         ),
         TestEntry::file(
             "word/_rels/document.xml.rels",
-            br##"<Relationships xmlns="urn:rels"><Relationship Id="rImg" Type="image" Target="media/pixel.png"/><Relationship Id="rSafe" Type="hyperlink" Target="#details"/><Relationship Id="rExternal" Type="hyperlink" Target="https://example.invalid/" TargetMode="External"/></Relationships>"##,
+            br##"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/pixel.png"/><Relationship Id="rSafe" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="#details"/><Relationship Id="rExternal" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid/" TargetMode="External"/></Relationships>"##,
         ),
         TestEntry::file(
             "word/document.xml",
-            br#"<w:document xmlns:w="urn:w" xmlns:r="urn:r" xmlns:a="urn:a"><w:body>
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body>
               <w:p><w:pPr><w:pStyle w:val="CustomHeading"/></w:pPr><w:r><w:t>Overview</w:t></w:r></w:p>
               <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="9"/></w:numPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p>
               <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="9"/></w:numPr></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>
@@ -532,7 +1072,10 @@ fn docx_preserves_headings_lists_tables_images_and_safe_links() {
               <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Name</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Value</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
             </w:body></w:document>"#,
         ),
-        TestEntry::file("word/media/pixel.png", b"png-bytes"),
+        TestEntry::file(
+            "word/media/pixel.png",
+            include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+        ),
     ];
     write_zip(&path, &entries);
 
@@ -564,7 +1107,7 @@ fn docx_preserves_headings_lists_tables_images_and_safe_links() {
     assert!(markdown.contains("External text"));
     assert!(!markdown.contains("example.invalid"));
     assert!(document.warnings.iter().any(|warning| {
-        warning.code == WarningCode::ExternalAssetSkipped && warning.page.is_none()
+        warning.code == WarningCode::ExternalLinkSkipped && warning.page.is_none()
     }));
 }
 
@@ -577,11 +1120,11 @@ fn docx_resolves_inherited_heading_styles_without_guessing_from_display_name() {
         &[
             TestEntry::file(
                 "word/styles.xml",
-                br#"<w:styles xmlns:w="urn:w"><w:style w:styleId="Base"><w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style><w:style w:styleId="Derived"><w:basedOn w:val="Base"/><w:name w:val="Custom display"/></w:style></w:styles>"#,
+                br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:styleId="Base"><w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style><w:style w:styleId="Derived"><w:basedOn w:val="Base"/><w:name w:val="Custom display"/></w:style></w:styles>"#,
             ),
             TestEntry::file(
                 "word/document.xml",
-                br#"<w:document xmlns:w="urn:w"><w:body><w:p><w:pPr><w:pStyle w:val="Derived"/></w:pPr><w:r><w:t>Inherited</w:t></w:r></w:p></w:body></w:document>"#,
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Derived"/></w:pPr><w:r><w:t>Inherited</w:t></w:r></w:p></w:body></w:document>"#,
             ),
         ],
     );
@@ -594,33 +1137,103 @@ fn docx_resolves_inherited_heading_styles_without_guessing_from_display_name() {
 }
 
 #[test]
+fn docx_emits_every_successive_list_run_across_kind_and_level_transitions() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("list-transitions.docx");
+    write_zip(
+        &path,
+        &[
+            TestEntry::file(
+                "word/numbering.xml",
+                br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num></w:numbering>"#,
+            ),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+                <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Ordered one</w:t></w:r></w:p>
+                <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr><w:r><w:t>Bullet one</w:t></w:r></w:p>
+                <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Ordered two</w:t></w:r></w:p>
+                <w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Nested</w:t></w:r></w:p>
+                <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Ordered three</w:t></w:r></w:p>
+                </w:body></w:document>"#,
+            ),
+        ],
+    );
+
+    let markdown = emitted(&DocxConverter.convert(&request(path)).unwrap());
+    for text in [
+        "Ordered one",
+        "Bullet one",
+        "Ordered two",
+        "Nested",
+        "Ordered three",
+    ] {
+        assert_eq!(markdown.matches(text).count(), 1, "{text} must appear once");
+    }
+}
+
+#[test]
+fn docx_style_inheritance_has_an_iterative_depth_budget() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("deep-styles.docx");
+    let mut styles = String::from(
+        r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:styleId="S0"><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>"#,
+    );
+    for index in 1..=129 {
+        styles.push_str(&format!(
+            r#"<w:style w:styleId="S{index}"><w:basedOn w:val="S{}"/></w:style>"#,
+            index - 1
+        ));
+    }
+    styles.push_str("</w:styles>");
+    write_zip(
+        &path,
+        &[
+            TestEntry::file("word/styles.xml", styles.as_bytes()),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="S129"/></w:pPr><w:r><w:t>Deep</w:t></w:r></w:p></w:body></w:document>"#,
+            ),
+        ],
+    );
+
+    assert!(matches!(
+        DocxConverter.convert(&request(path)),
+        Err(ConversionError::LimitExceeded {
+            limit: "docx_style_inheritance_depth",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn pptx_uses_presentation_relationship_order_and_attaches_notes() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("ordered.pptx");
     let entries = [
         TestEntry::file(
             "ppt/presentation.xml",
-            br#"<p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst><p:sldId r:id="rSecond"/><p:sldId r:id="rFirst"/></p:sldIdLst></p:presentation>"#,
+            br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rSecond"/><p:sldId r:id="rFirst"/></p:sldIdLst></p:presentation>"#,
         ),
         TestEntry::file(
             "ppt/_rels/presentation.xml.rels",
-            br#"<Relationships><Relationship Id="rFirst" Type="slide" Target="slides/slide1.xml"/><Relationship Id="rSecond" Type="slide" Target="slides/slide2.xml"/></Relationships>"#,
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rFirst" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rSecond" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#,
         ),
         TestEntry::file(
             "ppt/slides/slide1.xml",
-            br#"<p:sld xmlns:p="urn:p" xmlns:a="urn:a"><p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>First title</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"#,
+            br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>First title</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"#,
         ),
         TestEntry::file(
             "ppt/slides/slide2.xml",
-            br#"<p:sld xmlns:p="urn:p" xmlns:a="urn:a"><p:sp><p:txBody><a:p><a:r><a:t>Second body</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"#,
+            br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:sp><p:txBody><a:p><a:r><a:t>Second body</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"#,
         ),
         TestEntry::file(
             "ppt/slides/_rels/slide2.xml.rels",
-            br#"<Relationships><Relationship Id="rNotes" Type="notesSlide" Target="../notesSlides/notesSlide2.xml"/></Relationships>"#,
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide2.xml"/></Relationships>"#,
         ),
         TestEntry::file(
             "ppt/notesSlides/notesSlide2.xml",
-            br#"<p:notes xmlns:p="urn:p" xmlns:a="urn:a"><p:sp><p:txBody><a:p><a:r><a:t>Presenter note</a:t></a:r></a:p></p:txBody></p:sp></p:notes>"#,
+            br#"<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:sp><p:txBody><a:p><a:r><a:t>Presenter note</a:t></a:r></a:p></p:txBody></p:sp></p:notes>"#,
         ),
     ];
     write_zip(&path, &entries);
@@ -631,6 +1244,18 @@ fn pptx_uses_presentation_relationship_order_and_attaches_notes() {
     assert!(markdown.contains("### Notes"));
     assert!(markdown.contains("Presenter note"));
     assert_eq!(document.metadata.page_count, Some(2));
+
+    let ambiguous_path = temp.path().join("ambiguous-notes.pptx");
+    let mut ambiguous_entries = entries;
+    ambiguous_entries[4] = TestEntry::file(
+        "ppt/slides/_rels/slide2.xml.rels",
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rNotes1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide2.xml"/><Relationship Id="rNotes2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide2.xml"/></Relationships>"#,
+    );
+    write_zip(&ambiguous_path, &ambiguous_entries);
+    assert!(matches!(
+        PptxConverter.convert(&request(ambiguous_path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
 }
 
 #[test]
@@ -642,19 +1267,19 @@ fn pptx_preserves_safe_local_run_links() {
         &[
             TestEntry::file(
                 "ppt/presentation.xml",
-                br#"<p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst><p:sldId id="256" r:id="rSlide"/></p:sldIdLst></p:presentation>"#,
+                br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rSlide"/></p:sldIdLst></p:presentation>"#,
             ),
             TestEntry::file(
                 "ppt/_rels/presentation.xml.rels",
-                br#"<Relationships><Relationship Id="rSlide" Type="slide" Target="slides/slide1.xml"/></Relationships>"#,
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSlide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
             ),
             TestEntry::file(
                 "ppt/slides/slide1.xml",
-                br#"<p:sld xmlns:p="urn:p" xmlns:a="urn:a" xmlns:r="urn:r"><p:sp><p:txBody><a:p><a:r><a:rPr><a:hlinkClick r:id="rLink"/></a:rPr><a:t>Guide</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"#,
+                br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sp><p:txBody><a:p><a:r><a:rPr><a:hlinkClick r:id="rLink"/></a:rPr><a:t>Guide</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"#,
             ),
             TestEntry::file(
                 "ppt/slides/_rels/slide1.xml.rels",
-                br##"<Relationships><Relationship Id="rLink" Type="hyperlink" Target="#section"/></Relationships>"##,
+                br##"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="#section"/></Relationships>"##,
             ),
         ],
     );
@@ -672,21 +1297,24 @@ fn pptx_preserves_slide_tables_and_local_images() {
         &[
             TestEntry::file(
                 "ppt/presentation.xml",
-                br#"<p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst><p:sldId r:id="slide"/></p:sldIdLst></p:presentation>"#,
+                br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="slide"/></p:sldIdLst></p:presentation>"#,
             ),
             TestEntry::file(
                 "ppt/_rels/presentation.xml.rels",
-                br#"<Relationships><Relationship Id="slide" Type="slide" Target="slides/slide1.xml"/></Relationships>"#,
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
             ),
             TestEntry::file(
                 "ppt/slides/slide1.xml",
-                br#"<p:sld xmlns:p="urn:p" xmlns:a="urn:a" xmlns:r="urn:r"><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Name</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Value</a:t></a:r></a:p></a:txBody></a:tc></a:tr><a:tr><a:tc><a:txBody><a:p><a:r><a:t>A</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>1</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl><a:blip r:embed="image"/></p:sld>"#,
+                br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Name</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Value</a:t></a:r></a:p></a:txBody></a:tc></a:tr><a:tr><a:tc><a:txBody><a:p><a:r><a:t>A</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>1</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl><a:blip r:embed="image"/></p:sld>"#,
             ),
             TestEntry::file(
                 "ppt/slides/_rels/slide1.xml.rels",
-                br#"<Relationships><Relationship Id="image" Type="image" Target="../media/pixel.png"/></Relationships>"#,
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/pixel.png"/></Relationships>"#,
             ),
-            TestEntry::file("ppt/media/pixel.png", b"local-image"),
+            TestEntry::file(
+                "ppt/media/pixel.png",
+                include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+            ),
         ],
     );
 
@@ -705,33 +1333,88 @@ fn pptx_preserves_slide_tables_and_local_images() {
 }
 
 #[test]
+fn pptx_preserves_shape_tree_order_and_dedupes_page_scoped_link_warnings() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("shape-order.pptx");
+    write_zip(
+        &path,
+        &[
+            TestEntry::file(
+                "ppt/presentation.xml",
+                br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="slide"/></p:sldIdLst></p:presentation>"#,
+            ),
+            TestEntry::file(
+                "ppt/_rels/presentation.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree>
+                <p:sp><p:txBody><a:p><a:r><a:rPr><a:hlinkClick r:id="external"/></a:rPr><a:t>Before</a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="external"/></a:rPr><a:t> again</a:t></a:r></a:p></p:txBody></p:sp>
+                <p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Cell</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+                <p:pic><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>
+                <p:sp><p:txBody><a:p><a:r><a:t>After</a:t></a:r></a:p></p:txBody></p:sp>
+                </p:spTree></p:cSld></p:sld>"#,
+            ),
+            TestEntry::file(
+                "ppt/slides/_rels/slide1.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="external" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid" TargetMode="External"/><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/pixel.png"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "ppt/media/pixel.png",
+                include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+            ),
+        ],
+    );
+
+    let document = PptxConverter.convert(&request(path)).unwrap();
+    assert!(matches!(
+        document.blocks.as_slice(),
+        [
+            Block::Heading { .. },
+            Block::Paragraph { .. },
+            Block::Table { .. },
+            Block::Image { .. },
+            Block::Paragraph { .. }
+        ]
+    ));
+    let link_warnings = document
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == WarningCode::ExternalLinkSkipped)
+        .collect::<Vec<_>>();
+    assert_eq!(link_warnings.len(), 1);
+    assert_eq!(link_warnings[0].page, Some(1));
+}
+
+#[test]
 fn xlsx_preserves_workbook_order_formulas_and_cached_display_values() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("book.xlsx");
     let entries = [
         TestEntry::file(
             "xl/workbook.xml",
-            br#"<workbook xmlns:r="urn:r"><sheets><sheet name="Summary" r:id="r2"/><sheet name="Raw" r:id="r1"/></sheets></workbook>"#,
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" r:id="r2"/><sheet name="Raw" r:id="r1"/></sheets></workbook>"#,
         ),
         TestEntry::file(
             "xl/_rels/workbook.xml.rels",
-            br#"<Relationships><Relationship Id="r1" Type="worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="r2" Type="worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="r2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
         ),
         TestEntry::file(
             "xl/sharedStrings.xml",
-            br#"<sst><si><t>Label</t></si><si><t>Rate</t></si></sst>"#,
+            br#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Label</t></si><si><t>Rate</t></si></sst>"#,
         ),
         TestEntry::file(
             "xl/styles.xml",
-            br#"<styleSheet><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="10"/></cellXfs></styleSheet>"#,
+            br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="10"/></cellXfs></styleSheet>"#,
         ),
         TestEntry::file(
             "xl/worksheets/sheet1.xml",
-            br#"<worksheet><sheetData><row r="1"><c r="A1"><v>raw</v></c></row></sheetData></worksheet>"#,
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>raw</v></c></row></sheetData></worksheet>"#,
         ),
         TestEntry::file(
             "xl/worksheets/sheet2.xml",
-            br#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2"><f>SUM(1,2)</f><v>3</v></c><c r="B2" s="1"><v>0.125</v></c></row></sheetData></worksheet>"#,
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2"><f>SUM(1,2)</f><v>3</v></c><c r="B2" s="1"><v>0.125</v></c></row></sheetData></worksheet>"#,
         ),
     ];
     write_zip(&path, &entries);
@@ -753,19 +1436,108 @@ fn xlsx_rejects_external_link_parts_without_resolving_them() {
         &[
             TestEntry::file(
                 "xl/workbook.xml",
-                br#"<workbook xmlns:r="urn:r"><sheets><sheet name="Sheet" r:id="r1"/></sheets></workbook>"#,
+                br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" r:id="r1"/></sheets></workbook>"#,
             ),
             TestEntry::file(
                 "xl/_rels/workbook.xml.rels",
-                br#"<Relationships><Relationship Id="r1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
             ),
             TestEntry::file(
                 "xl/worksheets/sheet1.xml",
-                br#"<worksheet><sheetData><row r="1"><c r="A1"><v>safe</v></c></row></sheetData></worksheet>"#,
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>safe</v></c></row></sheetData></worksheet>"#,
             ),
             TestEntry::file(
                 "xl/externalLinks/externalLink1.xml",
-                br#"<externalLink><externalBook r:id="network" xmlns:r="urn:r"/></externalLink>"#,
+                br#"<externalLink><externalBook r:id="network" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></externalLink>"#,
+            ),
+        ],
+    );
+
+    assert!(matches!(
+        XlsxConverter.convert(&request(path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn xlsx_requires_strict_ordered_a1_references_and_bounds_sparse_rows() {
+    let temp = TempDir::new().unwrap();
+    let workbook = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" r:id="r1"/></sheets></workbook>"#;
+    let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let cases = [
+        (
+            "zero",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A0"><v>x</v></c></row></sheetData></worksheet>"#.as_slice(),
+            false,
+        ),
+        (
+            "wrong-row",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A2"><v>x</v></c></row></sheetData></worksheet>"#.as_slice(),
+            false,
+        ),
+        (
+            "cell-order",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="B1"><v>b</v></c><c r="A1"><v>a</v></c></row></sheetData></worksheet>"#.as_slice(),
+            false,
+        ),
+        (
+            "sparse-limit",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1048576"><c r="A1048576"><v>x</v></c></row></sheetData></worksheet>"#.as_slice(),
+            true,
+        ),
+        (
+            "dimension-limit",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:XFD1048576"/><sheetData/></worksheet>"#.as_slice(),
+            true,
+        ),
+    ];
+    for (name, worksheet, limit_expected) in cases {
+        let path = temp.path().join(format!("{name}.xlsx"));
+        write_zip(
+            &path,
+            &[
+                TestEntry::file("xl/workbook.xml", workbook),
+                TestEntry::file("xl/_rels/workbook.xml.rels", rels),
+                TestEntry::file("xl/worksheets/sheet1.xml", worksheet),
+            ],
+        );
+        let result = XlsxConverter.convert(&request(path));
+        if limit_expected {
+            assert!(matches!(
+                result,
+                Err(ConversionError::LimitExceeded {
+                    limit: "worksheet_rows",
+                    ..
+                })
+            ));
+        } else {
+            assert!(matches!(result, Err(ConversionError::CorruptInput { .. })));
+        }
+    }
+}
+
+#[test]
+fn xlsx_rejects_connections_query_and_any_external_relationships() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.xlsx");
+    write_zip(
+        &path,
+        &[
+            TestEntry::file(
+                "xl/workbook.xml",
+                br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" r:id="sheet"/></sheets></workbook>"#,
+            ),
+            TestEntry::file(
+                "xl/_rels/workbook.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="sheet" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="connection" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/connections" Target="connections.xml"/><Relationship Id="network" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid" TargetMode="External"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>safe</v></c></row></sheetData></worksheet>"#,
+            ),
+            TestEntry::file(
+                "xl/connections.xml",
+                br#"<connections xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#,
             ),
         ],
     );
@@ -780,28 +1552,28 @@ fn xlsx_rejects_external_link_parts_without_resolving_them() {
 fn epub_validates_container_and_uses_spine_nav_and_local_images() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("book.epub");
-    let image = b"local-image";
+    let image = include_bytes!("../../../tests/fixtures/formats/metadata.png");
     let entries = [
         TestEntry::file("mimetype", b"application/epub+zip"),
         TestEntry::file(
             "META-INF/container.xml",
-            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
         ),
         TestEntry::file(
             "OEBPS/content.opf",
-            br#"<package xmlns:dc="urn:dc"><metadata><dc:title>Local book</dc:title><dc:creator>Ada</dc:creator></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="pic" href="images/pic.png" media-type="image/png"/></manifest><spine><itemref idref="two"/><itemref idref="one"/></spine></package>"#,
+            br#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Local book</dc:title><dc:creator>Ada</dc:creator></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="pic" href="images/pic.png" media-type="image/png"/></manifest><spine><itemref idref="two"/><itemref idref="one"/></spine></package>"#,
         ),
         TestEntry::file(
             "OEBPS/nav.xhtml",
-            br#"<html><body><nav><ol><li><a href="one.xhtml">First</a></li></ol></nav></body></html>"#,
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><nav><ol><li><a href="one.xhtml">First</a></li></ol></nav></body></html>"#,
         ),
         TestEntry::file(
             "OEBPS/one.xhtml",
-            br#"<html><body><h1>One</h1><p><img src="images/pic.png" alt="Local"/></p><script>fetch('https://invalid')</script></body></html>"#,
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>One</h1><p><img src="images/pic.png" alt="Local"/></p><script>fetch('https://invalid')</script></body></html>"#,
         ),
         TestEntry::file(
             "OEBPS/two.xhtml",
-            br#"<html><body><h1>Two</h1><p><a href="https://example.invalid">external label</a></p></body></html>"#,
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Two</h1><p><a href="https://example.invalid">external label</a></p></body></html>"#,
         ),
         TestEntry::file("OEBPS/images/pic.png", image),
     ];
@@ -849,11 +1621,11 @@ fn epub_rejects_invalid_mimetype_and_escaping_manifest_targets() {
             TestEntry::file("mimetype", b"application/epub+zip"),
             TestEntry::file(
                 "META-INF/container.xml",
-                br#"<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+                br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
             ),
             TestEntry::file(
                 "content.opf",
-                br#"<package><manifest><item id="bad" href="../escape.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="bad"/></spine></package>"#,
+                br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="bad" href="../escape.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="bad"/></spine></package>"#,
             ),
         ],
     );
@@ -874,13 +1646,16 @@ fn epub_requires_mimetype_to_be_the_literal_first_archive_entry() {
             TestEntry::file("mimetype", b"application/epub+zip"),
             TestEntry::file(
                 "META-INF/container.xml",
-                br#"<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+                br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
             ),
             TestEntry::file(
                 "content.opf",
-                br#"<package><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>"#,
+                br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>"#,
             ),
-            TestEntry::file("one.xhtml", b"<html><body>one</body></html>"),
+            TestEntry::file(
+                "one.xhtml",
+                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body>one</body></html>"#,
+            ),
         ],
     );
 
@@ -900,16 +1675,22 @@ fn epub_enforces_the_cumulative_asset_budget_across_spine_items() {
             TestEntry::file("mimetype", b"application/epub+zip"),
             TestEntry::file(
                 "META-INF/container.xml",
-                br#"<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+                br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
             ),
             TestEntry::file(
                 "content.opf",
-                br#"<package><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/><item id="a" href="a.png" media-type="image/png"/><item id="b" href="b.png" media-type="image/png"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>"#,
+                br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/><item id="a" href="a.png" media-type="image/png"/><item id="b" href="b.png" media-type="image/png"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>"#,
             ),
-            TestEntry::file("one.xhtml", br#"<html><body><img src="a.png"/></body></html>"#),
-            TestEntry::file("two.xhtml", br#"<html><body><img src="b.png"/></body></html>"#),
-            TestEntry::file("a.png", b"a"),
-            TestEntry::file("b.png", b"b"),
+            TestEntry::file("one.xhtml", br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="a.png"/></body></html>"#),
+            TestEntry::file("two.xhtml", br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="b.png"/></body></html>"#),
+            TestEntry::file(
+                "a.png",
+                include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+            ),
+            TestEntry::file(
+                "b.png",
+                include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+            ),
         ],
     );
     let mut request = request(path);
@@ -917,6 +1698,66 @@ fn epub_enforces_the_cumulative_asset_budget_across_spine_items() {
 
     assert!(matches!(
         EpubConverter.convert(&request),
+        Err(ConversionError::LimitExceeded {
+            limit: "assets",
+            actual: 2,
+            maximum: 1,
+        })
+    ));
+}
+
+#[test]
+fn epub_dedupes_repeated_part_references_but_not_distinct_equal_assets() {
+    let temp = TempDir::new().unwrap();
+    let build = |path: &Path, second_source: &str| {
+        write_zip(
+            path,
+            &[
+                TestEntry::file("mimetype", b"application/epub+zip"),
+                TestEntry::file(
+                    "META-INF/container.xml",
+                    br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+                ),
+                TestEntry::file(
+                    "content.opf",
+                    br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/><item id="a" href="a.png" media-type="image/png"/><item id="b" href="b.png" media-type="image/png"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>"#,
+                ),
+                TestEntry::file(
+                    "one.xhtml",
+                    br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="a.png"/></body></html>"#,
+                ),
+                TestEntry::file(
+                    "two.xhtml",
+                    format!(
+                        r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="{second_source}"/></body></html>"#
+                    )
+                    .as_bytes(),
+                ),
+                TestEntry::file(
+                    "a.png",
+                    include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+                ),
+                TestEntry::file(
+                    "b.png",
+                    include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+                ),
+            ],
+        );
+    };
+
+    let repeated = temp.path().join("repeated.epub");
+    build(&repeated, "a.png");
+    let mut repeated_request = request(repeated);
+    repeated_request.limits.max_assets = 1;
+    let document = EpubConverter.convert(&repeated_request).unwrap();
+    assert_eq!(document.assets.len(), 1);
+
+    let distinct = temp.path().join("distinct.epub");
+    build(&distinct, "b.png");
+    let mut distinct_request = request(distinct);
+    distinct_request.limits.max_assets = 1;
+    assert!(matches!(
+        EpubConverter.convert(&distinct_request),
         Err(ConversionError::LimitExceeded {
             limit: "assets",
             actual: 2,

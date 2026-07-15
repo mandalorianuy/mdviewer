@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use data_url::DataUrl;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
@@ -11,6 +11,14 @@ use url::Url;
 pub(crate) fn document_from_dom(
     dom: RcDom,
     request: &ConversionRequest,
+) -> Result<Document, ConversionError> {
+    document_from_dom_with_asset_refs(dom, request, &HashMap::new())
+}
+
+pub(crate) fn document_from_dom_with_asset_refs(
+    dom: RcDom,
+    request: &ConversionRequest,
+    asset_refs: &HashMap<String, AssetId>,
 ) -> Result<Document, ConversionError> {
     let title = find_first_element(&dom.document, "title")
         .map(|node| normalized_unfiltered_text(&node))
@@ -43,6 +51,7 @@ pub(crate) fn document_from_dom(
         assets: Vec::new(),
         warnings: Vec::new(),
         decoded_asset_bytes: 0,
+        asset_refs,
     };
     let mut blocks = Vec::new();
     converter.append_container_blocks(&dom.document, &mut blocks)?;
@@ -66,6 +75,7 @@ struct DomConverter<'a> {
     assets: Vec<Asset>,
     warnings: Vec<ConversionWarning>,
     decoded_asset_bytes: u64,
+    asset_refs: &'a HashMap<String, AssetId>,
 }
 
 enum ImageLoad {
@@ -380,6 +390,13 @@ impl DomConverter<'_> {
             );
             return Ok(());
         };
+        if let Some(asset_id) = self.asset_refs.get(source.trim()) {
+            blocks.push(Block::Image {
+                asset_id: asset_id.clone(),
+                alt,
+            });
+            return Ok(());
+        }
         let (data, media_type, extension) = match self.load_image(&source)? {
             ImageLoad::Loaded {
                 data,

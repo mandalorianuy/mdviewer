@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Read, path::Path};
+use std::{collections::HashMap, collections::HashSet, io::Read, path::Path};
 
 use crc32fast::Hasher;
 use flate2::read::DeflateDecoder;
@@ -19,6 +19,12 @@ use crate::{
 const LOCAL_HEADER: u32 = 0x0403_4b50;
 const CENTRAL_HEADER: u32 = 0x0201_4b50;
 const EOCD: u32 = 0x0605_4b50;
+pub(crate) const PACKAGE_REL_NS: &str =
+    "http://schemas.openxmlformats.org/package/2006/relationships";
+pub(crate) const CONTENT_TYPES_NS: &str =
+    "http://schemas.openxmlformats.org/package/2006/content-types";
+pub(crate) const OFFICE_DOCUMENT_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveLimits {
@@ -66,6 +72,21 @@ impl ArchiveLimits {
             }
         }
         Ok(())
+    }
+
+    fn bounded_by_request(&self, request: &ConversionRequest) -> Result<Self, ConversionError> {
+        self.validate()?;
+        let input = request.limits.max_input_bytes;
+        if input == 0 {
+            return Err(limit_exceeded("input_bytes", 1, 0));
+        }
+        Ok(Self {
+            max_entries: self.max_entries.min(input / 30),
+            max_entry_compressed_bytes: self.max_entry_compressed_bytes.min(input),
+            max_entry_uncompressed_bytes: self.max_entry_uncompressed_bytes.min(input),
+            max_total_uncompressed_bytes: self.max_total_uncompressed_bytes.min(input),
+            max_expansion_ratio: self.max_expansion_ratio,
+        })
     }
 }
 
@@ -226,9 +247,9 @@ impl Archive {
         request: &ConversionRequest,
         limits: &ArchiveLimits,
     ) -> Result<Self, ConversionError> {
-        limits.validate()?;
+        let limits = limits.bounded_by_request(request)?;
         let bytes = read_input(request)?;
-        Self::parse(&bytes, limits)
+        Self::parse(&bytes, &limits)
     }
 
     pub(crate) fn entry(&self, name: &str) -> Result<&ArchiveEntry, ConversionError> {
@@ -345,17 +366,35 @@ impl Archive {
             return corrupt("central directory entry count or size is inconsistent");
         }
 
-        let first_entry_name = descriptors
+        let mut local_records = descriptors
+            .iter()
+            .map(|descriptor| extract(bytes, descriptor, limits))
+            .collect::<Result<Vec<_>, _>>()?;
+        local_records.sort_by_key(|record| record.start);
+        let first = local_records
             .first()
-            .map(|descriptor| descriptor.name.clone())
             .ok_or_else(|| corrupt_error("ZIP archive contains no entries"))?;
-        let mut output = Vec::with_capacity(descriptors.len());
-        for descriptor in descriptors {
-            if descriptor.is_dir {
-                continue;
-            }
-            output.push(extract(bytes, &descriptor, limits)?);
+        if first.start != 0 {
+            return corrupt("ZIP local records must start at byte zero without a preamble");
         }
+        for records in local_records.windows(2) {
+            if records[0].end != records[1].start {
+                return corrupt("ZIP local records overlap or contain an unexplained gap");
+            }
+        }
+        if local_records
+            .last()
+            .is_none_or(|record| record.end != central_offset)
+        {
+            return corrupt(
+                "ZIP local records must form one complete region before the central directory",
+            );
+        }
+        let first_entry_name = first.name.clone();
+        let output = local_records
+            .into_iter()
+            .filter_map(|record| (!record.is_dir).then_some(record.entry))
+            .collect();
         Ok(Self {
             entries: output,
             first_entry_name,
@@ -398,9 +437,20 @@ pub(crate) fn relationships(
         .roots
         .first()
         .ok_or_else(|| corrupt_error("empty relationships XML"))?;
+    if !root.is(PACKAGE_REL_NS, "Relationships") {
+        return corrupt(format!(
+            "{path} root is not the package Relationships expanded name"
+        ));
+    }
     let mut output = Vec::new();
     let mut ids = HashSet::new();
-    for node in root.descendants("Relationship") {
+    for node in root.children() {
+        if !node.is(PACKAGE_REL_NS, "Relationship") {
+            return corrupt(format!(
+                "{path} contains a foreign relationship element {:?}",
+                node.name
+            ));
+        }
         let id = required_attr(node, "Id", path)?;
         if !ids.insert(id.to_owned()) {
             return corrupt(format!("duplicate relationship ID {id:?} in {path}"));
@@ -410,7 +460,7 @@ pub(crate) fn relationships(
             kind: required_attr(node, "Type", path)?.to_owned(),
             target: required_attr(node, "Target", path)?.to_owned(),
             external: node
-                .attr("TargetMode")
+                .attr_ns(None, "TargetMode")
                 .is_some_and(|value| value.eq_ignore_ascii_case("external")),
         });
     }
@@ -422,19 +472,144 @@ pub(crate) fn required_attr<'a>(
     name: &str,
     label: &str,
 ) -> Result<&'a str, ConversionError> {
-    node.attr(name)
+    node.attr_ns(None, name)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| corrupt_error(format!("{label} element is missing attribute {name}")))
+}
+
+#[derive(Debug)]
+pub(crate) struct ContentTypes {
+    defaults: HashMap<String, String>,
+    overrides: HashMap<String, String>,
+}
+
+impl ContentTypes {
+    pub(crate) fn media_type<'a>(&'a self, part: &str) -> Option<&'a str> {
+        self.overrides.get(part).map(String::as_str).or_else(|| {
+            part.rsplit_once('.')
+                .and_then(|(_, extension)| self.defaults.get(&extension.to_ascii_lowercase()))
+                .map(String::as_str)
+        })
+    }
+
+    pub(crate) fn media_types(&self) -> impl Iterator<Item = &str> {
+        self.defaults
+            .values()
+            .chain(self.overrides.values())
+            .map(String::as_str)
+    }
+}
+
+pub(crate) fn authenticate_ooxml(
+    archive: &Archive,
+    expected_main_part: &str,
+    expected_main_content_type: &str,
+) -> Result<ContentTypes, ConversionError> {
+    let entry = archive.entry("[Content_Types].xml")?;
+    let parsed = parse_xml_bytes(&entry.data, "[Content_Types].xml")?;
+    let root = parsed
+        .roots
+        .first()
+        .ok_or_else(|| corrupt_error("empty content types XML"))?;
+    if !root.is(CONTENT_TYPES_NS, "Types") {
+        return corrupt("[Content_Types].xml has the wrong expanded root name");
+    }
+    let mut defaults = HashMap::new();
+    let mut overrides = HashMap::new();
+    for node in root.children() {
+        if node.is(CONTENT_TYPES_NS, "Default") {
+            let extension =
+                required_attr(node, "Extension", "content type Default")?.to_ascii_lowercase();
+            let content_type = required_attr(node, "ContentType", "content type Default")?;
+            if extension.is_empty()
+                || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                || defaults
+                    .insert(extension.clone(), content_type.to_owned())
+                    .is_some()
+            {
+                return corrupt(format!(
+                    "invalid or duplicate content type extension {extension:?}"
+                ));
+            }
+        } else if node.is(CONTENT_TYPES_NS, "Override") {
+            let raw = required_attr(node, "PartName", "content type Override")?;
+            let Some(raw) = raw.strip_prefix('/') else {
+                return corrupt("content type Override PartName must be package-absolute");
+            };
+            let part = normalize_part_name(raw)?;
+            let content_type = required_attr(node, "ContentType", "content type Override")?;
+            if overrides
+                .insert(part.clone(), content_type.to_owned())
+                .is_some()
+            {
+                return corrupt(format!("duplicate content type Override for {part:?}"));
+            }
+        } else {
+            return corrupt(format!(
+                "[Content_Types].xml contains foreign element {:?}",
+                node.name
+            ));
+        }
+    }
+    let content_types = ContentTypes {
+        defaults,
+        overrides,
+    };
+    if content_types.media_type(expected_main_part) != Some(expected_main_content_type) {
+        return corrupt(format!(
+            "main part {expected_main_part:?} has the wrong or missing content type"
+        ));
+    }
+    let office = relationships(archive, "_rels/.rels")?
+        .into_iter()
+        .filter(|relationship| relationship.kind == OFFICE_DOCUMENT_REL)
+        .collect::<Vec<_>>();
+    if office.len() != 1 || office[0].external {
+        return corrupt("package must contain exactly one local officeDocument root relationship");
+    }
+    let target = resolve_package_path("", &office[0].target)?;
+    if target != expected_main_part {
+        return corrupt(format!(
+            "officeDocument relationship targets {target:?}, expected {expected_main_part:?}"
+        ));
+    }
+    archive.entry(expected_main_part)?;
+    Ok(content_types)
+}
+
+fn normalize_part_name(path: &str) -> Result<String, ConversionError> {
+    let normalized = path.replace('\\', "/");
+    if normalized.contains('\0')
+        || normalized.starts_with('/')
+        || normalized.starts_with("//")
+        || normalized.contains(':')
+        || normalized.split('/').any(|part| part == "..")
+    {
+        return corrupt(format!("unsafe package part name {path:?}"));
+    }
+    let parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return corrupt("empty package part name");
+    }
+    Ok(parts.join("/"))
 }
 
 pub(crate) fn resolve_package_path(
     base_part: &str,
     target: &str,
 ) -> Result<String, ConversionError> {
+    let target = target.replace('\\', "/");
     if target.contains('\0') || target.starts_with('/') || target.starts_with("//") {
         return corrupt(format!("unsafe package relationship target {target:?}"));
     }
-    let target = target.replace('\\', "/");
+    if target.as_bytes().get(1) == Some(&b':') && target.as_bytes()[0].is_ascii_alphabetic() {
+        return corrupt(format!(
+            "drive-qualified package relationship target {target:?}"
+        ));
+    }
     if target.contains(':') {
         return corrupt(format!(
             "package relationship target has a scheme {target:?}"
@@ -478,6 +653,7 @@ impl AssetSink {
         archive: &Archive,
         part: &str,
         request: &ConversionRequest,
+        content_types: &ContentTypes,
     ) -> Result<AssetId, ConversionError> {
         if let Some(id) = self.by_part.get(part) {
             return Ok(id.clone());
@@ -495,6 +671,17 @@ impl AssetSink {
         let entry = archive.entry(part)?;
         let extension = safe_extension(part)
             .ok_or_else(|| corrupt_error(format!("unsupported embedded image type in {part:?}")))?;
+        let declared = content_types.media_type(part).ok_or_else(|| {
+            corrupt_error(format!(
+                "embedded image {part:?} has no declared content type"
+            ))
+        })?;
+        let expected_media = media_type(extension);
+        if declared != expected_media || !valid_image_signature(expected_media, &entry.data) {
+            return corrupt(format!(
+                "embedded image {part:?} content type or signature is invalid"
+            ));
+        }
         let id = AssetId::new(format!("asset-{actual:03}"))?;
         self.assets.push(Asset {
             id: id.clone(),
@@ -522,7 +709,6 @@ fn safe_extension(path: &str) -> Option<&str> {
         "gif" => Some("gif"),
         "webp" => Some("webp"),
         "bmp" => Some("bmp"),
-        "svg" => Some("svg"),
         _ => None,
     }
 }
@@ -534,8 +720,18 @@ fn media_type(extension: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "bmp" => "image/bmp",
-        "svg" => "image/svg+xml",
         _ => "application/octet-stream",
+    }
+}
+
+fn valid_image_signature(media_type: &str, bytes: &[u8]) -> bool {
+    match media_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+        "image/bmp" => bytes.starts_with(b"BM"),
+        _ => false,
     }
 }
 
@@ -548,6 +744,14 @@ struct Descriptor {
     compressed: u64,
     uncompressed: u64,
     local_offset: usize,
+    is_dir: bool,
+}
+
+struct LocalRecord {
+    entry: ArchiveEntry,
+    name: String,
+    start: usize,
+    end: usize,
     is_dir: bool,
 }
 
@@ -695,7 +899,7 @@ fn extract(
     bytes: &[u8],
     descriptor: &Descriptor,
     limits: &ArchiveLimits,
-) -> Result<ArchiveEntry, ConversionError> {
+) -> Result<LocalRecord, ConversionError> {
     let offset = descriptor.local_offset;
     if read_u32(bytes, offset)? != LOCAL_HEADER {
         return corrupt(format!("invalid local header for {}", descriptor.name));
@@ -721,6 +925,14 @@ fn extract(
                 descriptor.name
             ));
         }
+    } else if read_u32(bytes, offset + 14)? != 0
+        || read_u32(bytes, offset + 18)? != 0
+        || read_u32(bytes, offset + 22)? != 0
+    {
+        return corrupt(format!(
+            "data-descriptor local header fields must be zero for {}",
+            descriptor.name
+        ));
     }
     let name_len = usize::from(read_u16(bytes, offset + 26)?);
     let extra_len = usize::from(read_u16(bytes, offset + 28)?);
@@ -738,6 +950,34 @@ fn extract(
         .map_err(|_| corrupt_error("compressed entry size does not fit this platform"))?;
     let data_end = checked_add(extra_end, compressed_len, "entry data")?;
     let compressed = slice(bytes, extra_end, data_end, "entry data")?;
+    let record_end = if flags & (1 << 3) != 0 {
+        let first = read_u32(bytes, data_end)?;
+        let (values, end) = if first == 0x0807_4b50 {
+            (
+                data_end
+                    .checked_add(4)
+                    .ok_or_else(|| corrupt_error("ZIP data descriptor offset overflow"))?,
+                checked_add(data_end, 16, "ZIP data descriptor")?,
+            )
+        } else {
+            (data_end, checked_add(data_end, 12, "ZIP data descriptor")?)
+        };
+        let crc = read_u32(bytes, values)?;
+        let compressed = u64::from(read_u32(bytes, values + 4)?);
+        let uncompressed = u64::from(read_u32(bytes, values + 8)?);
+        if crc != descriptor.crc
+            || compressed != descriptor.compressed
+            || uncompressed != descriptor.uncompressed
+        {
+            return corrupt(format!(
+                "ZIP data descriptor disagrees with the central record for {}",
+                descriptor.name
+            ));
+        }
+        end
+    } else {
+        data_end
+    };
     let maximum = descriptor
         .uncompressed
         .min(limits.max_entry_uncompressed_bytes);
@@ -781,10 +1021,16 @@ fn extract(
     if hasher.finalize() != descriptor.crc {
         return corrupt(format!("CRC mismatch for {}", descriptor.name));
     }
-    Ok(ArchiveEntry {
+    Ok(LocalRecord {
+        entry: ArchiveEntry {
+            name: descriptor.name.clone(),
+            data,
+            compression: descriptor.compression,
+        },
         name: descriptor.name.clone(),
-        data,
-        compression: descriptor.compression,
+        start: offset,
+        end: record_end,
+        is_dir: descriptor.is_dir,
     })
 }
 

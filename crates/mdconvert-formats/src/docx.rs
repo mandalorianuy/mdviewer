@@ -7,11 +7,20 @@ use mdconvert_core::{
 
 use crate::{
     archive::{
-        Archive, ArchiveLimits, AssetSink, Relationship, parse_xml_bytes, relationships,
-        resolve_package_path,
+        Archive, ArchiveLimits, AssetSink, ContentTypes, Relationship, authenticate_ooxml,
+        parse_xml_bytes, relationships, resolve_package_path,
     },
     xml::XmlNode,
 };
+
+const DOCX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+const IMAGE_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const CP_NS: &str = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
+const DC_NS: &str = "http://purl.org/dc/elements/1.1/";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DocxConverter;
@@ -19,6 +28,8 @@ pub struct DocxConverter;
 impl Converter for DocxConverter {
     fn convert(&self, request: &ConversionRequest) -> Result<Document, ConversionError> {
         let archive = Archive::open(request, &ArchiveLimits::default())?;
+        let content_types =
+            authenticate_ooxml(&archive, "word/document.xml", DOCX_MAIN_CONTENT_TYPE)?;
         let document = parse_xml_bytes(
             &archive.entry("word/document.xml")?.data,
             "word/document.xml",
@@ -27,8 +38,13 @@ impl Converter for DocxConverter {
             .roots
             .first()
             .ok_or_else(|| corrupt_error("DOCX document XML is empty"))?;
+        if !root.is(W_NS, "document") {
+            return Err(corrupt_error(
+                "DOCX document root has the wrong expanded name",
+            ));
+        }
         let body = root
-            .child("body")
+            .child_ns(W_NS, "body")
             .ok_or_else(|| corrupt_error("DOCX has no document body"))?;
         let styles = parse_styles(&archive)?;
         let numbering = parse_numbering(&archive)?;
@@ -42,6 +58,7 @@ impl Converter for DocxConverter {
             rels: &rels,
             archive: &archive,
             request,
+            content_types: &content_types,
             assets: &mut assets,
             warnings: &mut warnings,
         };
@@ -49,37 +66,30 @@ impl Converter for DocxConverter {
         let children: Vec<_> = body.children().collect();
         let mut index = 0usize;
         while index < children.len() {
-            match children[index].local_name() {
-                "p" => {
-                    let paragraph =
-                        convert_paragraph(children[index], &styles, &numbering, &mut context)?;
-                    if paragraph.list.is_some() {
-                        let mut paragraphs = Vec::new();
-                        while index < children.len() && children[index].local_name() == "p" {
-                            let candidate = convert_paragraph(
-                                children[index],
-                                &styles,
-                                &numbering,
-                                &mut context,
-                            )?;
-                            if candidate.list.is_none() {
-                                break;
-                            }
-                            paragraphs.push(candidate);
-                            index += 1;
+            if children[index].is(W_NS, "p") {
+                let paragraph =
+                    convert_paragraph(children[index], &styles, &numbering, &mut context)?;
+                if paragraph.list.is_some() {
+                    let mut paragraphs = Vec::new();
+                    while index < children.len() && children[index].is(W_NS, "p") {
+                        let candidate =
+                            convert_paragraph(children[index], &styles, &numbering, &mut context)?;
+                        if candidate.list.is_none() {
+                            break;
                         }
-                        let mut cursor = 0usize;
-                        blocks.push(build_list(
-                            &paragraphs,
-                            &mut cursor,
-                            paragraphs[0].list.unwrap().level,
-                        ));
-                        continue;
+                        paragraphs.push(candidate);
+                        index += 1;
                     }
-                    blocks.extend(paragraph.into_blocks());
+                    let mut cursor = 0usize;
+                    while cursor < paragraphs.len() {
+                        let level = paragraphs[cursor].list.unwrap().level;
+                        blocks.push(build_list(&paragraphs, &mut cursor, level));
+                    }
+                    continue;
                 }
-                "tbl" => blocks.extend(convert_table(children[index], &mut context)?),
-                _ => {}
+                blocks.extend(paragraph.into_blocks());
+            } else if children[index].is(W_NS, "tbl") {
+                blocks.extend(convert_table(children[index], &mut context)?);
             }
             index += 1;
         }
@@ -114,6 +124,7 @@ struct DocxContext<'a> {
     rels: &'a HashMap<String, Relationship>,
     archive: &'a Archive,
     request: &'a ConversionRequest,
+    content_types: &'a ContentTypes,
     assets: &'a mut AssetSink,
     warnings: &'a mut Vec<ConversionWarning>,
 }
@@ -149,28 +160,30 @@ fn convert_paragraph(
     numbering: &Numbering,
     context: &mut DocxContext<'_>,
 ) -> Result<Paragraph, ConversionError> {
-    let properties = node.child("pPr");
+    let properties = node.child_ns(W_NS, "pPr");
     let heading = properties
-        .and_then(|value| value.child("pStyle"))
-        .and_then(|value| value.attr("val"))
+        .and_then(|value| value.child_ns(W_NS, "pStyle"))
+        .and_then(|value| value.attr_ns(Some(W_NS), "val"))
         .and_then(|style| styles.get(style).copied())
         .or_else(|| {
             properties
-                .and_then(|value| value.child("outlineLvl"))
-                .and_then(|value| value.attr("val"))
+                .and_then(|value| value.child_ns(W_NS, "outlineLvl"))
+                .and_then(|value| value.attr_ns(Some(W_NS), "val"))
                 .and_then(|value| value.parse::<u8>().ok())
                 .and_then(|value| value.checked_add(1))
                 .filter(|value| *value <= 6)
         });
     let list = properties
-        .and_then(|value| value.child("numPr"))
+        .and_then(|value| value.child_ns(W_NS, "numPr"))
         .and_then(|numbering_properties| {
             let level = numbering_properties
-                .child("ilvl")?
-                .attr("val")?
+                .child_ns(W_NS, "ilvl")?
+                .attr_ns(Some(W_NS), "val")?
                 .parse::<u32>()
                 .ok()?;
-            let id = numbering_properties.child("numId")?.attr("val")?;
+            let id = numbering_properties
+                .child_ns(W_NS, "numId")?
+                .attr_ns(Some(W_NS), "val")?;
             numbering
                 .get(&(id.to_owned(), level))
                 .map(|(ordered, start)| ListKind {
@@ -181,7 +194,7 @@ fn convert_paragraph(
         });
     let mut content = Vec::new();
     let mut images = Vec::new();
-    for child in node.children().filter(|child| child.local_name() != "pPr") {
+    for child in node.children().filter(|child| !child.is(W_NS, "pPr")) {
         append_inline_content(child, context, &mut content, &mut images)?;
     }
     Ok(Paragraph {
@@ -198,72 +211,87 @@ fn append_inline_content(
     output: &mut Vec<Inline>,
     images: &mut Vec<mdconvert_core::AssetId>,
 ) -> Result<(), ConversionError> {
-    match node.local_name() {
-        "r" => {
-            let mut run = Vec::new();
-            for child in node.children().filter(|child| child.local_name() != "rPr") {
-                match child.local_name() {
-                    "t" | "delText" | "instrText" => run.push(Inline::Text(child.text())),
-                    "tab" => run.push(Inline::Text("\t".into())),
-                    "br" | "cr" => run.push(Inline::LineBreak),
-                    "drawing" | "pict" => {
-                        for blip in child.descendants("blip") {
-                            if let Some(id) = blip.attr_prefixed("embed") {
-                                images.push(add_related_image(id, context)?);
-                            }
-                        }
+    if node.is(W_NS, "r") {
+        let mut run = Vec::new();
+        for child in node.children().filter(|child| !child.is(W_NS, "rPr")) {
+            if child.is(W_NS, "t") || child.is(W_NS, "delText") || child.is(W_NS, "instrText") {
+                run.push(Inline::Text(child.text()));
+            } else if child.is(W_NS, "tab") {
+                run.push(Inline::Text("\t".into()));
+            } else if child.is(W_NS, "br") || child.is(W_NS, "cr") {
+                run.push(Inline::LineBreak);
+            } else if child.is(W_NS, "drawing") || child.is(W_NS, "pict") {
+                for blip in child.descendants_ns(A_NS, "blip") {
+                    if let Some(id) = blip.attr_ns(Some(R_NS), "embed") {
+                        images.push(add_related_image(id, context)?);
                     }
-                    _ => append_inline_content(child, context, &mut run, images)?,
                 }
-            }
-            let properties = node.child("rPr");
-            if properties.is_some_and(|value| value.child("b").is_some()) {
-                run = vec![Inline::Strong(run)];
-            }
-            if properties.is_some_and(|value| value.child("i").is_some()) {
-                run = vec![Inline::Emphasis(run)];
-            }
-            output.extend(run);
-        }
-        "hyperlink" => {
-            let mut label = Vec::new();
-            for child in node.children() {
-                append_inline_content(child, context, &mut label, images)?;
-            }
-            let anchor = node.attr("anchor").map(|value| format!("#{value}"));
-            let relationship = node.attr_prefixed("id").and_then(|id| context.rels.get(id));
-            let target = anchor.or_else(|| relationship.map(|value| value.target.clone()));
-            if relationship.is_some_and(|value| value.external) {
-                context.warnings.push(ConversionWarning {
-                    code: WarningCode::ExternalAssetSkipped,
-                    message: "External DOCX hyperlink relationship was preserved as text".into(),
-                    page: None,
-                });
-                output.extend(label);
-            } else if let Some(target) = target.as_ref().filter(|target| safe_link(target)) {
-                output.push(Inline::Link {
-                    url: target.clone(),
-                    title: None,
-                    content: label,
-                });
             } else {
-                if target.is_some() {
-                    context.warnings.push(ConversionWarning {
-                        code: WarningCode::InvalidLinkSkipped,
-                        message: "Unsafe DOCX hyperlink was preserved as text".into(),
-                        page: None,
-                    });
-                }
-                output.extend(label);
+                append_inline_content(child, context, &mut run, images)?;
             }
         }
-        _ => {
-            for child in node.children() {
-                append_inline_content(child, context, output, images)?;
+        let properties = node.child_ns(W_NS, "rPr");
+        if properties.is_some_and(|value| value.child_ns(W_NS, "b").is_some()) {
+            run = vec![Inline::Strong(run)];
+        }
+        if properties.is_some_and(|value| value.child_ns(W_NS, "i").is_some()) {
+            run = vec![Inline::Emphasis(run)];
+        }
+        output.extend(run);
+    } else if node.is(W_NS, "hyperlink") {
+        let mut label = Vec::new();
+        for child in node.children() {
+            append_inline_content(child, context, &mut label, images)?;
+        }
+        let anchor = node
+            .attr_ns(Some(W_NS), "anchor")
+            .map(|value| format!("#{value}"));
+        let relationship = node
+            .attr_ns(Some(R_NS), "id")
+            .and_then(|id| context.rels.get(id));
+        let target = anchor.or_else(|| relationship.map(|value| value.target.clone()));
+        if relationship.is_some_and(|value| value.external) {
+            push_warning(
+                context.warnings,
+                WarningCode::ExternalLinkSkipped,
+                "External DOCX hyperlink relationship was preserved as text".into(),
+            );
+            output.extend(label);
+        } else if let Some(target) = target.as_ref().filter(|target| safe_link(target)) {
+            output.push(Inline::Link {
+                url: target.clone(),
+                title: None,
+                content: label,
+            });
+        } else {
+            if target.is_some() {
+                push_warning(
+                    context.warnings,
+                    WarningCode::InvalidLinkSkipped,
+                    "Unsafe DOCX hyperlink was preserved as text".into(),
+                );
             }
+            output.extend(label);
+        }
+    } else {
+        for child in node.children() {
+            append_inline_content(child, context, output, images)?;
         }
     }
     Ok(())
+}
+
+fn push_warning(warnings: &mut Vec<ConversionWarning>, code: WarningCode, message: String) {
+    if !warnings
+        .iter()
+        .any(|warning| warning.code == code && warning.message == message && warning.page.is_none())
+    {
+        warnings.push(ConversionWarning {
+            code,
+            message,
+            page: None,
+        });
+    }
 }
 
 fn add_related_image(
@@ -283,8 +311,19 @@ fn add_related_image(
             "external DOCX image cannot be represented as a local asset",
         ));
     }
+    if relationship.kind != IMAGE_REL {
+        return Err(corrupt_error(format!(
+            "DOCX image relationship {id:?} has invalid type {:?}",
+            relationship.kind
+        )));
+    }
     let path = resolve_package_path("word/document.xml", &relationship.target)?;
-    context.assets.add(context.archive, &path, context.request)
+    context.assets.add(
+        context.archive,
+        &path,
+        context.request,
+        context.content_types,
+    )
 }
 
 fn safe_link(target: &str) -> bool {
@@ -346,18 +385,15 @@ fn convert_table(
 ) -> Result<Vec<Block>, ConversionError> {
     let mut rows = Vec::new();
     let mut trailing_images = Vec::new();
-    for row in table.children().filter(|node| node.local_name() == "tr") {
+    for row in table.children().filter(|node| node.is(W_NS, "tr")) {
         let mut cells = Vec::new();
-        for cell in row.children().filter(|node| node.local_name() == "tc") {
+        for cell in row.children().filter(|node| node.is(W_NS, "tc")) {
             let mut content = Vec::new();
-            for paragraph in cell.children().filter(|node| node.local_name() == "p") {
+            for paragraph in cell.children().filter(|node| node.is(W_NS, "p")) {
                 if !content.is_empty() {
                     content.push(Inline::LineBreak);
                 }
-                for child in paragraph
-                    .children()
-                    .filter(|child| child.local_name() != "pPr")
-                {
+                for child in paragraph.children().filter(|child| !child.is(W_NS, "pPr")) {
                     append_inline_content(child, context, &mut content, &mut trailing_images)?;
                 }
             }
@@ -382,29 +418,37 @@ fn convert_table(
 }
 
 fn parse_styles(archive: &Archive) -> Result<HashMap<String, u8>, ConversionError> {
+    const MAX_STYLES: u64 = 4_096;
+    const MAX_INHERITANCE_DEPTH: u64 = 128;
+    const MAX_RESOLUTION_WORK: u64 = MAX_STYLES * MAX_INHERITANCE_DEPTH;
     let Some(entry) = archive.optional("word/styles.xml") else {
         return Ok(HashMap::new());
     };
     let parsed = parse_xml_bytes(&entry.data, "word/styles.xml")?;
+    if !parsed.roots[0].is(W_NS, "styles") {
+        return Err(corrupt_error(
+            "DOCX styles root has the wrong expanded name",
+        ));
+    }
     struct StyleDefinition {
         level: Option<u8>,
         based_on: Option<String>,
     }
 
     let mut definitions = HashMap::new();
-    for style in parsed.roots[0].descendants("style") {
-        let Some(id) = style.attr("styleId") else {
+    for style in parsed.roots[0].descendants_ns(W_NS, "style") {
+        let Some(id) = style.attr_ns(Some(W_NS), "styleId") else {
             continue;
         };
         let outline = style
-            .descendants("outlineLvl")
+            .descendants_ns(W_NS, "outlineLvl")
             .next()
-            .and_then(|node| node.attr("val"))
+            .and_then(|node| node.attr_ns(Some(W_NS), "val"))
             .and_then(|value| value.parse::<u8>().ok())
             .and_then(|value| value.checked_add(1));
         let named = style
-            .child("name")
-            .and_then(|node| node.attr("val"))
+            .child_ns(W_NS, "name")
+            .and_then(|node| node.attr_ns(Some(W_NS), "val"))
             .or(Some(id))
             .and_then(heading_from_name);
         definitions.insert(
@@ -412,45 +456,90 @@ fn parse_styles(archive: &Archive) -> Result<HashMap<String, u8>, ConversionErro
             StyleDefinition {
                 level: outline.or(named).filter(|level| *level <= 6),
                 based_on: style
-                    .child("basedOn")
-                    .and_then(|node| node.attr("val"))
+                    .child_ns(W_NS, "basedOn")
+                    .and_then(|node| node.attr_ns(Some(W_NS), "val"))
                     .map(ToOwned::to_owned),
             },
         );
-    }
-
-    fn resolve(
-        id: &str,
-        definitions: &HashMap<String, StyleDefinition>,
-        visiting: &mut HashSet<String>,
-    ) -> Result<Option<u8>, ConversionError> {
-        if !visiting.insert(id.to_owned()) {
-            return Err(corrupt_error(format!(
-                "DOCX style inheritance cycle includes {id:?}"
-            )));
+        let count = u64::try_from(definitions.len()).unwrap_or(u64::MAX);
+        if count > MAX_STYLES {
+            return Err(ConversionError::LimitExceeded {
+                limit: "docx_styles",
+                actual: count,
+                maximum: MAX_STYLES,
+            });
         }
-        let level = if let Some(definition) = definitions.get(id) {
-            if definition.level.is_some() {
-                definition.level
-            } else if let Some(parent) = &definition.based_on {
-                resolve(parent, definitions, visiting)?
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        visiting.remove(id);
-        Ok(level)
     }
 
-    let mut output = HashMap::new();
+    let mut resolved = HashMap::<String, (Option<u8>, u64)>::new();
+    let mut work = 0u64;
     for id in definitions.keys() {
-        if let Some(level) = resolve(id, &definitions, &mut HashSet::new())? {
-            output.insert(id.clone(), level);
+        if resolved.contains_key(id) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut visiting = HashSet::new();
+        let mut current = id.as_str();
+        let (inherited, inherited_depth) = loop {
+            work = work.checked_add(1).ok_or(ConversionError::LimitExceeded {
+                limit: "docx_style_resolution_work",
+                actual: u64::MAX,
+                maximum: MAX_RESOLUTION_WORK,
+            })?;
+            if work > MAX_RESOLUTION_WORK {
+                return Err(ConversionError::LimitExceeded {
+                    limit: "docx_style_resolution_work",
+                    actual: work,
+                    maximum: MAX_RESOLUTION_WORK,
+                });
+            }
+            if let Some(value) = resolved.get(current) {
+                break *value;
+            }
+            if !visiting.insert(current.to_owned()) {
+                return Err(corrupt_error(format!(
+                    "DOCX style inheritance cycle includes {current:?}"
+                )));
+            }
+            path.push(current.to_owned());
+            let depth = u64::try_from(path.len()).unwrap_or(u64::MAX);
+            if depth > MAX_INHERITANCE_DEPTH {
+                return Err(ConversionError::LimitExceeded {
+                    limit: "docx_style_inheritance_depth",
+                    actual: depth,
+                    maximum: MAX_INHERITANCE_DEPTH,
+                });
+            }
+            let Some(definition) = definitions.get(current) else {
+                break (None, 0);
+            };
+            if let Some(level) = definition.level {
+                break (Some(level), 0);
+            }
+            let Some(parent) = definition.based_on.as_deref() else {
+                break (None, 0);
+            };
+            current = parent;
+        };
+        let total_depth =
+            inherited_depth.saturating_add(u64::try_from(path.len()).unwrap_or(u64::MAX));
+        if total_depth > MAX_INHERITANCE_DEPTH {
+            return Err(ConversionError::LimitExceeded {
+                limit: "docx_style_inheritance_depth",
+                actual: total_depth,
+                maximum: MAX_INHERITANCE_DEPTH,
+            });
+        }
+        let mut depth = inherited_depth;
+        for style in path.into_iter().rev() {
+            depth = depth.saturating_add(1);
+            resolved.insert(style, (inherited, depth));
         }
     }
-    Ok(output)
+    Ok(resolved
+        .into_iter()
+        .filter_map(|(id, (level, _))| level.map(|level| (id, level)))
+        .collect())
 }
 
 fn heading_from_name(name: &str) -> Option<u8> {
@@ -467,30 +556,29 @@ fn parse_numbering(archive: &Archive) -> Result<Numbering, ConversionError> {
     };
     let parsed = parse_xml_bytes(&entry.data, "word/numbering.xml")?;
     let root = &parsed.roots[0];
+    if !root.is(W_NS, "numbering") {
+        return Err(corrupt_error(
+            "DOCX numbering root has the wrong expanded name",
+        ));
+    }
     let mut abstracts = HashMap::<String, HashMap<u32, (bool, u64)>>::new();
-    for abstract_num in root
-        .children()
-        .filter(|node| node.local_name() == "abstractNum")
-    {
-        let Some(id) = abstract_num.attr("abstractNumId") else {
+    for abstract_num in root.children().filter(|node| node.is(W_NS, "abstractNum")) {
+        let Some(id) = abstract_num.attr_ns(Some(W_NS), "abstractNumId") else {
             continue;
         };
         let mut levels = HashMap::new();
-        for level in abstract_num
-            .children()
-            .filter(|node| node.local_name() == "lvl")
-        {
+        for level in abstract_num.children().filter(|node| node.is(W_NS, "lvl")) {
             let index = level
-                .attr("ilvl")
+                .attr_ns(Some(W_NS), "ilvl")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
             let format = level
-                .child("numFmt")
-                .and_then(|node| node.attr("val"))
+                .child_ns(W_NS, "numFmt")
+                .and_then(|node| node.attr_ns(Some(W_NS), "val"))
                 .unwrap_or("bullet");
             let start = level
-                .child("start")
-                .and_then(|node| node.attr("val"))
+                .child_ns(W_NS, "start")
+                .and_then(|node| node.attr_ns(Some(W_NS), "val"))
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(1);
             levels.insert(index, (format != "bullet", start));
@@ -498,11 +586,14 @@ fn parse_numbering(archive: &Archive) -> Result<Numbering, ConversionError> {
         abstracts.insert(id.to_owned(), levels);
     }
     let mut output = HashMap::new();
-    for num in root.children().filter(|node| node.local_name() == "num") {
-        let Some(id) = num.attr("numId") else {
+    for num in root.children().filter(|node| node.is(W_NS, "num")) {
+        let Some(id) = num.attr_ns(Some(W_NS), "numId") else {
             continue;
         };
-        let Some(abstract_id) = num.child("abstractNumId").and_then(|node| node.attr("val")) else {
+        let Some(abstract_id) = num
+            .child_ns(W_NS, "abstractNumId")
+            .and_then(|node| node.attr_ns(Some(W_NS), "val"))
+        else {
             continue;
         };
         if let Some(levels) = abstracts.get(abstract_id) {
@@ -520,8 +611,13 @@ fn core_metadata(archive: &Archive) -> Result<DocumentMetadata, ConversionError>
     };
     let parsed = parse_xml_bytes(&entry.data, "docProps/core.xml")?;
     let root = &parsed.roots[0];
+    if !root.is(CP_NS, "coreProperties") {
+        return Err(corrupt_error(
+            "DOCX core properties root has the wrong expanded name",
+        ));
+    }
     let value = |name| {
-        root.descendants(name)
+        root.descendants_ns(DC_NS, name)
             .next()
             .map(XmlNode::text)
             .filter(|text| !text.trim().is_empty())

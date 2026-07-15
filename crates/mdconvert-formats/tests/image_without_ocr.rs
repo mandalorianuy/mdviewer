@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use mdconvert_core::{Block, ConversionError, ConversionRequest, Converter, WarningCode};
-use mdconvert_formats::ImageConverter;
+use mdconvert_formats::{ImageConverter, ImageLimits};
 use tempfile::TempDir;
 
 fn request(path: impl Into<PathBuf>) -> ConversionRequest {
@@ -61,8 +61,72 @@ fn jpeg(width: u16, height: u16) -> Vec<u8> {
     output.extend_from_slice(&height.to_be_bytes());
     output.extend_from_slice(&width.to_be_bytes());
     output.extend_from_slice(&[3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+    output.extend_from_slice(&[0xff, 0xda, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 63, 0, 0]);
     output.extend_from_slice(&[0xff, 0xd9]);
     output
+}
+
+#[test]
+fn image_dimensions_and_pixel_count_are_checked_before_asset_allocation() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("oversize.png");
+    fs::write(&path, png(100, 100, None)).unwrap();
+
+    assert!(matches!(
+        ImageConverter::with_limits(ImageLimits {
+            max_width: 50,
+            max_height: 100,
+            max_pixels: 5_000,
+            ..ImageLimits::default()
+        })
+        .convert(&request(path)),
+        Err(ConversionError::LimitExceeded {
+            limit: "image_width",
+            actual: 100,
+            maximum: 50,
+        })
+    ));
+}
+
+#[test]
+fn jpeg_requires_a_frame_scan_entropy_and_terminal_eoi() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("no-scan.jpg");
+    let mut bytes = jpeg(1, 1);
+    let scan = bytes
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .unwrap();
+    bytes.splice(scan.., [0xff, 0xd9]);
+    fs::write(&path, bytes).unwrap();
+    assert!(matches!(
+        ImageConverter.convert(&request(path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let truncated = temp.path().join("truncated-scan.jpg");
+    let mut bytes = jpeg(1, 1);
+    bytes.truncate(bytes.len() - 2);
+    fs::write(&truncated, bytes).unwrap();
+    assert!(matches!(
+        ImageConverter.convert(&request(truncated)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn technical_metadata_does_not_suppress_ocr_deferred() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("software-only.png");
+    fs::write(&path, png(1, 1, Some(("Software", "Camera Tool")))).unwrap();
+
+    let document = ImageConverter.convert(&request(path)).unwrap();
+    assert!(
+        document
+            .warnings
+            .iter()
+            .any(|warning| warning.code == WarningCode::OcrDeferred)
+    );
 }
 
 #[test]

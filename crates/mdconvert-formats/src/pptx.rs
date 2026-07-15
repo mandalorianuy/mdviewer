@@ -7,11 +7,21 @@ use mdconvert_core::{
 
 use crate::{
     archive::{
-        Archive, ArchiveLimits, AssetSink, Relationship, parse_xml_bytes, relationships,
-        resolve_package_path,
+        Archive, ArchiveLimits, AssetSink, ContentTypes, Relationship, authenticate_ooxml,
+        parse_xml_bytes, relationships, resolve_package_path,
     },
     xml::XmlNode,
 };
+
+const PPTX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
+const SLIDE_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
+const IMAGE_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const NOTES_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
+const P_NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PptxConverter;
@@ -19,6 +29,8 @@ pub struct PptxConverter;
 impl Converter for PptxConverter {
     fn convert(&self, request: &ConversionRequest) -> Result<Document, ConversionError> {
         let archive = Archive::open(request, &ArchiveLimits::default())?;
+        let content_types =
+            authenticate_ooxml(&archive, "ppt/presentation.xml", PPTX_MAIN_CONTENT_TYPE)?;
         let presentation = parse_xml_bytes(
             &archive.entry("ppt/presentation.xml")?.data,
             "ppt/presentation.xml",
@@ -28,18 +40,22 @@ impl Converter for PptxConverter {
             .map(|relationship| (relationship.id.clone(), relationship))
             .collect::<HashMap<_, _>>();
         let mut slide_paths = Vec::new();
-        for slide in presentation.roots[0].descendants("sldId") {
+        let presentation_root = &presentation.roots[0];
+        if !presentation_root.is(P_NS, "presentation") {
+            return Err(corrupt_error(
+                "PPTX presentation root has the wrong expanded name",
+            ));
+        }
+        for slide in presentation_root.descendants_ns(P_NS, "sldId") {
             let id = slide
-                .attr_prefixed("id")
+                .attr_ns(Some(R_NS), "id")
                 .ok_or_else(|| corrupt_error("presentation slide is missing a relationship ID"))?;
             let relationship = presentation_rels.get(id).ok_or_else(|| {
                 corrupt_error(format!(
                     "presentation slide references missing relationship {id:?}"
                 ))
             })?;
-            if relationship.external
-                || !relationship.kind.ends_with("/slide") && relationship.kind != "slide"
-            {
+            if relationship.external || relationship.kind != SLIDE_REL {
                 return Err(corrupt_error(
                     "presentation slide relationship is not local slide content",
                 ));
@@ -75,7 +91,9 @@ impl Converter for PptxConverter {
             append_slide(
                 &archive,
                 slide_path,
+                u32::try_from(index + 1).unwrap_or(u32::MAX),
                 request,
+                &content_types,
                 &mut assets,
                 &mut warnings,
                 &mut blocks,
@@ -94,80 +112,67 @@ impl Converter for PptxConverter {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_slide(
     archive: &Archive,
     slide_path: &str,
+    page: u32,
     request: &ConversionRequest,
+    content_types: &ContentTypes,
     assets: &mut AssetSink,
     warnings: &mut Vec<ConversionWarning>,
     blocks: &mut Vec<Block>,
 ) -> Result<(), ConversionError> {
     let parsed = parse_xml_bytes(&archive.entry(slide_path)?.data, slide_path)?;
     let root = &parsed.roots[0];
+    if !root.is(P_NS, "sld") {
+        return Err(corrupt_error("PPTX slide root has the wrong expanded name"));
+    }
     let rel_path = relationship_part(slide_path)?;
     let rels = relationships(archive, &rel_path)?
         .into_iter()
         .map(|relationship| (relationship.id.clone(), relationship))
         .collect::<HashMap<_, _>>();
-    for shape in root.descendants("sp") {
-        let content = shape_inlines(shape, &rels, warnings);
-        if content.is_empty() {
-            continue;
-        }
-        let title = shape
-            .descendants("ph")
-            .next()
-            .and_then(|placeholder| placeholder.attr("type"))
-            .is_some_and(|value| matches!(value, "title" | "ctrTitle"));
-        blocks.push(if title {
-            Block::Heading { level: 1, content }
-        } else {
-            Block::Paragraph { content }
-        });
+    let shape_tree = root.descendants_ns(P_NS, "spTree").next().unwrap_or(root);
+    for node in shape_tree.children() {
+        append_shape_tree_node(
+            node,
+            archive,
+            slide_path,
+            page,
+            request,
+            content_types,
+            &rels,
+            assets,
+            warnings,
+            blocks,
+        )?;
     }
-    for table in root.descendants("tbl") {
-        if let Some(table) = convert_table(table) {
-            blocks.push(table);
-        }
+    let notes_relationships = rels
+        .values()
+        .filter(|relationship| relationship.kind == NOTES_REL)
+        .collect::<Vec<_>>();
+    if notes_relationships.len() > 1 {
+        return Err(corrupt_error(
+            "PPTX slide has multiple notesSlide relationships",
+        ));
     }
-    for blip in root.descendants("blip") {
-        let Some(id) = blip.attr_prefixed("embed") else {
-            continue;
-        };
-        let relationship = rels.get(id).ok_or_else(|| {
-            corrupt_error(format!(
-                "slide image references missing relationship {id:?}"
-            ))
-        })?;
-        if relationship.external {
-            warnings.push(ConversionWarning {
-                code: WarningCode::ExternalAssetSkipped,
-                message: format!("External PPTX image relationship {id:?} was skipped"),
-                page: None,
-            });
-            continue;
+    if let Some(notes) = notes_relationships.first() {
+        if notes.external {
+            return Err(corrupt_error("external PPTX notesSlide is unsupported"));
         }
-        let path = resolve_package_path(slide_path, &relationship.target)?;
-        let asset_id = assets.add(archive, &path, request)?;
-        blocks.push(Block::Image {
-            asset_id,
-            alt: String::new(),
-        });
-    }
-    warn_external_links(root, &rels, warnings);
-    if let Some(notes) = rels.values().find(|relationship| {
-        !relationship.external
-            && (relationship.kind.ends_with("/notesSlide") || relationship.kind == "notesSlide")
-    }) {
         let path = resolve_package_path(slide_path, &notes.target)?;
         let notes = parse_xml_bytes(&archive.entry(&path)?.data, &path)?;
+        if !notes.roots[0].is(P_NS, "notes") {
+            return Err(corrupt_error("PPTX notes root has the wrong expanded name"));
+        }
         let text = notes.roots[0]
-            .descendants("sp")
+            .descendants_ns(P_NS, "sp")
             .filter(|shape| {
                 !shape
-                    .descendants("ph")
+                    .descendants_ns(P_NS, "ph")
                     .next()
-                    .and_then(|node| node.attr("type"))
+                    .and_then(|node| node.attr_ns(None, "type"))
                     .is_some_and(|value| matches!(value, "hdr" | "ftr" | "dt" | "sldNum"))
             })
             .map(shape_text)
@@ -187,6 +192,125 @@ fn append_slide(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_shape_tree_node(
+    node: &XmlNode,
+    archive: &Archive,
+    slide_path: &str,
+    page: u32,
+    request: &ConversionRequest,
+    content_types: &ContentTypes,
+    rels: &HashMap<String, Relationship>,
+    assets: &mut AssetSink,
+    warnings: &mut Vec<ConversionWarning>,
+    blocks: &mut Vec<Block>,
+) -> Result<(), ConversionError> {
+    if node.is(P_NS, "sp") {
+        let content = shape_inlines(node, rels, warnings, page);
+        if !content.is_empty() {
+            let title = node
+                .descendants_ns(P_NS, "ph")
+                .next()
+                .and_then(|placeholder| placeholder.attr_ns(None, "type"))
+                .is_some_and(|value| matches!(value, "title" | "ctrTitle"));
+            blocks.push(if title {
+                Block::Heading { level: 1, content }
+            } else {
+                Block::Paragraph { content }
+            });
+        }
+    } else if node.is(A_NS, "tbl") {
+        if let Some(table) = convert_table(node) {
+            blocks.push(table);
+        }
+    } else if node.is(P_NS, "graphicFrame") {
+        for table in node.descendants_ns(A_NS, "tbl") {
+            if let Some(table) = convert_table(table) {
+                blocks.push(table);
+            }
+        }
+    } else if node.is(A_NS, "blip") {
+        append_slide_image(
+            node,
+            archive,
+            slide_path,
+            request,
+            content_types,
+            rels,
+            assets,
+            blocks,
+        )?;
+    } else if node.is(P_NS, "pic") {
+        for blip in node.descendants_ns(A_NS, "blip") {
+            append_slide_image(
+                blip,
+                archive,
+                slide_path,
+                request,
+                content_types,
+                rels,
+                assets,
+                blocks,
+            )?;
+        }
+    } else {
+        for child in node.children() {
+            append_shape_tree_node(
+                child,
+                archive,
+                slide_path,
+                page,
+                request,
+                content_types,
+                rels,
+                assets,
+                warnings,
+                blocks,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_slide_image(
+    blip: &XmlNode,
+    archive: &Archive,
+    slide_path: &str,
+    request: &ConversionRequest,
+    content_types: &ContentTypes,
+    rels: &HashMap<String, Relationship>,
+    assets: &mut AssetSink,
+    blocks: &mut Vec<Block>,
+) -> Result<(), ConversionError> {
+    let Some(id) = blip.attr_ns(Some(R_NS), "embed") else {
+        return Ok(());
+    };
+    let relationship = rels.get(id).ok_or_else(|| {
+        corrupt_error(format!(
+            "slide image references missing relationship {id:?}"
+        ))
+    })?;
+    if relationship.external {
+        return Err(corrupt_error(format!(
+            "external PPTX image relationship {id:?} is unsupported"
+        )));
+    }
+    if relationship.kind != IMAGE_REL {
+        return Err(corrupt_error(format!(
+            "PPTX image relationship {id:?} has invalid type {:?}",
+            relationship.kind
+        )));
+    }
+    let path = resolve_package_path(slide_path, &relationship.target)?;
+    let asset_id = assets.add(archive, &path, request, content_types)?;
+    blocks.push(Block::Image {
+        asset_id,
+        alt: String::new(),
+    });
+    Ok(())
+}
+
 fn relationship_part(part: &str) -> Result<String, ConversionError> {
     let (directory, leaf) = part
         .rsplit_once('/')
@@ -196,10 +320,10 @@ fn relationship_part(part: &str) -> Result<String, ConversionError> {
 
 fn shape_text(shape: &XmlNode) -> String {
     shape
-        .descendants("p")
+        .descendants_ns(A_NS, "p")
         .map(|paragraph| {
             paragraph
-                .descendants("t")
+                .descendants_ns(A_NS, "t")
                 .map(XmlNode::text)
                 .collect::<String>()
         })
@@ -212,32 +336,42 @@ fn shape_inlines(
     shape: &XmlNode,
     rels: &HashMap<String, Relationship>,
     warnings: &mut Vec<ConversionWarning>,
+    page: u32,
 ) -> Vec<Inline> {
     let mut output = Vec::new();
-    for paragraph in shape.descendants("p") {
+    for paragraph in shape.descendants_ns(A_NS, "p") {
         if !output.is_empty() {
             output.push(Inline::LineBreak);
         }
         for run in paragraph
             .children()
-            .filter(|node| matches!(node.local_name(), "r" | "fld"))
+            .filter(|node| node.is(A_NS, "r") || node.is(A_NS, "fld"))
         {
-            let text: String = run.descendants("t").map(XmlNode::text).collect();
+            let text: String = run.descendants_ns(A_NS, "t").map(XmlNode::text).collect();
             if text.is_empty() {
                 continue;
             }
             let relationship = run
-                .descendants("hlinkClick")
+                .descendants_ns(A_NS, "hlinkClick")
                 .next()
-                .and_then(|link| link.attr_prefixed("id"))
+                .and_then(|link| link.attr_ns(Some(R_NS), "id"))
                 .and_then(|id| rels.get(id));
             if let Some(relationship) = relationship {
                 if relationship.external || !safe_local_link(&relationship.target) {
-                    warnings.push(ConversionWarning {
-                        code: WarningCode::ExternalAssetSkipped,
-                        message: "External or unsafe PPTX hyperlink was preserved as text".into(),
-                        page: None,
-                    });
+                    let code = if relationship.external {
+                        WarningCode::ExternalLinkSkipped
+                    } else {
+                        WarningCode::InvalidLinkSkipped
+                    };
+                    push_warning(
+                        warnings,
+                        code,
+                        format!(
+                            "PPTX hyperlink {:?} was preserved as text",
+                            relationship.target
+                        ),
+                        Some(page),
+                    );
                     output.push(Inline::Text(text));
                 } else {
                     output.push(Inline::Link {
@@ -278,10 +412,10 @@ fn text_lines(text: &str) -> Vec<Inline> {
 fn convert_table(table: &XmlNode) -> Option<Block> {
     let rows: Vec<_> = table
         .children()
-        .filter(|row| row.local_name() == "tr")
+        .filter(|row| row.is(A_NS, "tr"))
         .map(|row| {
             row.children()
-                .filter(|cell| cell.local_name() == "tc")
+                .filter(|cell| cell.is(A_NS, "tc"))
                 .map(|cell| vec![Inline::Text(shape_text(cell))])
                 .collect::<Vec<_>>()
         })
@@ -293,23 +427,21 @@ fn convert_table(table: &XmlNode) -> Option<Block> {
     })
 }
 
-fn warn_external_links(
-    root: &XmlNode,
-    rels: &HashMap<String, Relationship>,
+fn push_warning(
     warnings: &mut Vec<ConversionWarning>,
+    code: WarningCode,
+    message: String,
+    page: Option<u32>,
 ) {
-    for link in root.descendants("hlinkClick") {
-        if link
-            .attr_prefixed("id")
-            .and_then(|id| rels.get(id))
-            .is_some_and(|rel| rel.external)
-        {
-            warnings.push(ConversionWarning {
-                code: WarningCode::ExternalAssetSkipped,
-                message: "External PPTX hyperlink relationship was preserved as text".into(),
-                page: None,
-            });
-        }
+    if !warnings
+        .iter()
+        .any(|warning| warning.code == code && warning.message == message && warning.page == page)
+    {
+        warnings.push(ConversionWarning {
+            code,
+            message,
+            page,
+        });
     }
 }
 
