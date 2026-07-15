@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs};
+use std::{collections::BTreeMap, fs, sync::Mutex};
 
 use mdconvert_core::{ConversionError, ConversionRequest, DocumentMetadata};
 use pdfium_render::prelude::*;
@@ -9,12 +9,24 @@ use crate::{
     raw::{RawDocument, RawGlyph, RawImage, RawLink, RawPage, RawRect, RawRule, RawWord, RuleKind},
 };
 
+// The pinned native PDFium build aborts when independent documents are loaded and
+// destroyed concurrently, even through pdfium-render's thread-safe bindings. Keep
+// each extraction transaction serialized at the native-library boundary.
+static PDFIUM_EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn extract_pdf(request: &ConversionRequest) -> Result<RawDocument, ConversionError> {
+    let _extraction_guard =
+        PDFIUM_EXTRACTION_LOCK
+            .lock()
+            .map_err(|_| ConversionError::ConversionFailed {
+                message: "PDFium extraction state is unavailable".into(),
+            })?;
     let bytes = read_source(request)?;
     let pdfium = load_pdfium()?;
     let document = pdfium
         .load_pdf_from_byte_vec(bytes, None)
         .map_err(map_document_load_error)?;
+    ensure_unencrypted(&document)?;
     let page_count =
         u32::try_from(document.pages().len()).map_err(|_| ConversionError::ConversionFailed {
             message: "PDF page count cannot be represented as u32".into(),
@@ -26,6 +38,7 @@ pub fn extract_pdf(request: &ConversionRequest) -> Result<RawDocument, Conversio
             maximum: u64::from(request.limits.max_pages),
         });
     }
+    preflight_images(&document, request)?;
 
     let metadata = extract_metadata(&document, page_count);
     let mut pages = Vec::with_capacity(page_count as usize);
@@ -97,6 +110,83 @@ fn map_document_load_error(error: PdfiumError) -> ConversionError {
     }
 }
 
+fn ensure_unencrypted(document: &PdfDocument<'_>) -> Result<(), ConversionError> {
+    match document.permissions().security_handler_revision() {
+        Ok(PdfSecurityHandlerRevision::Unprotected) => Ok(()),
+        Ok(
+            PdfSecurityHandlerRevision::Revision2
+            | PdfSecurityHandlerRevision::Revision3
+            | PdfSecurityHandlerRevision::Revision4,
+        )
+        | Err(PdfiumError::UnknownPdfSecurityHandlerRevision) => {
+            Err(ConversionError::EncryptedInput)
+        }
+        Err(error) => Err(pdfium_error("inspect PDF security handler", error)),
+    }
+}
+
+fn preflight_images(
+    document: &PdfDocument<'_>,
+    request: &ConversionRequest,
+) -> Result<(), ConversionError> {
+    let mut image_count = 0_u64;
+    for page in document.pages().iter() {
+        for object in page.objects().iter() {
+            if object.as_image_object().is_some() {
+                image_count = image_count.saturating_add(1);
+            }
+        }
+    }
+    if image_count > u64::from(request.limits.max_assets) {
+        return Err(ConversionError::LimitExceeded {
+            limit: "max_assets",
+            actual: image_count,
+            maximum: u64::from(request.limits.max_assets),
+        });
+    }
+
+    // The input-byte ceiling is also the extraction memory ceiling. Account for the
+    // fully decoded RGBA representation of every image before decoding any image.
+    let mut decoded_bytes = 0_u64;
+    for page in document.pages().iter() {
+        for object in page.objects().iter() {
+            let Some(image) = object.as_image_object() else {
+                continue;
+            };
+            let width = u64::try_from(
+                image
+                    .width()
+                    .map_err(|error| pdfium_error("read PDF image width", error))?,
+            )
+            .map_err(|_| ConversionError::ConversionFailed {
+                message: "PDFium returned a negative image width".into(),
+            })?;
+            let height = u64::try_from(
+                image
+                    .height()
+                    .map_err(|error| pdfium_error("read PDF image height", error))?,
+            )
+            .map_err(|_| ConversionError::ConversionFailed {
+                message: "PDFium returned a negative image height".into(),
+            })?;
+            let image_bytes = width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .unwrap_or(u64::MAX);
+            decoded_bytes = decoded_bytes.saturating_add(image_bytes);
+        }
+    }
+    if decoded_bytes > request.limits.max_input_bytes {
+        return Err(ConversionError::LimitExceeded {
+            limit: "pdf_decoded_image_bytes",
+            actual: decoded_bytes,
+            maximum: request.limits.max_input_bytes,
+        });
+    }
+
+    Ok(())
+}
+
 fn extract_metadata(document: &PdfDocument<'_>, page_count: u32) -> DocumentMetadata {
     let mut title = None;
     let mut author = None;
@@ -125,6 +215,15 @@ fn extract_metadata(document: &PdfDocument<'_>, page_count: u32) -> DocumentMeta
             }
         }
     }
+    // pdfium-render 0.9.3 requests the non-standard `ModificationDate` metadata
+    // key, so it cannot safely expose the PDF-standard `ModDate` value. Make the
+    // unsupported state explicit instead of silently dropping the field.
+    if !properties.contains_key("modification_date") {
+        properties.insert(
+            "modification_date_status".into(),
+            "unsupported_by_pdfium_render_0_9_3".into(),
+        );
+    }
 
     DocumentMetadata {
         title,
@@ -137,24 +236,24 @@ fn extract_metadata(document: &PdfDocument<'_>, page_count: u32) -> DocumentMeta
 }
 
 fn extract_page(index: usize, page: &PdfPage<'_>) -> Result<RawPage, ConversionError> {
-    let width = finite_value("page width", page.width().value)?;
-    let height = finite_value("page height", page.height().value)?;
-    let rotation_degrees = page
+    let reported_width = finite_value("page width", page.width().value)?;
+    let reported_height = finite_value("page height", page.height().value)?;
+    let rotation = page
         .rotation()
-        .map_err(|error| pdfium_error("read page rotation", error))?
-        .as_degrees() as i16;
-    let glyphs = extract_glyphs(page, height)?;
+        .map_err(|error| pdfium_error("read page rotation", error))?;
+    let geometry = PageGeometry::new(reported_width, reported_height, rotation);
+    let glyphs = extract_glyphs(page, geometry)?;
     let words = group_words(&glyphs);
-    let (images, rules) = extract_objects(page, height)?;
-    let links = extract_links(page, height)?;
+    let (images, rules) = extract_objects(page, geometry)?;
+    let links = extract_links(page, geometry)?;
 
     Ok(RawPage {
         number: u32::try_from(index + 1).map_err(|_| ConversionError::ConversionFailed {
             message: "PDF page number cannot be represented as u32".into(),
         })?,
-        width,
-        height,
-        rotation_degrees,
+        width: geometry.display_width,
+        height: geometry.display_height,
+        rotation_degrees: geometry.rotation.as_degrees() as i16,
         glyphs,
         words,
         images,
@@ -163,7 +262,41 @@ fn extract_page(index: usize, page: &PdfPage<'_>) -> Result<RawPage, ConversionE
     })
 }
 
-fn extract_glyphs(page: &PdfPage<'_>, page_height: f32) -> Result<Vec<RawGlyph>, ConversionError> {
+#[derive(Clone, Copy)]
+struct PageGeometry {
+    source_width: f32,
+    source_height: f32,
+    display_width: f32,
+    display_height: f32,
+    rotation: PdfPageRenderRotation,
+}
+
+impl PageGeometry {
+    fn new(reported_width: f32, reported_height: f32, rotation: PdfPageRenderRotation) -> Self {
+        // PDFium reports the displayed page size, including intrinsic quarter-turns,
+        // while page object coordinates remain in the unrotated page coordinate system.
+        let (source_width, source_height) = match rotation {
+            PdfPageRenderRotation::None | PdfPageRenderRotation::Degrees180 => {
+                (reported_width, reported_height)
+            }
+            PdfPageRenderRotation::Degrees90 | PdfPageRenderRotation::Degrees270 => {
+                (reported_height, reported_width)
+            }
+        };
+        Self {
+            source_width,
+            source_height,
+            display_width: reported_width,
+            display_height: reported_height,
+            rotation,
+        }
+    }
+}
+
+fn extract_glyphs(
+    page: &PdfPage<'_>,
+    geometry: PageGeometry,
+) -> Result<Vec<RawGlyph>, ConversionError> {
     let text = page
         .text()
         .map_err(|error| pdfium_error("load page text", error))?;
@@ -181,7 +314,7 @@ fn extract_glyphs(page: &PdfPage<'_>, page_height: f32) -> Result<Vec<RawGlyph>,
         let font_name = character.font_name();
         glyphs.push(RawGlyph {
             text: value,
-            bounds: rect_from_pdf(bounds, page_height)?,
+            bounds: rect_from_pdf(bounds, geometry)?,
             font_size: finite_value("glyph font size", character.scaled_font_size().value)?,
             font_name: (!font_name.is_empty()).then_some(font_name),
             font_weight: character.font_weight().and_then(font_weight_value),
@@ -242,7 +375,7 @@ fn build_word(glyphs: &[RawGlyph], start: usize, end: usize) -> RawWord {
 
 fn extract_objects(
     page: &PdfPage<'_>,
-    page_height: f32,
+    geometry: PageGeometry,
 ) -> Result<(Vec<RawImage>, Vec<RawRule>), ConversionError> {
     let mut images = Vec::new();
     let mut rules = Vec::new();
@@ -264,7 +397,7 @@ fn extract_objects(
                         .bounds()
                         .map_err(|error| pdfium_error("read image bounds", error))?
                         .to_rect(),
-                    page_height,
+                    geometry,
                 )?,
                 pixel_width,
                 pixel_height,
@@ -284,7 +417,7 @@ fn extract_objects(
                     path.bounds()
                         .map_err(|error| pdfium_error("read rule bounds", error))?
                         .to_rect(),
-                    page_height,
+                    geometry,
                 )?,
                 stroke_width: finite_value(
                     "path stroke width",
@@ -308,21 +441,99 @@ fn classify_rule(path: &PdfPagePathObject<'_>) -> Option<RuleKind> {
         )
         .then_some(RuleKind::Line);
     }
-    if segments.len() >= 4 {
-        let collected = segments.iter().collect::<Vec<_>>();
+    if segments.len() == 5 {
+        let matrix = path.matrix().ok()?;
+        let transformed = segments.transform(matrix);
+        let collected = transformed.iter().collect::<Vec<_>>();
         let uses_only_lines = collected.first()?.segment_type() == PdfPathSegmentType::MoveTo
             && collected
                 .iter()
                 .skip(1)
                 .all(|segment| segment.segment_type() == PdfPathSegmentType::LineTo);
-        if uses_only_lines && collected.last()?.is_close() {
+        if uses_only_lines && collected.last()?.is_close() && is_axis_aligned_rectangle(&collected)
+        {
             return Some(RuleKind::Rectangle);
         }
     }
     None
 }
 
-fn extract_links(page: &PdfPage<'_>, page_height: f32) -> Result<Vec<RawLink>, ConversionError> {
+const RECTANGLE_POINT_TOLERANCE: f32 = 0.01;
+
+fn is_axis_aligned_rectangle(segments: &[PdfPathSegment<'_>]) -> bool {
+    if segments.len() != 5 {
+        return false;
+    }
+    let points = segments
+        .iter()
+        .map(|segment| {
+            let (x, y) = segment.point();
+            (x.value, y.value)
+        })
+        .collect::<Vec<_>>();
+    if !points.iter().all(|(x, y)| x.is_finite() && y.is_finite())
+        || !point_close(points[0], points[4])
+    {
+        return false;
+    }
+
+    let corners = &points[..4];
+    for index in 0..4 {
+        let start = corners[index];
+        let end = corners[(index + 1) % 4];
+        let same_x = close(start.0, end.0);
+        let same_y = close(start.1, end.1);
+        if same_x == same_y {
+            return false;
+        }
+    }
+
+    let min_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if close(min_x, max_x) || close(min_y, max_y) {
+        return false;
+    }
+    let expected = [
+        (min_x, min_y),
+        (min_x, max_y),
+        (max_x, min_y),
+        (max_x, max_y),
+    ];
+    expected.iter().all(|expected| {
+        corners
+            .iter()
+            .filter(|corner| point_close(**corner, *expected))
+            .count()
+            == 1
+    })
+}
+
+fn close(left: f32, right: f32) -> bool {
+    (left - right).abs() <= RECTANGLE_POINT_TOLERANCE
+}
+
+fn point_close(left: (f32, f32), right: (f32, f32)) -> bool {
+    close(left.0, right.0) && close(left.1, right.1)
+}
+
+fn extract_links(
+    page: &PdfPage<'_>,
+    geometry: PageGeometry,
+) -> Result<Vec<RawLink>, ConversionError> {
     let mut links = Vec::new();
     for link in page.links().iter() {
         let Some(PdfAction::Uri(action)) = link.action() else {
@@ -337,7 +548,7 @@ fn extract_links(page: &PdfPage<'_>, page_height: f32) -> Result<Vec<RawLink>, C
         let Ok(bounds) = link.rect() else {
             continue;
         };
-        let Ok(bounds) = rect_from_pdf(bounds, page_height) else {
+        let Ok(bounds) = rect_from_pdf(bounds, geometry) else {
             continue;
         };
         links.push(RawLink { bounds, target });
@@ -345,15 +556,40 @@ fn extract_links(page: &PdfPage<'_>, page_height: f32) -> Result<Vec<RawLink>, C
     Ok(links)
 }
 
-fn rect_from_pdf(rect: PdfRect, page_height: f32) -> Result<RawRect, ConversionError> {
-    RawRect::try_new(
+fn rect_from_pdf(rect: PdfRect, geometry: PageGeometry) -> Result<RawRect, ConversionError> {
+    let unrotated = RawRect::try_new(
         rect.left().value,
-        page_height - rect.top().value,
+        geometry.source_height - rect.top().value,
         rect.right().value,
-        page_height - rect.bottom().value,
+        geometry.source_height - rect.bottom().value,
     )
     .ok_or_else(|| ConversionError::ConversionFailed {
         message: "PDFium returned non-finite rectangle coordinates".into(),
+    })?;
+
+    let rotated = match geometry.rotation {
+        PdfPageRenderRotation::None => Some(unrotated),
+        PdfPageRenderRotation::Degrees90 => RawRect::try_new(
+            geometry.source_height - unrotated.bottom,
+            unrotated.left,
+            geometry.source_height - unrotated.top,
+            unrotated.right,
+        ),
+        PdfPageRenderRotation::Degrees180 => RawRect::try_new(
+            geometry.source_width - unrotated.right,
+            geometry.source_height - unrotated.bottom,
+            geometry.source_width - unrotated.left,
+            geometry.source_height - unrotated.top,
+        ),
+        PdfPageRenderRotation::Degrees270 => RawRect::try_new(
+            unrotated.top,
+            geometry.source_width - unrotated.right,
+            unrotated.bottom,
+            geometry.source_width - unrotated.left,
+        ),
+    };
+    rotated.ok_or_else(|| ConversionError::ConversionFailed {
+        message: "PDFium returned non-finite rotated rectangle coordinates".into(),
     })
 }
 

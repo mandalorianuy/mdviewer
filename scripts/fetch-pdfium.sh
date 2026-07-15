@@ -8,13 +8,39 @@ URL="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/794
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 CACHE_ROOT="$ROOT/.cache/pdfium"
+if [ "${PDFIUM_FETCH_TEST_MODE:-0}" = "1" ]; then
+    URL=${PDFIUM_FETCH_TEST_URL:?PDFIUM_FETCH_TEST_URL is required in test mode}
+    SHA256=${PDFIUM_FETCH_TEST_SHA256:?PDFIUM_FETCH_TEST_SHA256 is required in test mode}
+    CACHE_ROOT=${PDFIUM_FETCH_TEST_CACHE_ROOT:?PDFIUM_FETCH_TEST_CACHE_ROOT is required in test mode}
+fi
 ARCHIVE="$CACHE_ROOT/$RELEASE-$ASSET"
 INSTALL="$CACHE_ROOT/$RELEASE"
 LIBRARY="$INSTALL/lib/libpdfium.dylib"
+LOCK="$CACHE_ROOT/.fetch.lock"
+LOCK_HELD=0
+TEMP=""
+NEW_LIBRARY=""
+
+cleanup() {
+    if [ -n "$NEW_LIBRARY" ]; then
+        rm -f "$NEW_LIBRARY"
+    fi
+    if [ -n "$TEMP" ]; then
+        rm -rf "$TEMP"
+    fi
+    if [ "$LOCK_HELD" = "1" ]; then
+        rm -rf "$LOCK"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$CACHE_ROOT"
+if ! mkdir "$LOCK" 2>/dev/null; then
+    echo "another PDFium fetch is active at $LOCK" >&2
+    exit 1
+fi
+LOCK_HELD=1
 TEMP=$(mktemp -d "$CACHE_ROOT/.fetch-$RELEASE.XXXXXX")
-trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 
 verify_archive() {
     actual=$(shasum -a 256 "$1" | awk '{print $1}')
@@ -89,11 +115,10 @@ if [ -f "$LIBRARY" ] && cmp -s "$CANDIDATE" "$LIBRARY"; then
     exit 0
 fi
 
-NORMALIZED="$TEMP/$RELEASE"
-mkdir -p "$NORMALIZED/lib"
-cp "$CANDIDATE" "$NORMALIZED/lib/libpdfium.dylib"
-chmod 755 "$NORMALIZED/lib/libpdfium.dylib"
-
-rm -rf "$INSTALL"
-mv "$NORMALIZED" "$INSTALL"
+mkdir -p "$INSTALL/lib"
+NEW_LIBRARY="$INSTALL/lib/.libpdfium.dylib.new.$$"
+cp "$CANDIDATE" "$NEW_LIBRARY"
+chmod 755 "$NEW_LIBRARY"
+mv -f "$NEW_LIBRARY" "$LIBRARY"
+NEW_LIBRARY=""
 echo "Installed verified PDFium at $LIBRARY"
