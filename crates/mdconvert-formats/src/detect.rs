@@ -34,10 +34,10 @@ pub enum DetectionError {
     InvalidUtf8 { message: String },
     #[error("format detection is ambiguous: {candidates:?}")]
     Ambiguous { candidates: Vec<StructuredFormat> },
-    #[error("extension indicates {extension:?}, but content indicates {signature:?}")]
+    #[error("extension indicates {extension:?}, but validated content indicates {signatures:?}")]
     Conflict {
         extension: StructuredFormat,
-        signature: StructuredFormat,
+        signatures: Vec<StructuredFormat>,
     },
     #[error("no supported structured format signature was found")]
     Unsupported,
@@ -116,19 +116,15 @@ pub(crate) fn detect_format_with_limits(
                 extension.ok_or(DetectionError::Unsupported)
             }
         }
-        [signature] => {
-            if let Some(extension) = extension
-                && extension != *signature
-            {
-                Err(DetectionError::Conflict {
-                    extension,
-                    signature: *signature,
-                })
-            } else {
-                Ok(*signature)
-            }
-        }
-        _ => Err(DetectionError::Ambiguous { candidates }),
+        _ => match extension {
+            Some(extension) if candidates.contains(&extension) => Ok(extension),
+            Some(extension) => Err(DetectionError::Conflict {
+                extension,
+                signatures: candidates,
+            }),
+            None if candidates.len() == 1 => Ok(candidates[0]),
+            None => Err(DetectionError::Ambiguous { candidates }),
+        },
     }
 }
 

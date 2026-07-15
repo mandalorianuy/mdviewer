@@ -160,8 +160,8 @@ fn detection_combines_extension_and_content_without_guessing() {
         detect_format(PathBuf::from("report.csv").as_path(), br#"{"ok":true}"#),
         Err(DetectionError::Conflict {
             extension: StructuredFormat::Csv,
-            signature: StructuredFormat::Json
-        })
+            signatures,
+        }) if signatures == vec![StructuredFormat::Json]
     ));
     assert!(matches!(
         detect_format(PathBuf::from("report.data").as_path(), b"a,b;c\n1,2;3\n"),
@@ -189,8 +189,8 @@ fn detection_validates_candidates_before_reporting_conflict_or_ambiguity() {
         detect_format(PathBuf::from("report.json").as_path(), b"a,b\n1,2\n"),
         Err(DetectionError::Conflict {
             extension: StructuredFormat::Json,
-            signature: StructuredFormat::Csv,
-        })
+            signatures,
+        }) if signatures == vec![StructuredFormat::Csv]
     ));
     assert!(matches!(
         detect_format(PathBuf::from("report.data").as_path(), b"a,b;c\n1,2;3\n"),
@@ -200,6 +200,65 @@ fn detection_validates_candidates_before_reporting_conflict_or_ambiguity() {
         detect_format(PathBuf::from("report.data").as_path(), b"{not json"),
         Err(DetectionError::Unsupported)
     ));
+}
+
+#[test]
+fn matching_extension_resolves_valid_polyglots_without_hiding_real_conflicts() {
+    let cases = [
+        ("array.json", b"[1,2]".as_slice(), StructuredFormat::Json),
+        (
+            "entity.xml",
+            b"<root>&amp;</root>".as_slice(),
+            StructuredFormat::Xml,
+        ),
+        (
+            "comma.xml",
+            b"<root>a,b</root>".as_slice(),
+            StructuredFormat::Xml,
+        ),
+    ];
+    for (name, input, expected) in cases {
+        assert_eq!(
+            detect_format(PathBuf::from(name).as_path(), input),
+            Ok(expected)
+        );
+    }
+
+    for input in [b"[1,2]".as_slice(), b"<root>a,b</root>".as_slice()] {
+        assert!(matches!(
+            detect_format(PathBuf::from("polyglot.data").as_path(), input),
+            Err(DetectionError::Ambiguous { .. })
+        ));
+    }
+    assert!(matches!(
+        detect_format(
+            PathBuf::from("mismatch.xml").as_path(),
+            br#"{"only":"json"}"#,
+        ),
+        Err(DetectionError::Conflict { .. })
+    ));
+    assert!(matches!(
+        detect_format(PathBuf::from("mismatch.xml").as_path(), b"[1,2]"),
+        Err(DetectionError::Conflict {
+            extension: StructuredFormat::Xml,
+            signatures,
+        }) if signatures == vec![StructuredFormat::Csv, StructuredFormat::Json]
+    ));
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    convert_temporary(&directory, "array.json", b"[1,2]", &JsonConverter)
+        .expect("JSON converter resolves JSON/CSV polyglot by extension");
+    convert_temporary(
+        &directory,
+        "entity.xml",
+        b"<root>&amp;</root>",
+        &XmlConverter,
+    )
+    .expect("XML converter accepts a predefined entity");
+    convert_temporary(&directory, "comma.xml", b"<root>a,b</root>", &XmlConverter)
+        .expect("XML converter resolves XML/CSV polyglot by extension");
+    convert_temporary(&directory, "array.csv", b"[1,2]", &CsvConverter)
+        .expect("CSV converter resolves JSON/CSV polyglot by extension");
 }
 
 #[test]
@@ -440,6 +499,108 @@ fn xml_enforces_document_prolog_root_and_epilog_grammar() {
 }
 
 #[test]
+fn xml_enforces_declaration_and_qname_grammar() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    for (name, input) in [
+        (
+            "duplicate-version.xml",
+            br#"<?xml version="1.0" version="1.0"?><root/>"#.as_slice(),
+        ),
+        (
+            "unknown-declaration.xml",
+            br#"<?xml version="1.0" foo="bar"?><root/>"#.as_slice(),
+        ),
+        (
+            "out-of-order-declaration.xml",
+            br#"<?xml version="1.0" standalone="yes" encoding="UTF-8"?><root/>"#.as_slice(),
+        ),
+        (
+            "trailing-declaration-token.xml",
+            br#"<?xml version="1.0" junk?><root/>"#.as_slice(),
+        ),
+        (
+            "invalid-standalone.xml",
+            br#"<?xml version="1.0" standalone="maybe"?><root/>"#.as_slice(),
+        ),
+        (
+            "invalid-encoding-name.xml",
+            br#"<?xml version="1.0" encoding="1UTF"?><root/>"#.as_slice(),
+        ),
+        (
+            "duplicate-encoding.xml",
+            br#"<?xml version="1.0" encoding="UTF-8" encoding="UTF-8"?><root/>"#.as_slice(),
+        ),
+        ("digit-name.xml", b"<1root/>".as_slice()),
+        ("empty-prefix.xml", b"<:root/>".as_slice()),
+        ("multiple-colons.xml", b"<a:b:c/>".as_slice()),
+        (
+            "invalid-attribute-qname.xml",
+            br#"<root a:b:c="value"/>"#.as_slice(),
+        ),
+        ("reserved-element-prefix.xml", b"<xmlns:root/>".as_slice()),
+    ] {
+        assert!(
+            matches!(
+                convert_temporary(&directory, name, input, &XmlConverter),
+                Err(ConversionError::CorruptInput { .. })
+            ),
+            "{name} must fail"
+        );
+    }
+
+    for (name, input) in [
+        (
+            "legal-full-declaration.xml",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><root/>"#.as_slice(),
+        ),
+        (
+            "legal-qnames.xml",
+            br#"<ns:root xmlns:ns="urn:test" xml:lang="en"><ns:item/></ns:root>"#.as_slice(),
+        ),
+    ] {
+        convert_temporary(&directory, name, input, &XmlConverter)
+            .unwrap_or_else(|error| panic!("{name} should convert: {error}"));
+    }
+}
+
+#[test]
+fn xml_rejects_illegal_xml_1_0_characters_after_decoding() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    for (name, input) in [
+        ("control-reference.xml", b"<root>&#1;</root>".as_slice()),
+        (
+            "hex-control-reference.xml",
+            b"<root>&#x1;</root>".as_slice(),
+        ),
+        (
+            "attribute-control-reference.xml",
+            br#"<root value="&#1;"/>"#.as_slice(),
+        ),
+        ("literal-control.xml", b"<root>\x01</root>".as_slice()),
+        (
+            "cdata-control.xml",
+            b"<root><![CDATA[\x01]]></root>".as_slice(),
+        ),
+    ] {
+        assert!(
+            matches!(
+                convert_temporary(&directory, name, input, &XmlConverter),
+                Err(ConversionError::CorruptInput { .. })
+            ),
+            "{name} must fail"
+        );
+    }
+
+    convert_temporary(
+        &directory,
+        "legal-chars.xml",
+        "<root a=\"&#9;&#10;&#13;😀\">&#9;&#10;&#13;&#x1F600;😀</root>".as_bytes(),
+        &XmlConverter,
+    )
+    .expect("XML 1.0 whitespace and supplementary characters convert");
+}
+
+#[test]
 fn xml_mixed_content_preserves_spaces_around_children_without_fake_warning() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let document = convert_temporary(&directory, "spaces.xml", b"<p>a <b/> b</p>", &XmlConverter)
@@ -558,6 +719,84 @@ fn structural_budgets_are_configurable_and_validated() {
         CsvConverter.convert_with_limits(&request, &limits),
         Err(ConversionError::ConversionFailed { .. })
     ));
+}
+
+#[test]
+fn container_entry_budgets_win_before_deserializing_excess_children() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+
+    let array_path = directory.path().join("precheck-array.json");
+    fs::write(&array_path, b"[0,[0,0]]").expect("write JSON array");
+    let limits = StructuredLimits {
+        max_json_nodes: 2,
+        max_json_array_entries: 1,
+        ..StructuredLimits::default()
+    };
+    assert!(matches!(
+        JsonConverter.convert_with_limits(
+            &ConversionRequest::new(array_path).expect("valid request"),
+            &limits,
+        ),
+        Err(ConversionError::LimitExceeded {
+            limit: "json_array_entries",
+            actual: 2,
+            maximum: 1,
+        })
+    ));
+
+    let object_path = directory.path().join("precheck-object.json");
+    fs::write(&object_path, br#"{"a":0,"b":[0,0]}"#).expect("write JSON object");
+    let limits = StructuredLimits {
+        max_json_nodes: 2,
+        max_json_object_entries: 1,
+        ..StructuredLimits::default()
+    };
+    assert!(matches!(
+        JsonConverter.convert_with_limits(
+            &ConversionRequest::new(object_path).expect("valid request"),
+            &limits,
+        ),
+        Err(ConversionError::LimitExceeded {
+            limit: "json_object_entries",
+            actual: 2,
+            maximum: 1,
+        })
+    ));
+}
+
+#[test]
+fn xml_raw_content_budgets_are_checked_before_decoding() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let limits = StructuredLimits {
+        max_xml_text_bytes: 1,
+        ..StructuredLimits::default()
+    };
+
+    for (name, input) in [
+        ("raw-crlf.xml", b"<root>\r\n</root>".as_slice()),
+        (
+            "raw-cdata-crlf.xml",
+            b"<root><![CDATA[\r\n]]></root>".as_slice(),
+        ),
+        (
+            "raw-attribute-reference.xml",
+            br#"<root value="&#9;"/>"#.as_slice(),
+        ),
+    ] {
+        let path = directory.path().join(name);
+        fs::write(&path, input).expect("write XML budget fixture");
+        assert!(matches!(
+            XmlConverter.convert_with_limits(
+                &ConversionRequest::new(path).expect("valid request"),
+                &limits,
+            ),
+            Err(ConversionError::LimitExceeded {
+                limit: "xml_text_bytes",
+                maximum: 1,
+                ..
+            })
+        ));
+    }
 }
 
 #[test]

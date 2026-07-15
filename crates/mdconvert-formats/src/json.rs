@@ -231,6 +231,55 @@ struct JsonVisitor<'a, 'limits> {
     budget: &'a mut JsonBudget<'limits>,
 }
 
+struct JsonArrayEntrySeed<'a, 'limits> {
+    budget: &'a mut JsonBudget<'limits>,
+    entries: &'a mut u64,
+}
+
+impl<'de> DeserializeSeed<'de> for JsonArrayEntrySeed<'_, '_> {
+    type Value = JsonValue;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let actual = self.entries.checked_add(1).unwrap_or(u64::MAX);
+        self.budget.check_entries(
+            "json_array_entries",
+            actual,
+            self.budget.limits.max_json_array_entries,
+        )?;
+        *self.entries = actual;
+        JsonSeed {
+            budget: self.budget,
+        }
+        .deserialize(deserializer)
+    }
+}
+
+struct JsonObjectKeySeed<'a, 'limits> {
+    budget: &'a mut JsonBudget<'limits>,
+    entries: &'a mut u64,
+}
+
+impl<'de> DeserializeSeed<'de> for JsonObjectKeySeed<'_, '_> {
+    type Value = String;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let actual = self.entries.checked_add(1).unwrap_or(u64::MAX);
+        self.budget.check_entries(
+            "json_object_entries",
+            actual,
+            self.budget.limits.max_json_object_entries,
+        )?;
+        *self.entries = actual;
+        String::deserialize(deserializer)
+    }
+}
+
 impl<'de> Visitor<'de> for JsonVisitor<'_, '_> {
     type Value = JsonValue;
 
@@ -277,27 +326,10 @@ impl<'de> Visitor<'de> for JsonVisitor<'_, '_> {
     {
         let mut values = Vec::new();
         let mut entries = 0u64;
-        while let Some(value) = sequence.next_element_seed(JsonSeed {
+        while let Some(value) = sequence.next_element_seed(JsonArrayEntrySeed {
             budget: self.budget,
+            entries: &mut entries,
         })? {
-            entries = match entries.checked_add(1) {
-                Some(actual) => actual,
-                None => {
-                    self.budget.exceeded = Some(BudgetExceeded {
-                        limit: "json_array_entries",
-                        actual: u64::MAX,
-                        maximum: self.budget.limits.max_json_array_entries,
-                    });
-                    return Err(serde::de::Error::custom(
-                        "json_array_entries counter overflowed",
-                    ));
-                }
-            };
-            self.budget.check_entries(
-                "json_array_entries",
-                entries,
-                self.budget.limits.max_json_array_entries,
-            )?;
             values.push(value);
         }
         Ok(JsonValue::Array(values))
@@ -309,7 +341,12 @@ impl<'de> Visitor<'de> for JsonVisitor<'_, '_> {
     {
         let mut values = Vec::new();
         let mut keys = HashSet::new();
-        let Some(first_key) = map.next_key::<String>()? else {
+        let mut entries = 0u64;
+        let Some(first_key) = map.next_key_seed(JsonObjectKeySeed {
+            budget: self.budget,
+            entries: &mut entries,
+        })?
+        else {
             return Ok(JsonValue::Object(values));
         };
         if first_key == SERDE_JSON_NUMBER_TOKEN {
@@ -323,12 +360,6 @@ impl<'de> Visitor<'de> for JsonVisitor<'_, '_> {
                 .map_err(serde::de::Error::custom)?;
             return Ok(JsonValue::Number(number));
         }
-        let mut entries = 1u64;
-        self.budget.check_entries(
-            "json_object_entries",
-            entries,
-            self.budget.limits.max_json_object_entries,
-        )?;
         keys.insert(first_key.clone());
         values.push((
             first_key,
@@ -336,30 +367,15 @@ impl<'de> Visitor<'de> for JsonVisitor<'_, '_> {
                 budget: self.budget,
             })?,
         ));
-        while let Some(key) = map.next_key::<String>()? {
+        while let Some(key) = map.next_key_seed(JsonObjectKeySeed {
+            budget: self.budget,
+            entries: &mut entries,
+        })? {
             if !keys.insert(key.clone()) {
                 return Err(serde::de::Error::custom(format!(
                     "duplicate JSON object key {key:?}"
                 )));
             }
-            entries = match entries.checked_add(1) {
-                Some(actual) => actual,
-                None => {
-                    self.budget.exceeded = Some(BudgetExceeded {
-                        limit: "json_object_entries",
-                        actual: u64::MAX,
-                        maximum: self.budget.limits.max_json_object_entries,
-                    });
-                    return Err(serde::de::Error::custom(
-                        "json_object_entries counter overflowed",
-                    ));
-                }
-            };
-            self.budget.check_entries(
-                "json_object_entries",
-                entries,
-                self.budget.limits.max_json_object_entries,
-            )?;
             values.push((
                 key,
                 map.next_value_seed(JsonSeed {

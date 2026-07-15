@@ -6,7 +6,6 @@ use mdconvert_core::{
 };
 use quick_xml::{
     Reader, XmlVersion,
-    escape::unescape,
     events::{BytesDecl, BytesPI, BytesStart, Event},
 };
 
@@ -180,9 +179,29 @@ impl<'a> XmlBudget<'a> {
         self.text_bytes = actual;
         Ok(())
     }
+
+    fn check_raw_text(&self, bytes: usize) -> Result<(), ConversionError> {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let Some(actual) = self.text_bytes.checked_add(bytes) else {
+            return Err(limit_exceeded(
+                "xml_text_bytes",
+                u64::MAX,
+                self.limits.max_xml_text_bytes,
+            ));
+        };
+        if actual > self.limits.max_xml_text_bytes {
+            return Err(limit_exceeded(
+                "xml_text_bytes",
+                actual,
+                self.limits.max_xml_text_bytes,
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, ConversionError> {
+    validate_xml_chars(input, "document")?;
     let mut reader = Reader::from_str(input);
     reader.config_mut().enable_all_checks(true);
     reader.config_mut().allow_dangling_amp = false;
@@ -251,12 +270,14 @@ fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, Conver
                 }
             }
             Event::Text(text) => {
+                budget.check_raw_text(text.as_ref().len())?;
                 let value = text
                     .xml_content(XmlVersion::Implicit1_0)
                     .map_err(|error| ConversionError::CorruptInput {
                         message: format!("invalid XML text encoding: {error}"),
                     })?
                     .into_owned();
+                validate_xml_chars(&value, "text")?;
                 if phase == DocumentPhase::Root && !stack.is_empty() {
                     budget.add_text(value.len())?;
                     append_text(value, &mut stack);
@@ -273,12 +294,14 @@ fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, Conver
                 if phase != DocumentPhase::Root || stack.is_empty() {
                     return corrupt("CDATA is not allowed outside the XML root element");
                 }
+                budget.check_raw_text(text.as_ref().len())?;
                 let value = text
                     .xml_content(XmlVersion::Implicit1_0)
                     .map_err(|error| ConversionError::CorruptInput {
                         message: format!("invalid XML CDATA encoding: {error}"),
                     })?
                     .into_owned();
+                validate_xml_chars(&value, "CDATA")?;
                 budget.add_text(value.len())?;
                 append_text(value, &mut stack);
             }
@@ -293,12 +316,9 @@ fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, Conver
                     .map_err(|error| ConversionError::CorruptInput {
                         message: format!("invalid XML entity encoding: {error}"),
                     })?;
-                let encoded = format!("&{name};");
-                let value = unescape(&encoded).map_err(|error| ConversionError::CorruptInput {
-                    message: format!("unsafe or unknown XML entity {encoded:?}: {error}"),
-                })?;
-                budget.add_text(value.len())?;
-                append_text(value.into_owned(), &mut stack);
+                let value = decode_general_reference(&name)?;
+                budget.add_text(value.len_utf8())?;
+                append_text(value.to_string(), &mut stack);
             }
             Event::DocType(_) => {
                 return corrupt("XML document types and entity declarations are not allowed");
@@ -333,27 +353,120 @@ fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, Conver
 }
 
 fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ConversionError> {
-    let version = declaration.version().map_err(xml_error)?;
-    if version.as_ref() != b"1.0" {
+    let attributes = declaration_attributes(declaration.as_ref())?;
+    if attributes.first().map(|(name, _)| *name) != Some(b"version".as_slice()) {
+        return corrupt("XML declaration version must be the first pseudo-attribute");
+    }
+    if attributes[0].1 != b"1.0" {
         return corrupt("only XML version 1.0 is supported");
     }
-    if let Some(encoding) = declaration.encoding() {
-        let encoding = encoding.map_err(|error| ConversionError::CorruptInput {
-            message: format!("invalid XML encoding declaration: {error}"),
-        })?;
-        if !encoding.as_ref().eq_ignore_ascii_case(b"UTF-8") {
-            return corrupt("XML declaration encoding must be UTF-8");
-        }
+    let mut index = 1;
+    if attributes.get(index).map(|(name, _)| *name) == Some(b"encoding".as_slice()) {
+        validate_encoding(attributes[index].1)?;
+        index += 1;
     }
-    if let Some(standalone) = declaration.standalone() {
-        let standalone = standalone.map_err(|error| ConversionError::CorruptInput {
-            message: format!("invalid XML standalone declaration: {error}"),
-        })?;
-        if standalone.as_ref() != b"yes" && standalone.as_ref() != b"no" {
+    if attributes.get(index).map(|(name, _)| *name) == Some(b"standalone".as_slice()) {
+        if !matches!(attributes[index].1, b"yes" | b"no") {
             return corrupt("XML standalone declaration must be yes or no");
         }
+        index += 1;
+    }
+    if index != attributes.len() {
+        return corrupt(
+            "XML declaration allows only version, optional encoding, then optional standalone",
+        );
     }
     Ok(())
+}
+
+type DeclarationAttribute<'a> = (&'a [u8], &'a [u8]);
+
+fn declaration_attributes(raw: &[u8]) -> Result<Vec<DeclarationAttribute<'_>>, ConversionError> {
+    if !raw.starts_with(b"xml") {
+        return corrupt("invalid XML declaration target");
+    }
+    let mut position = 3usize;
+    let mut attributes = Vec::new();
+    while position < raw.len() {
+        let whitespace_start = position;
+        while raw.get(position).is_some_and(|byte| is_xml_space(*byte)) {
+            position += 1;
+        }
+        if position == raw.len() {
+            break;
+        }
+        if position == whitespace_start {
+            return corrupt("XML declaration pseudo-attributes must be separated by whitespace");
+        }
+
+        let name_start = position;
+        while raw.get(position).is_some_and(u8::is_ascii_alphabetic) {
+            position += 1;
+        }
+        if position == name_start {
+            return corrupt("invalid XML declaration pseudo-attribute name");
+        }
+        let name = &raw[name_start..position];
+        while raw.get(position).is_some_and(|byte| is_xml_space(*byte)) {
+            position += 1;
+        }
+        if raw.get(position) != Some(&b'=') {
+            return corrupt("XML declaration pseudo-attribute is missing '='");
+        }
+        position += 1;
+        while raw.get(position).is_some_and(|byte| is_xml_space(*byte)) {
+            position += 1;
+        }
+        let quote = *raw
+            .get(position)
+            .ok_or_else(|| ConversionError::CorruptInput {
+                message: "XML declaration pseudo-attribute is missing a value".into(),
+            })?;
+        if quote != b'\'' && quote != b'"' {
+            return corrupt("XML declaration values must be quoted");
+        }
+        position += 1;
+        let value_start = position;
+        while raw.get(position).is_some_and(|byte| *byte != quote) {
+            position += 1;
+        }
+        let value =
+            raw.get(value_start..position)
+                .ok_or_else(|| ConversionError::CorruptInput {
+                    message: "invalid XML declaration value".into(),
+                })?;
+        if raw.get(position) != Some(&quote) {
+            return corrupt("unterminated XML declaration value");
+        }
+        position += 1;
+        if attributes.len() == 3 {
+            return corrupt("XML declaration has too many pseudo-attributes");
+        }
+        attributes.push((name, value));
+    }
+    if attributes.is_empty() {
+        return corrupt("XML declaration is missing version");
+    }
+    Ok(attributes)
+}
+
+fn validate_encoding(encoding: &[u8]) -> Result<(), ConversionError> {
+    let legal_name = encoding.first().is_some_and(u8::is_ascii_alphabetic)
+        && encoding
+            .iter()
+            .skip(1)
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !legal_name {
+        return corrupt("XML declaration contains an invalid encoding name");
+    }
+    if !encoding.eq_ignore_ascii_case(b"UTF-8") {
+        return corrupt("XML declaration encoding must be UTF-8");
+    }
+    Ok(())
+}
+
+fn is_xml_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 fn validate_processing_instruction(instruction: &BytesPI<'_>) -> Result<(), ConversionError> {
@@ -361,6 +474,129 @@ fn validate_processing_instruction(instruction: &BytesPI<'_>) -> Result<(), Conv
         return corrupt("processing instruction target XML is reserved");
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QNameKind {
+    Element,
+    Attribute,
+}
+
+fn validate_qname(name: &str, kind: QNameKind) -> Result<(), ConversionError> {
+    let mut parts = name.split(':');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    if parts.next().is_some() || first.is_empty() || second.is_some_and(str::is_empty) {
+        return corrupt(format!("invalid XML QName {name:?}"));
+    }
+    if !valid_ncname(first) || second.is_some_and(|local| !valid_ncname(local)) {
+        return corrupt(format!("invalid XML QName {name:?}"));
+    }
+
+    if let Some(prefix) = second.map(|_| first) {
+        if prefix.eq_ignore_ascii_case("xml") && prefix != "xml" {
+            return corrupt(format!("reserved XML prefix has invalid case in {name:?}"));
+        }
+        if prefix.eq_ignore_ascii_case("xmlns")
+            && (prefix != "xmlns" || kind != QNameKind::Attribute)
+        {
+            return corrupt(format!("reserved XMLNS prefix is invalid in {name:?}"));
+        }
+    } else if kind == QNameKind::Element && first.eq_ignore_ascii_case("xmlns") {
+        return corrupt("XMLNS is reserved for namespace declaration attributes");
+    }
+    Ok(())
+}
+
+fn valid_ncname(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters.next().is_some_and(is_name_start_character) && characters.all(is_name_character)
+}
+
+fn is_name_start_character(character: char) -> bool {
+    matches!(character,
+        'A'..='Z' | '_' | 'a'..='z'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}'
+        | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}'
+        | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{EFFFF}'
+    )
+}
+
+fn is_name_character(character: char) -> bool {
+    is_name_start_character(character)
+        || matches!(character,
+            '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}'
+            | '\u{203F}'..='\u{2040}'
+        )
+}
+
+fn validate_namespace_declaration(name: &str, value: &str) -> Result<(), ConversionError> {
+    const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+    const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
+    let declared_prefix = name.strip_prefix("xmlns:");
+    if let Some(prefix) = declared_prefix {
+        if prefix == "xmlns" || value == XMLNS_NAMESPACE {
+            return corrupt("the XMLNS namespace cannot be rebound");
+        }
+        if (prefix == "xml") != (value == XML_NAMESPACE) {
+            return corrupt("the XML prefix must bind only to its reserved namespace");
+        }
+    } else if name == "xmlns" && (value == XML_NAMESPACE || value == XMLNS_NAMESPACE) {
+        return corrupt("reserved XML namespaces cannot be the default namespace");
+    }
+    Ok(())
+}
+
+fn validate_xml_chars(value: &str, context: &str) -> Result<(), ConversionError> {
+    if let Some(character) = value
+        .chars()
+        .find(|character| !is_xml_1_0_character(*character))
+    {
+        return corrupt(format!(
+            "illegal XML 1.0 character U+{:04X} in {context}",
+            u32::from(character)
+        ));
+    }
+    Ok(())
+}
+
+fn is_xml_1_0_character(character: char) -> bool {
+    matches!(character,
+        '\u{9}' | '\u{A}' | '\u{D}'
+        | '\u{20}'..='\u{D7FF}'
+        | '\u{E000}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{10FFFF}'
+    )
+}
+
+fn decode_general_reference(name: &str) -> Result<char, ConversionError> {
+    let character = if let Some(hex) = name.strip_prefix("#x") {
+        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+    } else if let Some(decimal) = name.strip_prefix('#') {
+        decimal.parse::<u32>().ok().and_then(char::from_u32)
+    } else {
+        match name {
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "amp" => Some('&'),
+            "apos" => Some('\''),
+            "quot" => Some('"'),
+            _ => None,
+        }
+    }
+    .ok_or_else(|| ConversionError::CorruptInput {
+        message: format!("unsafe or unknown XML entity &{name};"),
+    })?;
+    if !is_xml_1_0_character(character) {
+        return corrupt(format!(
+            "illegal XML 1.0 character reference &{name}; (U+{:04X})",
+            u32::from(character)
+        ));
+    }
+    Ok(character)
 }
 
 fn node_from_start(
@@ -373,6 +609,7 @@ fn node_from_start(
             message: format!("XML element name is not UTF-8: {error}"),
         })?
         .to_owned();
+    validate_qname(&name, QNameKind::Element)?;
     let mut attributes = Vec::new();
     let mut element_count = 0u64;
     for attribute in start.attributes() {
@@ -390,17 +627,22 @@ fn node_from_start(
         let attribute = attribute.map_err(|error| ConversionError::CorruptInput {
             message: format!("invalid XML attribute: {error}"),
         })?;
+        budget.check_raw_text(attribute.value.as_ref().len())?;
         let key = std::str::from_utf8(attribute.key.as_ref())
             .map_err(|error| ConversionError::CorruptInput {
                 message: format!("XML attribute name is not UTF-8: {error}"),
             })?
             .to_owned();
+        validate_qname(&key, QNameKind::Attribute)?;
         let value = attribute
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|error| ConversionError::CorruptInput {
                 message: format!("invalid or unsafe XML attribute value: {error}"),
             })?
             .into_owned();
+        validate_xml_chars(&value, "attribute value")?;
+        validate_namespace_declaration(&key, &value)?;
+        budget.add_text(value.len())?;
         attributes.push((key, value));
     }
     Ok(XmlNode {
