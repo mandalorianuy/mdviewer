@@ -37,7 +37,9 @@ pub struct HeuristicConfig {
     pub table_row_y_tolerance_points: f32,
     /// Maximum adjacent table-row distance as a ratio of row font size.
     pub table_max_row_gap_ratio: f32,
-    /// Minimum repeated row count required for table inference.
+    /// Minimum complete row count required for borderless table inference.
+    pub borderless_table_min_rows: usize,
+    /// Minimum repeated row count required for ruled table inference.
     pub table_min_rows: usize,
     /// Minimum aligned column count required for table inference.
     pub table_min_columns: usize,
@@ -73,6 +75,7 @@ impl Default for HeuristicConfig {
             table_alignment_tolerance_points: 8.0,
             table_row_y_tolerance_points: 2.0,
             table_max_row_gap_ratio: 4.5,
+            borderless_table_min_rows: 3,
             table_min_rows: 2,
             table_min_columns: 2,
             rule_axis_tolerance_points: 2.0,
@@ -202,6 +205,18 @@ impl HeuristicConfig {
                     ),
                 });
             }
+        }
+        if self.borderless_table_min_rows < 3 {
+            return Err(ConversionError::ConversionFailed {
+                message: "invalid PDF heuristic borderless_table_min_rows: expected a count of at least 3"
+                    .into(),
+            });
+        }
+        if self.borderless_table_min_rows.checked_add(1).is_none() {
+            return Err(ConversionError::ConversionFailed {
+                message: "invalid PDF heuristic borderless_table_min_rows: count exceeds the overflow-safe range"
+                    .into(),
+            });
         }
         for (name, value) in [
             ("table_min_rows", self.table_min_rows),

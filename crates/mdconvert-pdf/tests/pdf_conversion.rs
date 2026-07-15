@@ -425,6 +425,65 @@ fn infers_borderless_table_from_repeated_heterogeneous_column_types() {
 }
 
 #[test]
+fn borderless_table_min_rows_defaults_to_three() {
+    assert_eq!(HeuristicConfig::default().borderless_table_min_rows, 3);
+}
+
+#[test]
+fn configured_borderless_row_boundary_is_deterministic() {
+    let config = HeuristicConfig {
+        borderless_table_min_rows: 4,
+        ..HeuristicConfig::default()
+    };
+    let three_rows = reconstruct_with_config(
+        document(vec![page(
+            1,
+            &[
+                ("Key", 20.0, 20.0, 10.0, 400),
+                ("Amount", 130.0, 20.0, 10.0, 400),
+                ("Alpha", 20.0, 40.0, 10.0, 400),
+                ("10", 130.0, 40.0, 10.0, 400),
+                ("Beta", 20.0, 60.0, 10.0, 400),
+                ("20", 130.0, 60.0, 10.0, 400),
+            ],
+        )]),
+        &config,
+    )
+    .unwrap();
+    assert!(
+        !three_rows
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    assert!(
+        three_rows
+            .warnings
+            .iter()
+            .any(|warning| warning.code == WarningCode::TableDegraded)
+    );
+
+    let four_rows = reconstruct_with_config(
+        document(vec![page(
+            1,
+            &[
+                ("Key", 20.0, 20.0, 10.0, 400),
+                ("Amount", 130.0, 20.0, 10.0, 400),
+                ("Alpha", 20.0, 40.0, 10.0, 400),
+                ("10", 130.0, 40.0, 10.0, 400),
+                ("Beta", 20.0, 60.0, 10.0, 400),
+                ("20", 130.0, 60.0, 10.0, 400),
+                ("Gamma", 20.0, 80.0, 10.0, 400),
+                ("30", 130.0, 80.0, 10.0, 400),
+            ],
+        )]),
+        &config,
+    )
+    .unwrap();
+    assert!(matches!(four_rows.blocks.as_slice(), [Block::Table { rows, .. }] if rows.len() == 4));
+}
+
+#[test]
 fn links_intersecting_table_cell_text_remain_inside_that_cell() {
     let mut source = page(
         1,
@@ -1245,6 +1304,10 @@ fn semantic_config_domains_reject_invalid_unit_ratios_and_heading_order() {
             table_min_rows: 1,
             ..HeuristicConfig::default()
         },
+        HeuristicConfig {
+            borderless_table_min_rows: 2,
+            ..HeuristicConfig::default()
+        },
     ];
     for config in invalid {
         assert!(matches!(
@@ -1263,6 +1326,10 @@ fn extreme_table_minimums_return_typed_errors_without_overflow() {
         },
         HeuristicConfig {
             table_min_columns: usize::MAX,
+            ..HeuristicConfig::default()
+        },
+        HeuristicConfig {
+            borderless_table_min_rows: usize::MAX,
             ..HeuristicConfig::default()
         },
     ] {

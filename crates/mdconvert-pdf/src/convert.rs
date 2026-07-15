@@ -322,17 +322,14 @@ fn infer_table(
         .iter()
         .filter(|row| row.len() >= config.table_min_columns)
         .collect::<Vec<_>>();
-    if multi_rows.len() >= config.table_min_rows {
-        let width = multi_rows[0].len();
+    if let Some(first_row) = multi_rows.first() {
+        let width = first_row.len();
         let aligned = multi_rows.iter().all(|row| {
             row.len() == width
-                && row
-                    .iter()
-                    .zip(multi_rows[0].iter())
-                    .all(|(cell, expected)| {
-                        (cell.bounds.left - expected.bounds.left).abs()
-                            <= config.table_alignment_tolerance_points
-                    })
+                && row.iter().zip(first_row.iter()).all(|(cell, expected)| {
+                    (cell.bounds.left - expected.bounds.left).abs()
+                        <= config.table_alignment_tolerance_points
+                })
         });
         let compact = multi_rows.windows(2).all(|pair| {
             let previous = pair[0];
@@ -347,7 +344,7 @@ fn infer_table(
                 <= row_font_size * config.table_max_row_gap_ratio
         });
         if aligned && compact {
-            let first_top = multi_rows[0][0].bounds.top;
+            let first_top = first_row[0].bounds.top;
             let last_top = multi_rows.last().unwrap()[0].bounds.top;
             let edge_allowance = multi_rows
                 .iter()
@@ -370,7 +367,7 @@ fn infer_table(
                 });
                 return None;
             }
-            if has_borderless_table_shape(&multi_rows) {
+            if has_borderless_table_shape(&multi_rows, config.borderless_table_min_rows) {
                 return Some(table_from_rows(page, &multi_rows, config, warnings));
             }
             warnings.push(ConversionWarning {
@@ -402,17 +399,22 @@ enum BorderlessCellShape {
     Text,
 }
 
-fn has_borderless_table_shape(rows: &[&Vec<&Line>]) -> bool {
-    if rows.len() < 3 {
+fn has_borderless_table_shape(rows: &[&Vec<&Line>], minimum_rows: usize) -> bool {
+    if rows.len() < minimum_rows {
         return false;
     }
-    let width = rows[0].len();
+    let Some((header, body_rows)) = rows.split_first() else {
+        return false;
+    };
+    let Some((first_body, remaining_body)) = body_rows.split_first() else {
+        return false;
+    };
+    let width = header.len();
     let mut column_shapes = Vec::with_capacity(width);
     for column in 0..width {
-        let expected = borderless_cell_shape(&rows[1][column].text);
-        if !rows
+        let expected = borderless_cell_shape(&first_body[column].text);
+        if !remaining_body
             .iter()
-            .skip(2)
             .all(|row| borderless_cell_shape(&row[column].text) == expected)
         {
             return false;
