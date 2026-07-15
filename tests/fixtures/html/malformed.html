@@ -1,0 +1,14 @@
+<!doctype html>
+<title>Malformed recovery</title>
+<h2>Recovered document</h2>
+<p>First paragraph <strong>stays bold</strong>
+<ul><li>One<li>Two<ul><li>Nested</ul></ul>
+<table><tr><th>A<th>B<tr><td>one<td>two</table>
+<blockquote>Recovered quote
+<pre><code class="language-js">if (a < b) {
+  run();
+}</code></pre>
+<p><a href="javascript:alert(1)">unsafe destination</a>
+<p><a href="data:text/plain,unsafe">unsafe data</a>
+<p><a href="java&#10;script:alert(1)">obfuscated unsafe</a>
+<script>script must disappear</script>
