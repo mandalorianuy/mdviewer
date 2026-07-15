@@ -1,0 +1,59 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /FontDescriptor /FontName /Helvetica /Flags 32 /FontBBox [-166 -225 1000 931] /ItalicAngle 0 /Ascent 718 /Descent -207 /CapHeight 718 /StemV 88 /FontWeight 400 >>
+endobj
+4 0 obj
+<< /Type /FontDescriptor /FontName /Helvetica-Bold /Flags 32 /FontBBox [-170 -228 1003 962] /ItalicAngle 0 /Ascent 718 /Descent -207 /CapHeight 718 /StemV 140 /FontWeight 700 >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FontDescriptor 3 0 R >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /FontDescriptor 4 0 R >>
+endobj
+7 0 obj
+<< /Length 275 >>
+stream
+BT /F2 10 Tf 20 325 Td (Name) Tj ET
+BT /F2 10 Tf 90 325 Td (Value) Tj ET
+BT /F1 10 Tf 20 285 Td (Alpha) Tj ET
+BT /F1 10 Tf 90 285 Td (One) Tj ET
+0.5 w
+10 350 m 10 270 l S
+80 350 m 80 270 l S
+150 350 m 150 270 l S
+10 350 m 150 350 l S
+10 310 m 150 310 l S
+10 270 m 150 270 l S
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Title (table-bordered) /Creator (Task 8 deterministic Python stdlib fixture) /Producer (MDViewer Task 8 fixture builder) /CreationDate (D:20260715150000Z) >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000308 00000 n 
+0000000501 00000 n 
+0000000593 00000 n 
+0000000690 00000 n 
+0000001016 00000 n 
+0000001152 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R /Info 9 0 R /ID [<6A98CD7F35431A15EA2FCDAA7F112353><6A98CD7F35431A15EA2FCDAA7F112353>] >>
+startxref
+1329
+%%EOF

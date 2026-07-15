@@ -1881,6 +1881,7 @@ version = "0.1.0"
 dependencies = [
  "mdconvert-core",
  "pdfium-render",
+ "png 0.18.1",
  "tempfile",
  "url",
 ]
