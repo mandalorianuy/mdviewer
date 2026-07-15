@@ -3,6 +3,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tempfile::{Builder, TempDir};
@@ -112,7 +114,8 @@ fn publish_with_fs(
     let staging = Builder::new()
         .prefix(".mdviewer-output-")
         .tempdir_in(&paths.parent)
-        .map_err(|source| io_error("create staging directory", &paths.parent, source))?;
+        .map_err(|source| io_error("create staging directory", &paths.parent, source))
+        .map_err(|error| paths.report_error(error))?;
     let staged_markdown = staging.path().join("new.md");
     write_synced_file(
         &staged_markdown,
@@ -153,7 +156,8 @@ fn publish_with_fs(
         return Err(OutputError::Cancelled);
     }
 
-    let mut lock = TargetLock::acquire(&paths, fs_ops)?;
+    let mut lock =
+        TargetLock::acquire(&paths, fs_ops).map_err(|error| paths.report_error(error))?;
     let commit_result = commit(
         &paths,
         staging.path(),
@@ -193,7 +197,7 @@ fn publish_with_fs(
 
     Ok(WriteResult {
         markdown_path: target.markdown_path.clone(),
-        assets_dir: (!document.assets.is_empty()).then_some(paths.assets_dir),
+        assets_dir: (!document.assets.is_empty()).then_some(paths.reported_assets_dir),
         warnings: document.warnings.clone(),
     })
 }
@@ -251,6 +255,10 @@ trait FsOps {
     fn after_assets_directory_created(&self, _paths: &PublicationPaths) -> io::Result<()> {
         Ok(())
     }
+
+    fn before_lock_release(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 struct RealFs;
@@ -283,15 +291,9 @@ fn finish_failure(failure: CommitFailure, staging: TempDir) -> Result<WriteResul
         CommitFailure::Restored(error) => Err(error),
         CommitFailure::Preserve(message) => {
             let kept = staging.keep();
-            let absolute = if kept.is_absolute() {
-                kept
-            } else {
-                std::env::current_dir()
-                    .map(|current| current.join(&kept))
-                    .unwrap_or(kept)
-            };
+            debug_assert!(kept.is_absolute(), "staging parent must be canonical");
             Err(OutputError::TransactionFailed {
-                message: format!("{message}; recovery directory: {}", absolute.display()),
+                message: format!("{message}; recovery directory: {}", kept.display()),
             })
         }
     }
@@ -301,6 +303,10 @@ struct PublicationPaths {
     markdown_path: PathBuf,
     assets_dir: PathBuf,
     parent: PathBuf,
+    reported_parent: PathBuf,
+    reported_markdown_path: PathBuf,
+    reported_assets_dir: PathBuf,
+    reported_lock_path: PathBuf,
     document_name: String,
     assets_name: String,
     lock_path: PathBuf,
@@ -314,100 +320,378 @@ impl PublicationPaths {
             .filter(|name| !name.is_empty())
             .ok_or_else(|| OutputError::InvalidTarget(markdown_path.to_owned()))?
             .to_owned();
-        let parent = markdown_path
+        let requested_parent = markdown_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-            .to_owned();
-        if !parent.is_dir() {
+            .unwrap_or_else(|| Path::new("."));
+        if !requested_parent.is_dir() {
             return Err(OutputError::InvalidTarget(markdown_path.to_owned()));
         }
-        let assets_dir = markdown_path.with_extension("assets");
-        let assets_name = assets_dir
+        let parent = fs::canonicalize(requested_parent)
+            .map_err(|_| OutputError::InvalidTarget(markdown_path.to_owned()))?;
+        let assets_name = markdown_path
+            .with_extension("assets")
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| OutputError::InvalidTarget(markdown_path.to_owned()))?
             .to_owned();
+        let resolved_markdown_path = parent.join(&document_name);
+        let assets_dir = parent.join(&assets_name);
         let lock_path = parent.join(format!(".{document_name}.mdviewer.lock"));
+        let reported_parent = requested_parent.to_owned();
+        let reported_markdown_path = markdown_path.to_owned();
+        let reported_assets_dir = markdown_path.with_extension("assets");
+        let reported_lock_path = reported_parent.join(format!(".{document_name}.mdviewer.lock"));
 
         Ok(Self {
-            markdown_path: markdown_path.to_owned(),
+            markdown_path: resolved_markdown_path,
             assets_dir,
             parent,
+            reported_parent,
+            reported_markdown_path,
+            reported_assets_dir,
+            reported_lock_path,
             document_name,
             assets_name,
             lock_path,
         })
     }
+
+    fn report_path(&self, path: PathBuf) -> PathBuf {
+        path.strip_prefix(&self.parent)
+            .map_or(path.clone(), |relative| self.reported_parent.join(relative))
+    }
+
+    fn report_error(&self, error: OutputError) -> OutputError {
+        match error {
+            OutputError::InvalidTarget(path) => OutputError::InvalidTarget(self.report_path(path)),
+            OutputError::OutputExists(path) => OutputError::OutputExists(self.report_path(path)),
+            OutputError::UnownedAssetsDirectory(path) => {
+                OutputError::UnownedAssetsDirectory(self.report_path(path))
+            }
+            OutputError::InvalidManifest { path, message } => OutputError::InvalidManifest {
+                path: self.report_path(path),
+                message,
+            },
+            OutputError::Io {
+                operation,
+                path,
+                source,
+            } => OutputError::Io {
+                operation,
+                path: self.report_path(path),
+                source,
+            },
+            other => other,
+        }
+    }
 }
+
+static NEXT_LOCK_NONCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_lock_nonce() -> String {
+    let sequence = NEXT_LOCK_NONCE.fetch_add(1, AtomicOrdering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:x}-{timestamp:x}-{sequence:x}", std::process::id())
+}
+
+#[cfg(unix)]
+mod lock_identity {
+    use std::{fs, io, os::unix::fs::MetadataExt, path::Path};
+
+    use super::File;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct LockFileIdentity {
+        device: u64,
+        inode: u64,
+    }
+
+    impl LockFileIdentity {
+        pub(super) fn from_file(file: &File) -> io::Result<Self> {
+            let metadata = file.metadata()?;
+            Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+
+        pub(super) fn matches_path(self, path: &Path) -> io::Result<bool> {
+            let metadata = fs::symlink_metadata(path)?;
+            Ok(metadata.file_type().is_file()
+                && self
+                    == Self {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    })
+        }
+    }
+}
+
+#[cfg(windows)]
+mod lock_identity {
+    use std::{
+        ffi::c_void,
+        fs::{self, File, OpenOptions},
+        io,
+        mem::MaybeUninit,
+        os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+        path::Path,
+    };
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    #[repr(C)]
+    struct FileTime {
+        low_date_time: u32,
+        high_date_time: u32,
+    }
+
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        file_attributes: u32,
+        creation_time: FileTime,
+        last_access_time: FileTime,
+        last_write_time: FileTime,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            file: *mut c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct LockFileIdentity {
+        volume: u32,
+        index: u64,
+    }
+
+    impl LockFileIdentity {
+        pub(super) fn from_file(file: &File) -> io::Result<Self> {
+            let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
+            // SAFETY: the file handle is valid for this call and Windows initializes the
+            // complete output structure when the function reports success.
+            let succeeded = unsafe {
+                GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr())
+            };
+            if succeeded == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: the successful call above initialized the complete structure.
+            let information = unsafe { information.assume_init() };
+            Ok(Self {
+                volume: information.volume_serial_number,
+                index: u64::from(information.file_index_high) << 32
+                    | u64::from(information.file_index_low),
+            })
+        }
+
+        pub(super) fn matches_path(self, path: &Path) -> io::Result<bool> {
+            let metadata = fs::symlink_metadata(path)?;
+            if !metadata.file_type().is_file() {
+                return Ok(false);
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)?;
+            Ok(Self::from_file(&file)? == self)
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod lock_identity {
+    use std::{fs::File, io, path::Path};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct LockFileIdentity;
+
+    impl LockFileIdentity {
+        pub(super) fn from_file(_file: &File) -> io::Result<Self> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "stable output-lock file identity is unsupported on this platform",
+            ))
+        }
+
+        pub(super) fn matches_path(self, _path: &Path) -> io::Result<bool> {
+            Ok(false)
+        }
+    }
+}
+
+use lock_identity::LockFileIdentity;
 
 struct TargetLock {
     path: PathBuf,
     parent: PathBuf,
-    file: File,
+    nonce: String,
+    identity: LockFileIdentity,
+    _file: File,
     released: bool,
 }
 
 impl TargetLock {
     fn acquire(paths: &PublicationPaths, fs_ops: &dyn FsOps) -> Result<Self, OutputError> {
+        let nonce = next_lock_nonce();
         let file = match OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&paths.lock_path)
         {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(OutputError::OutputExists(paths.lock_path.clone()));
+                return Err(OutputError::OutputExists(paths.reported_lock_path.clone()));
             }
             Err(source) => {
                 return Err(io_error("acquire output lock", &paths.lock_path, source));
             }
         };
-        if let Err(source) = file.sync_all() {
-            let _ = fs::remove_file(&paths.lock_path);
-            return Err(io_error("fsync output lock", &paths.lock_path, source));
-        }
-        if let Err(error) = sync_directory(fs_ops, &paths.parent) {
-            let _ = fs::remove_file(&paths.lock_path);
-            let _ = sync_directory_raw(&paths.parent);
-            return Err(error);
-        }
-        Ok(Self {
+        let identity = LockFileIdentity::from_file(&file)
+            .map_err(|source| io_error("identify output lock", &paths.lock_path, source))?;
+        let mut lock = Self {
             path: paths.lock_path.clone(),
             parent: paths.parent.clone(),
-            file,
+            nonce,
+            identity,
+            _file: file,
             released: false,
-        })
+        };
+        if let Err(source) = lock._file.write_all(lock.nonce.as_bytes()) {
+            return Err(lock.acquisition_failure(
+                fs_ops,
+                io_error("write output lock nonce", &paths.lock_path, source),
+            ));
+        }
+        if let Err(source) = lock._file.sync_all() {
+            return Err(lock.acquisition_failure(
+                fs_ops,
+                io_error("fsync output lock", &paths.lock_path, source),
+            ));
+        }
+        if let Err(error) = sync_directory(fs_ops, &paths.parent) {
+            return Err(lock.acquisition_failure(fs_ops, error));
+        }
+        Ok(lock)
     }
 
-    fn release(&mut self, fs_ops: &dyn FsOps) -> Result<(), OutputError> {
+    fn acquisition_failure(
+        &mut self,
+        fs_ops: &dyn FsOps,
+        acquisition_error: OutputError,
+    ) -> OutputError {
+        match self.remove_owned_path(fs_ops) {
+            Ok(()) => {
+                let _ = sync_directory_raw(&self.parent);
+                acquisition_error
+            }
+            Err(cleanup_error) => OutputError::TransactionFailed {
+                message: format!(
+                    "{acquisition_error}; output lock cleanup was refused: {cleanup_error}"
+                ),
+            },
+        }
+    }
+
+    fn owns_path(&self) -> Result<bool, OutputError> {
+        if self.released {
+            return Ok(false);
+        }
+        if !self.identity_matches_path()? {
+            return Ok(false);
+        }
+        let nonce = match fs::read(&self.path) {
+            Ok(nonce) => nonce,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(io_error("read output lock nonce", &self.path, source));
+            }
+        };
+        if nonce != self.nonce.as_bytes() {
+            return Ok(false);
+        }
+        self.identity_matches_path()
+    }
+
+    fn identity_matches_path(&self) -> Result<bool, OutputError> {
+        match self.identity.matches_path(&self.path) {
+            Ok(matches) => Ok(matches),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(io_error("verify output lock identity", &self.path, source)),
+        }
+    }
+
+    fn remove_owned_path(&mut self, fs_ops: &dyn FsOps) -> Result<(), OutputError> {
+        if !self.owns_path()? {
+            return Err(OutputError::TransactionFailed {
+                message: format!(
+                    "output lock ownership changed; refusing to remove {}",
+                    self.path.display()
+                ),
+            });
+        }
         fs_ops
             .remove_file(&self.path)
             .map_err(|source| io_error("remove output lock", &self.path, source))?;
         self.released = true;
+        Ok(())
+    }
+
+    fn release(&mut self, fs_ops: &dyn FsOps) -> Result<(), OutputError> {
+        fs_ops
+            .before_lock_release(&self.path)
+            .map_err(|source| io_error("run pre-lock-release hook", &self.path, source))?;
+        self.remove_owned_path(fs_ops)?;
         if let Err(error) = sync_directory(fs_ops, &self.parent) {
-            if let Ok(file) = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&self.path)
-            {
-                let _ = file.sync_all();
-                self.file = file;
-                self.released = false;
-            }
+            self.try_reacquire();
             return Err(error);
         }
         Ok(())
     }
 
+    fn try_reacquire(&mut self) {
+        let Ok(mut file) = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+        else {
+            return;
+        };
+        let Ok(identity) = LockFileIdentity::from_file(&file) else {
+            return;
+        };
+        self.identity = identity;
+        self.released = false;
+        if file.write_all(self.nonce.as_bytes()).is_err() || file.sync_all().is_err() {
+            self._file = file;
+            return;
+        }
+        self._file = file;
+    }
+
     fn is_held(&self) -> bool {
-        !self.released
+        self.owns_path().unwrap_or(false)
     }
 }
 
 impl Drop for TargetLock {
     fn drop(&mut self) {
-        if !self.released {
+        if self.owns_path().unwrap_or(false) {
             let _ = fs::remove_file(&self.path);
             let _ = sync_directory_raw(&self.parent);
         }
@@ -484,10 +768,13 @@ fn is_windows_reserved_name(name: &str) -> bool {
 }
 
 fn inspect_existing_outputs(paths: &PublicationPaths) -> Result<ExistingOutputs, OutputError> {
-    Ok(ExistingOutputs {
-        markdown_fingerprint: inspect_markdown(&paths.markdown_path)?,
-        assets_fingerprint: inspect_existing_assets(paths)?,
-    })
+    (|| {
+        Ok(ExistingOutputs {
+            markdown_fingerprint: inspect_markdown(&paths.markdown_path)?,
+            assets_fingerprint: inspect_existing_assets(paths)?,
+        })
+    })()
+    .map_err(|error| paths.report_error(error))
 }
 
 fn enforce_initial_policy(
@@ -497,10 +784,12 @@ fn enforce_initial_policy(
 ) -> Result<(), OutputError> {
     if overwrite == OverwritePolicy::Deny {
         if outputs.markdown_fingerprint.is_some() {
-            return Err(OutputError::OutputExists(paths.markdown_path.clone()));
+            return Err(OutputError::OutputExists(
+                paths.reported_markdown_path.clone(),
+            ));
         }
         if outputs.assets_fingerprint.is_some() {
-            return Err(OutputError::OutputExists(paths.assets_dir.clone()));
+            return Err(OutputError::OutputExists(paths.reported_assets_dir.clone()));
         }
     }
     Ok(())
@@ -518,7 +807,9 @@ fn enforce_commit_policy(
 
     if initial.markdown_fingerprint != current.markdown_fingerprint {
         if initial.markdown_fingerprint.is_none() && current.markdown_fingerprint.is_some() {
-            return Err(OutputError::OutputExists(paths.markdown_path.clone()));
+            return Err(OutputError::OutputExists(
+                paths.reported_markdown_path.clone(),
+            ));
         }
         return Err(OutputError::TransactionFailed {
             message: format!(
@@ -529,7 +820,7 @@ fn enforce_commit_policy(
     }
     if initial.assets_fingerprint != current.assets_fingerprint {
         if initial.assets_fingerprint.is_none() && current.assets_fingerprint.is_some() {
-            return Err(OutputError::OutputExists(paths.assets_dir.clone()));
+            return Err(OutputError::OutputExists(paths.reported_assets_dir.clone()));
         }
         return Err(OutputError::TransactionFailed {
             message: format!(
@@ -1131,6 +1422,8 @@ mod tests {
         SwapAssetsBeforeBackup,
         ReplaceLateAssetEntry,
         ReplaceLateMarkdown,
+        ReplaceLockBeforeRelease,
+        ReplaceLockDuringAcquireCleanup,
     }
 
     struct TestFs {
@@ -1195,6 +1488,14 @@ mod tests {
         }
 
         fn sync_directory(&self, path: &Path) -> io::Result<()> {
+            if self.hook == Hook::ReplaceLockDuringAcquireCleanup {
+                let lock_path = path.join(".foo.md.mdviewer.lock");
+                if lock_path.exists() && !self.hook_ran.swap(true, Ordering::SeqCst) {
+                    fs::remove_file(&lock_path)?;
+                    fs::write(&lock_path, b"foreign acquisition lock")?;
+                    return Err(io::Error::other("injected lock acquisition sync failure"));
+                }
+            }
             if path.join("previous.md").exists() && self.take_fault(Fault::DirectorySync) {
                 return Err(io::Error::other("injected directory sync failure"));
             }
@@ -1232,6 +1533,17 @@ mod tests {
                 && !self.hook_ran.swap(true, Ordering::SeqCst)
             {
                 fs::write(paths.assets_dir.join("new.png"), b"concurrent asset")?;
+            }
+            Ok(())
+        }
+
+        fn before_lock_release(&self, path: &Path) -> io::Result<()> {
+            if self.hook == Hook::ReplaceLockBeforeRelease
+                && !self.hook_ran.swap(true, Ordering::SeqCst)
+            {
+                let nonce = fs::read(path)?;
+                fs::remove_file(path)?;
+                fs::write(path, nonce)?;
             }
             Ok(())
         }
@@ -1292,6 +1604,76 @@ mod tests {
             .unwrap_or_else(|| panic!("missing recovery path in {message:?}"))
             .1;
         PathBuf::from(path)
+    }
+
+    #[test]
+    fn relative_target_parent_is_resolved_to_absolute_before_staging() {
+        let paths = PublicationPaths::new(Path::new("relative-output.md")).unwrap();
+
+        assert!(paths.parent.is_absolute());
+        assert!(paths.markdown_path.is_absolute());
+        assert!(paths.assets_dir.is_absolute());
+        assert!(paths.lock_path.is_absolute());
+    }
+
+    #[test]
+    fn same_nonce_foreign_lock_replacement_survives_release_and_blocks_next_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let output_target = target(directory.path(), OverwritePolicy::Deny);
+
+        let error = publish_with_fs(
+            &document("new.png", b"new"),
+            &output_target,
+            &NeverCancel,
+            &TestFs::new(&[], Hook::ReplaceLockBeforeRelease),
+        )
+        .unwrap_err();
+        let recovery = recovery_path(error);
+        let lock_path = directory.path().join(".foo.md.mdviewer.lock");
+        let foreign_contents = fs::read(&lock_path).unwrap();
+
+        assert!(!foreign_contents.is_empty());
+        let second_error = publish(
+            &document("next.png", b"next"),
+            &target(directory.path(), OverwritePolicy::Replace),
+            &NeverCancel,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(second_error, OutputError::OutputExists(ref path) if path == &lock_path),
+            "unexpected second publication error: {second_error:?}"
+        );
+        assert_eq!(fs::read(&lock_path).unwrap(), foreign_contents);
+        fs::remove_dir_all(recovery).unwrap();
+    }
+
+    #[test]
+    fn foreign_lock_replacement_survives_acquisition_error_cleanup_and_blocks_next_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let output_target = target(directory.path(), OverwritePolicy::Deny);
+
+        let error = publish_with_fs(
+            &document("new.png", b"new"),
+            &output_target,
+            &NeverCancel,
+            &TestFs::new(&[], Hook::ReplaceLockDuringAcquireCleanup),
+        )
+        .unwrap_err();
+        let lock_path = directory.path().join(".foo.md.mdviewer.lock");
+
+        assert!(matches!(error, OutputError::TransactionFailed { .. }));
+        assert_eq!(fs::read(&lock_path).unwrap(), b"foreign acquisition lock");
+        let second_error = publish(
+            &document("next.png", b"next"),
+            &target(directory.path(), OverwritePolicy::Deny),
+            &NeverCancel,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(second_error, OutputError::OutputExists(ref path) if path == &lock_path),
+            "unexpected second publication error: {second_error:?}"
+        );
+        assert_eq!(fs::read(&lock_path).unwrap(), b"foreign acquisition lock");
     }
 
     #[test]
