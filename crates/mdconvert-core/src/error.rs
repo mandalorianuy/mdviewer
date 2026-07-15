@@ -20,6 +20,8 @@ pub enum EmitError {
     DuplicateAssetId { asset_id: String },
     #[error("table alignment width mismatch: expected {expected} alignments, received {actual}")]
     TableAlignmentWidthMismatch { expected: usize, actual: usize },
+    #[error("code language must not contain a line ending")]
+    InvalidCodeLanguage,
 }
 
 #[derive(Debug, Error)]

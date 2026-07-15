@@ -224,7 +224,37 @@ fn escapes_text_links_and_image_destinations_by_context() {
 
     assert_eq!(
         emit(&document),
-        "[\\[label\\] \\*literal\\*](https://example.test/a\\(b\\)\\\\c \"quoted \\\"title\\\" \\\\ path\")\n\n![\\[alt\\] \\*literal\\*](asset \\(1\\)\\\\draft.png)\n"
+        "[\\[label\\] \\*literal\\*](https://example.test/a\\(b\\)\\\\c \"quoted \\\"title\\\" \\\\ path\")\n\n![\\[alt\\] \\*literal\\*](asset%20\\(1\\)\\\\draft.png)\n"
+    );
+}
+
+#[test]
+fn percent_encodes_unsafe_destination_bytes_without_reencoding_percent_sequences() {
+    let asset_id = AssetId::new("unsafe-destination").expect("asset ID should be valid");
+    let mut document = empty_document(vec![
+        Block::Paragraph {
+            content: vec![Inline::Link {
+                url: "https://example.test/already%20ok space\tline\r\nnext(1)\\end\u{1}\u{7f}"
+                    .into(),
+                title: None,
+                content: text("link"),
+            }],
+        },
+        Block::Image {
+            asset_id: asset_id.clone(),
+            alt: "image".into(),
+        },
+    ]);
+    document.assets.push(Asset {
+        id: asset_id,
+        file_name: "asset name\trow\r\n(1)\\draft\0.png".into(),
+        media_type: "image/png".into(),
+        data: vec![],
+    });
+
+    assert_eq!(
+        emit(&document),
+        "[link](https://example.test/already%20ok%20space%09line%0D%0Anext\\(1\\)\\\\end%01%7F)\n\n![image](asset%20name%09row%0D%0A\\(1\\)\\\\draft%00.png)\n"
     );
 }
 
@@ -238,6 +268,60 @@ fn escapes_plain_text_that_would_be_reinterpreted_as_block_markup() {
         emit(&document),
         "\\# heading\n\\- bullet\n\\+ bullet\n1\\. ordered\n\\> quote\n"
     );
+}
+
+#[test]
+fn preserves_literal_gfm_punctuation_entities_and_indented_markers() {
+    let document = empty_document(vec![Block::Paragraph {
+        content: text("~~text~~\n&copy;\n  - item\n   + item\n1) item\n  12. item\n    13. code"),
+    }]);
+
+    assert_eq!(
+        emit(&document),
+        "\\~\\~text\\~\\~\n&amp;copy;\n  \\- item\n   \\+ item\n1\\) item\n  12\\. item\n    13. code\n"
+    );
+}
+
+#[test]
+fn uses_a_long_enough_tilde_fence_when_the_language_contains_a_backtick() {
+    let document = empty_document(vec![Block::Code {
+        language: Some("rust`edition".into()),
+        text: "before ~~~~ after".into(),
+    }]);
+
+    assert_eq!(
+        emit(&document),
+        "~~~~~rust`edition\nbefore ~~~~ after\n~~~~~\n"
+    );
+}
+
+#[test]
+fn rejects_code_languages_containing_raw_line_endings() {
+    for language in ["rust\r2024", "rust\n2024"] {
+        let document = empty_document(vec![Block::Code {
+            language: Some(language.into()),
+            text: "fn main() {}".into(),
+        }]);
+
+        assert!(matches!(
+            emit_gfm(
+                &document,
+                &GfmOptions {
+                    final_newline: true
+                }
+            ),
+            Err(EmitError::InvalidCodeLanguage)
+        ));
+    }
+}
+
+#[test]
+fn emits_an_empty_inline_code_value_as_an_html_code_element() {
+    let document = empty_document(vec![Block::Paragraph {
+        content: vec![Inline::Code(String::new())],
+    }]);
+
+    assert_eq!(emit(&document), "<code></code>\n");
 }
 
 #[test]

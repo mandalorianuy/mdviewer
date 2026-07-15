@@ -75,7 +75,7 @@ fn render_block(block: &Block, assets: &AssetIndex<'_>) -> Result<String, EmitEr
             items,
         } => render_list(*ordered, *start, items, assets),
         Block::Table { alignments, rows } => render_table(alignments, rows),
-        Block::Code { language, text } => Ok(render_code_block(language.as_deref(), text)),
+        Block::Code { language, text } => render_code_block(language.as_deref(), text),
         Block::Quote { blocks } => {
             let quote = render_blocks(blocks, assets)?;
             Ok(quote
@@ -190,16 +190,28 @@ fn render_table_row(row: &[Vec<Inline>], width: usize) -> String {
     format!("| {cells} |")
 }
 
-fn render_code_block(language: Option<&str>, text: &str) -> String {
+fn render_code_block(language: Option<&str>, text: &str) -> Result<String, EmitError> {
+    if language.is_some_and(|language| language.contains(['\r', '\n'])) {
+        return Err(EmitError::InvalidCodeLanguage);
+    }
+
     let text = normalize_line_endings(text);
-    let fence = "`".repeat(3.max(longest_backtick_run(&text) + 1));
-    let language = language.map(normalize_line_endings).unwrap_or_default();
+    let fence_character =
+        if language.is_some_and(|language| !language.is_empty() && language.contains('`')) {
+            '~'
+        } else {
+            '`'
+        };
+    let fence = fence_character
+        .to_string()
+        .repeat(3.max(longest_fence_run(&text, fence_character) + 1));
+    let language = language.unwrap_or_default();
     let mut rendered = format!("{fence}{language}\n{text}");
     if !text.ends_with('\n') {
         rendered.push('\n');
     }
     rendered.push_str(&fence);
-    rendered
+    Ok(rendered)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +256,10 @@ fn render_inline(inline: &Inline, context: InlineContext) -> String {
 }
 
 fn render_code_span(code: &str, context: InlineContext) -> String {
+    if code.is_empty() {
+        return "<code></code>".into();
+    }
+
     let mut code = normalize_line_endings(code);
     if context == InlineContext::Table {
         code = code.replace('|', "\\|").replace('\n', "<br>");
@@ -262,25 +278,33 @@ fn escape_text(text: &str, context: InlineContext) -> String {
     let mut escaped = String::with_capacity(text.len());
     let mut characters = text.chars().peekable();
     let mut at_line_start = true;
+    let mut leading_spaces = 0;
     let mut line_prefix_is_digits = true;
     let mut line_has_digit = false;
 
     while let Some(character) = characters.next() {
-        let starts_block_marker = at_line_start && matches!(character, '-' | '+');
-        let ends_ordered_marker = character == '.'
+        let next_is_whitespace = characters.peek().is_some_and(|next| next.is_whitespace());
+        let starts_block_marker = at_line_start
+            && leading_spaces <= 3
+            && matches!(character, '-' | '+')
+            && next_is_whitespace;
+        let ends_ordered_marker = matches!(character, '.' | ')')
+            && leading_spaces <= 3
             && line_prefix_is_digits
             && line_has_digit
-            && characters.peek().is_some_and(|next| next.is_whitespace());
+            && next_is_whitespace;
         if matches!(
             character,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '!'
+            '\\' | '`' | '*' | '_' | '~' | '[' | ']' | '<' | '>' | '#' | '!'
         ) || (context == InlineContext::Table && character == '|')
             || starts_block_marker
             || ends_ordered_marker
         {
             escaped.push('\\');
         }
-        if context == InlineContext::Table && character == '\n' {
+        if character == '&' {
+            escaped.push_str("&amp;");
+        } else if context == InlineContext::Table && character == '\n' {
             escaped.push_str("<br>");
         } else {
             escaped.push(character);
@@ -288,8 +312,11 @@ fn escape_text(text: &str, context: InlineContext) -> String {
 
         if character == '\n' {
             at_line_start = true;
+            leading_spaces = 0;
             line_prefix_is_digits = true;
             line_has_digit = false;
+        } else if at_line_start && character == ' ' {
+            leading_spaces += 1;
         } else {
             at_line_start = false;
             if line_prefix_is_digits && character.is_ascii_digit() {
@@ -303,15 +330,22 @@ fn escape_text(text: &str, context: InlineContext) -> String {
 }
 
 fn escape_destination(destination: &str, context: InlineContext) -> String {
-    let destination = normalize_line_endings(destination);
     let mut escaped = String::with_capacity(destination.len());
     for character in destination.chars() {
-        if matches!(character, '\\' | '(' | ')')
-            || (context == InlineContext::Table && character == '|')
-        {
-            escaped.push('\\');
+        if character.is_ascii_control() || character == ' ' {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            let byte = character as u8;
+            escaped.push('%');
+            escaped.push(HEX[usize::from(byte >> 4)] as char);
+            escaped.push(HEX[usize::from(byte & 0x0f)] as char);
+        } else {
+            if matches!(character, '\\' | '(' | ')')
+                || (context == InlineContext::Table && character == '|')
+            {
+                escaped.push('\\');
+            }
+            escaped.push(character);
         }
-        escaped.push(character);
     }
     escaped
 }
@@ -334,10 +368,14 @@ fn normalize_line_endings(value: &str) -> String {
 }
 
 fn longest_backtick_run(value: &str) -> usize {
+    longest_fence_run(value, '`')
+}
+
+fn longest_fence_run(value: &str, fence_character: char) -> usize {
     let mut longest = 0;
     let mut current = 0;
     for character in value.chars() {
-        if character == '`' {
+        if character == fence_character {
             current += 1;
             longest = longest.max(current);
         } else {

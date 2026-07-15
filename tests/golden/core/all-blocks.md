@@ -1,4 +1,4 @@
-# Título & café
+# Título &amp; café
 
 Plain \*text\* *emphasis* **strong** ``code ` tick`` [link](https://example.test/a\(b\) "A \"title\"")  
 next
