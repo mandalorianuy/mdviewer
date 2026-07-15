@@ -2,6 +2,11 @@
 
 Visualizador de Markdown para macOS, rápido y liviano.
 
+La aplicación Swift actual se conserva, sin cambios semánticos, en
+`legacy/macos-swift/` como baseline buildable de la migración multiplataforma.
+La arquitectura y el inventario congelado están documentados en
+[`docs/architecture/swift-baseline.md`](docs/architecture/swift-baseline.md).
+
 ## Funciones v0.1
 
 - Apertura de archivos `.md`.
@@ -22,7 +27,13 @@ Visualizador de Markdown para macOS, rápido y liviano.
 ## Ejecutar en desarrollo
 
 ```bash
-swift run
+swift run --package-path legacy/macos-swift
+```
+
+Para verificar el baseline completo:
+
+```bash
+./scripts/verify-legacy-swift.sh
 ```
 
 ## Proyecto Xcode
@@ -30,40 +41,40 @@ swift run
 Para generar el proyecto macOS listo para distribuir:
 
 ```bash
-xcodegen generate
+(cd legacy/macos-swift && xcodegen generate)
 ```
 
 Se crea:
 
-- `MDViewer.xcodeproj`
+- `legacy/macos-swift/MDViewer.xcodeproj`
 
 Build sin firma para validar el target:
 
 ```bash
-xcodebuild -project MDViewer.xcodeproj -scheme MDViewer -configuration Release CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project legacy/macos-swift/MDViewer.xcodeproj -scheme MDViewer -configuration Release CODE_SIGNING_ALLOWED=NO build
 ```
 
 ## Empaquetar `.app`
 
 ```bash
-./scripts/package-app.sh
+./legacy/macos-swift/scripts/package-app.sh
 ```
 
 Se genera:
 
-- `dist/MDViewer.app`
-- `macos/AppIcon.icns`
-- `macos/MarkdownDocument.icns`
+- `legacy/macos-swift/dist/MDViewer.app`
+- `legacy/macos-swift/macos/AppIcon.icns`
+- `legacy/macos-swift/macos/MarkdownDocument.icns`
 
 ## Crear `.dmg`
 
 ```bash
-./scripts/create-dmg.sh
+./legacy/macos-swift/scripts/create-dmg.sh
 ```
 
 Se genera:
 
-- `dist/MDViewer-0.1.0.dmg`
+- `legacy/macos-swift/dist/MDViewer-0.1.0.dmg`
 
 El DMG incluye:
 
@@ -76,19 +87,19 @@ Para distribucion fuera de App Store necesitás un certificado `Developer ID App
 instalado en el keychain y luego podés ejecutar:
 
 ```bash
-CODESIGN_IDENTITY="Developer ID Application: Tu Nombre (TEAMID)" ./scripts/notarize-dmg.sh
+CODESIGN_IDENTITY="Developer ID Application: Tu Nombre (TEAMID)" ./legacy/macos-swift/scripts/notarize-dmg.sh
 ```
 
 ## Instalar en macOS
 
 ```bash
-./scripts/install-app.sh
+./legacy/macos-swift/scripts/install-app.sh
 ```
 
 Opcionalmente podés instalar en otro destino:
 
 ```bash
-./scripts/install-app.sh "$HOME/Applications"
+./legacy/macos-swift/scripts/install-app.sh "$HOME/Applications"
 ```
 
 ## Asociación de archivos `.md`
@@ -102,8 +113,8 @@ La app declara soporte de Markdown en su `Info.plist`.
 
 Archivos preparados para distribución:
 
-- `project.yml`
-- `macos/MDViewer.entitlements`
-- `macos/ExportOptions-AppStore.plist`
-- `scripts/archive-appstore.sh`
-- `scripts/appstoreconnect_api.py`
+- `legacy/macos-swift/project.yml`
+- `legacy/macos-swift/macos/MDViewer.entitlements`
+- `legacy/macos-swift/macos/ExportOptions-AppStore.plist`
+- `legacy/macos-swift/scripts/archive-appstore.sh`
+- `legacy/macos-swift/scripts/appstoreconnect_api.py`

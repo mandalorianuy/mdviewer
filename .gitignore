@@ -1,6 +1,8 @@
 .DS_Store
 /.build
 /dist
+/legacy/macos-swift/.build
+/legacy/macos-swift/dist
 /.worktrees
 /Packages
 xcuserdata/
