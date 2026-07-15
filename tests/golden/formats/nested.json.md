@@ -1,0 +1,12 @@
+- **zeta**: `null`
+- **active**: `true`
+- **count**: `42`
+- **ratio**: `1.5`
+- **name**: A  
+  B
+- **items**:
+
+  - `false`
+  - **inner**: value
+- **emptyObject**: `{}`
+- **emptyArray**: `[]`

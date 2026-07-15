@@ -1,0 +1,17 @@
+[package]
+name = "mdconvert-formats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+csv = "=1.4.0"
+mdconvert-core = { path = "../mdconvert-core" }
+quick-xml = "=0.39.2"
+serde = "=1.0.228"
+serde_json = { version = "=1.0.150", features = ["arbitrary_precision", "preserve_order"] }
+thiserror = "=2.0.18"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
