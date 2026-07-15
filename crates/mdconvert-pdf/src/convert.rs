@@ -347,6 +347,18 @@ fn infer_table(
                 <= row_font_size * config.table_max_row_gap_ratio
         });
         if aligned && compact {
+            let has_header_signal = multi_rows[0].iter().all(|line| {
+                line.font_weight
+                    .is_some_and(|weight| weight >= config.heading_bold_weight)
+            }) && multi_rows.iter().skip(1).flat_map(|row| row.iter()).any(
+                |line| {
+                    line.font_weight
+                        .is_none_or(|weight| weight < config.heading_bold_weight)
+                },
+            );
+            if !has_header_signal {
+                return None;
+            }
             let first_top = multi_rows[0][0].bounds.top;
             let last_top = multi_rows.last().unwrap()[0].bounds.top;
             let edge_allowance = multi_rows
@@ -399,8 +411,9 @@ fn ruled_table(
     }
     deduplicate(&mut vertical, config.rule_axis_tolerance_points);
     deduplicate(&mut horizontal, config.rule_axis_tolerance_points);
-    if vertical.len() < config.table_min_columns + 1 || horizontal.len() < config.table_min_rows + 1
-    {
+    let required_vertical = config.table_min_columns.saturating_add(1);
+    let required_horizontal = config.table_min_rows.saturating_add(1);
+    if vertical.len() < required_vertical || horizontal.len() < required_horizontal {
         return Ok(None);
     }
     vertical.sort_by(f32::total_cmp);

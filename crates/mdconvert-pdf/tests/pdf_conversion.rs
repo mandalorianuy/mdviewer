@@ -10,7 +10,7 @@ use mdconvert_core::{
 };
 use mdconvert_pdf::{
     HeuristicConfig, PdfConverter, RawDocument, RawGlyph, RawImage, RawLink, RawPage, RawRect,
-    RawRule, RuleKind, reconstruct, reconstruct_with_config,
+    RawRule, RawWord, RuleKind, reconstruct, reconstruct_with_config,
 };
 
 fn workspace_path(relative: impl AsRef<Path>) -> PathBuf {
@@ -827,6 +827,31 @@ fn aligned_two_column_prose_is_not_invented_as_a_borderless_table() {
 }
 
 #[test]
+fn normally_spaced_aligned_column_prose_is_not_a_borderless_table() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Left first", 20.0, 20.0, 10.0, 400),
+            ("Right first", 180.0, 20.0, 10.0, 400),
+            ("Left second", 20.0, 40.0, 10.0, 400),
+            ("Right second", 180.0, 40.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(
+        !output
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
+    );
+    assert_eq!(
+        output.blocks.iter().map(block_text).collect::<Vec<_>>(),
+        ["Left first", "Left second", "Right first", "Right second"]
+    );
+}
+
+#[test]
 fn incomplete_borderless_table_row_preserves_all_text_and_degrades() {
     let output = reconstruct(document(vec![page(
         1,
@@ -887,6 +912,83 @@ fn glyphs_shuffled_within_one_segment_are_reconstructed_geometrically() {
 
     let output = reconstruct(document(vec![source])).unwrap();
     assert_eq!(all_text(&output.blocks), "ABC");
+}
+
+#[test]
+fn populated_words_rebuild_shuffled_glyph_text_space_and_link_geometrically() {
+    let mut source = page(1, &[]);
+    source.glyphs = vec![
+        RawGlyph {
+            text: "C".into(),
+            bounds: rect(30.0, 20.0, 35.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: "A".into(),
+            bounds: rect(20.0, 20.0, 25.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: "B".into(),
+            bounds: rect(25.0, 20.0, 30.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: " ".into(),
+            bounds: rect(35.0, 20.0, 36.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: "E".into(),
+            bounds: rect(41.0, 20.0, 46.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+        RawGlyph {
+            text: "D".into(),
+            bounds: rect(36.0, 20.0, 41.0, 30.0),
+            font_size: 10.0,
+            font_name: None,
+            font_weight: Some(400),
+        },
+    ];
+    source.words = vec![
+        RawWord {
+            text: "ED".into(),
+            bounds: rect(36.0, 20.0, 46.0, 30.0),
+            glyph_start: 4,
+            glyph_end: 6,
+        },
+        RawWord {
+            text: "CAB".into(),
+            bounds: rect(20.0, 20.0, 35.0, 30.0),
+            glyph_start: 0,
+            glyph_end: 3,
+        },
+    ];
+    source.links.push(RawLink {
+        bounds: rect(25.0, 19.0, 30.0, 31.0),
+        target: "https://b.test".into(),
+    });
+
+    let output = reconstruct(document(vec![source])).unwrap();
+    assert_eq!(all_text(&output.blocks), "ABC DE");
+    let Block::Paragraph { content } = &output.blocks[0] else {
+        panic!("expected paragraph");
+    };
+    assert!(content.iter().any(|inline| {
+        matches!(inline, Inline::Link { url, content, .. }
+            if url == "https://b.test" && inline_text(content) == "B")
+    }));
 }
 
 #[test]
@@ -1042,6 +1144,11 @@ fn semantic_config_domains_reject_invalid_unit_ratios_and_heading_order() {
             ..HeuristicConfig::default()
         },
         HeuristicConfig {
+            heading_level_1_size_ratio: 1.5,
+            heading_level_2_size_ratio: 1.5,
+            ..HeuristicConfig::default()
+        },
+        HeuristicConfig {
             line_vertical_overlap_ratio: 1.01,
             ..HeuristicConfig::default()
         },
@@ -1057,6 +1164,25 @@ fn semantic_config_domains_reject_invalid_unit_ratios_and_heading_order() {
     for config in invalid {
         assert!(matches!(
             reconstruct_with_config(document(vec![]), &config),
+            Err(ConversionError::ConversionFailed { .. })
+        ));
+    }
+}
+
+#[test]
+fn extreme_table_minimums_return_typed_errors_without_overflow() {
+    for config in [
+        HeuristicConfig {
+            table_min_rows: usize::MAX,
+            ..HeuristicConfig::default()
+        },
+        HeuristicConfig {
+            table_min_columns: usize::MAX,
+            ..HeuristicConfig::default()
+        },
+    ] {
+        assert!(matches!(
+            reconstruct_with_config(document(vec![page(1, &[])]), &config),
             Err(ConversionError::ConversionFailed { .. })
         ));
     }

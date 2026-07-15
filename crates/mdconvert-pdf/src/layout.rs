@@ -107,63 +107,55 @@ fn group_page_words(page: &RawPage, config: &HeuristicConfig) -> Vec<Line> {
             segments
                 .into_iter()
                 .filter(|segment| !segment.is_empty())
-                .map(|segment| build_word_line(page, &segment)),
+                .filter_map(|segment| build_word_line(page, &segment, config)),
         );
     }
     lines.sort_by(line_position_cmp);
     lines
 }
 
-fn build_word_line(page: &RawPage, words: &[&RawWord]) -> Line {
-    let mut bounds = words[0].bounds;
-    let mut text = String::new();
-    let mut glyph_spans = Vec::new();
-    let mut size_sum = 0.0;
-    let mut visible_count = 0_usize;
-    let mut weights = Vec::new();
-    for (word_index, word) in words.iter().enumerate() {
-        if word_index > 0 {
-            text.push(' ');
-        }
-        bounds = bounds.union(word.bounds);
-        let word_start = text.len();
-        text.push_str(&word.text);
-        let mut offset = 0_usize;
-        for glyph in page
-            .glyphs
-            .get(word.glyph_start..word.glyph_end)
-            .unwrap_or_default()
-            .iter()
-            .filter(|glyph| !glyph.text.chars().all(char::is_whitespace))
-        {
-            let start = word_start.saturating_add(offset);
-            offset = offset.saturating_add(glyph.text.len());
-            let end = word_start.saturating_add(offset).min(text.len());
-            if start < end {
-                glyph_spans.push((start, end, glyph.bounds));
-            }
-            size_sum += glyph.font_size;
-            visible_count += 1;
-            if let Some(weight) = glyph.font_weight {
-                weights.push(weight);
-            }
-        }
+fn build_word_line(page: &RawPage, words: &[&RawWord], config: &HeuristicConfig) -> Option<Line> {
+    let mut geometric_words = words
+        .iter()
+        .filter_map(|word| {
+            let mut glyphs = page
+                .glyphs
+                .get(word.glyph_start..word.glyph_end)?
+                .iter()
+                .filter(|glyph| {
+                    !glyph
+                        .text
+                        .chars()
+                        .all(|character| matches!(character, '\r' | '\n'))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            glyphs.sort_by(|left, right| left.bounds.left.total_cmp(&right.bounds.left));
+            (!glyphs.is_empty()).then_some(glyphs)
+        })
+        .collect::<Vec<_>>();
+    if geometric_words.is_empty() {
+        return None;
     }
-    weights.sort_unstable();
-    Line {
-        page: page.number,
-        page_width: page.width,
-        page_height: page.height,
-        text,
-        bounds,
-        font_size: if visible_count == 0 {
-            0.0
-        } else {
-            size_sum / visible_count as f32
-        },
-        font_weight: weights.get(weights.len() / 2).copied(),
-        glyph_spans,
+    let mut glyphs: Vec<RawGlyph> = Vec::new();
+    for word in geometric_words.drain(..) {
+        if let (Some(previous), Some(next)) = (glyphs.last(), word.first()) {
+            glyphs.push(RawGlyph {
+                text: " ".into(),
+                bounds: RawRect {
+                    left: previous.bounds.right.min(next.bounds.left),
+                    top: previous.bounds.top.min(next.bounds.top),
+                    right: previous.bounds.right.max(next.bounds.left),
+                    bottom: previous.bounds.bottom.max(next.bounds.bottom),
+                },
+                font_size: previous.font_size.max(next.font_size),
+                font_name: None,
+                font_weight: None,
+            });
+        }
+        glyphs.extend(word);
     }
+    Some(build_line(page, glyphs, config))
 }
 
 fn same_visual_line(left: &RawGlyph, right: &RawGlyph, config: &HeuristicConfig) -> bool {

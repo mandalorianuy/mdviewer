@@ -173,12 +173,12 @@ impl HeuristicConfig {
             });
         }
         if self.heading_level_2_size_ratio < 1.0
-            || self.heading_level_1_size_ratio < self.heading_level_2_size_ratio
+            || self.heading_level_1_size_ratio <= self.heading_level_2_size_ratio
         {
             return Err(ConversionError::ConversionFailed {
-                message: "invalid PDF heading ratios: level 1 must be at least level 2 and both must be at least 1"
+                message: "invalid PDF heading ratios: level 1 must exceed level 2 and both must be at least 1"
                     .into(),
-                });
+            });
         }
         if !(1..=1_000).contains(&self.heading_bold_weight) {
             return Err(ConversionError::ConversionFailed {
@@ -199,6 +199,18 @@ impl HeuristicConfig {
                 return Err(ConversionError::ConversionFailed {
                     message: format!(
                         "invalid PDF heuristic {name}: expected a count of at least 2"
+                    ),
+                });
+            }
+        }
+        for (name, value) in [
+            ("table_min_rows", self.table_min_rows),
+            ("table_min_columns", self.table_min_columns),
+        ] {
+            if value.checked_add(1).is_none() {
+                return Err(ConversionError::ConversionFailed {
+                    message: format!(
+                        "invalid PDF heuristic {name}: count cannot accommodate a boundary"
                     ),
                 });
             }
