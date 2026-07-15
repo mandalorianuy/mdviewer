@@ -173,7 +173,7 @@ impl DomConverter<'_> {
                     self.append_image(child, blocks)?;
                 }
                 Some(name) if is_inline_element(name) => {
-                    if contains_element(child, "img") {
+                    if contains_visible_element(child, "img") {
                         flush_paragraph(&mut pending, blocks);
                         self.append_mixed_content(child, blocks)?;
                     } else {
@@ -204,7 +204,7 @@ impl DomConverter<'_> {
             if element_name(child).as_deref() == Some("img") {
                 flush_paragraph(&mut pending, blocks);
                 self.append_image(child, blocks)?;
-            } else if contains_element(child, "img") {
+            } else if contains_visible_element(child, "img") {
                 flush_paragraph(&mut pending, blocks);
                 self.append_mixed_content(child, blocks)?;
             } else {
@@ -646,9 +646,14 @@ fn find_first_element_with_nonempty_attribute(
     })
 }
 
-fn contains_element(node: &Handle, wanted: &str) -> bool {
+fn contains_visible_element(node: &Handle, wanted: &str) -> bool {
+    if is_invisible_node(node) {
+        return false;
+    }
     node.children.borrow().iter().any(|child| {
-        element_name(child).as_deref() == Some(wanted) || contains_element(child, wanted)
+        !is_invisible_node(child)
+            && (element_name(child).as_deref() == Some(wanted)
+                || contains_visible_element(child, wanted))
     })
 }
 

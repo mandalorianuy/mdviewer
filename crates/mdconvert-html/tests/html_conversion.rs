@@ -203,6 +203,69 @@ fn table_and_code_extraction_exclude_invisible_descendants() {
 }
 
 #[test]
+fn hidden_descendant_image_does_not_break_strong_inline_flow() {
+    let temp = TempDir::new().unwrap();
+    let document = convert_html(
+        &temp,
+        "<p><strong>A<span hidden><img src='x'></span>B</strong></p>",
+    );
+
+    assert_eq!(document.assets, vec![]);
+    assert_eq!(document.warnings, vec![]);
+    assert_eq!(
+        document.blocks,
+        vec![Block::Paragraph {
+            content: vec![Inline::Strong(vec![
+                Inline::Text("A".into()),
+                Inline::Text("B".into()),
+            ])],
+        }]
+    );
+    assert_eq!(emitted(&document), "**AB**\n");
+}
+
+#[test]
+fn aria_hidden_descendant_image_does_not_break_link_inline_flow() {
+    let temp = TempDir::new().unwrap();
+    let document = convert_html(
+        &temp,
+        "<p><a href='/x'>A<span aria-hidden='true'><img src='x'></span>B</a></p>",
+    );
+
+    assert_eq!(document.assets, vec![]);
+    assert_eq!(document.warnings, vec![]);
+    assert_eq!(
+        document.blocks,
+        vec![Block::Paragraph {
+            content: vec![Inline::Link {
+                url: "/x".into(),
+                title: None,
+                content: vec![Inline::Text("A".into()), Inline::Text("B".into())],
+            }],
+        }]
+    );
+    assert_eq!(emitted(&document), "[AB](/x)\n");
+}
+
+#[test]
+fn style_hidden_descendant_image_does_not_break_emphasis_inline_flow() {
+    let temp = TempDir::new().unwrap();
+    let document = convert_html(
+        &temp,
+        "<p><em>A<span style='visibility: hidden'><img src='x'></span>B</em></p>",
+    );
+
+    assert_eq!(document.assets, vec![]);
+    assert_eq!(document.warnings, vec![]);
+    assert_eq!(emitted(&document), "*AB*\n");
+    assert!(matches!(
+        document.blocks.as_slice(),
+        [Block::Paragraph { content }]
+            if matches!(content.as_slice(), [Inline::Emphasis(_)])
+    ));
+}
+
+#[test]
 fn excessive_dom_depth_returns_an_exact_typed_limit() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("deep.html");
