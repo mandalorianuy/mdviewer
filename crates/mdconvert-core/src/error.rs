@@ -12,6 +12,16 @@ pub enum ModelError {
     EmptySourcePath,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EmitError {
+    #[error("asset ID {asset_id:?} is referenced but missing")]
+    MissingAsset { asset_id: String },
+    #[error("asset ID {asset_id:?} appears more than once")]
+    DuplicateAssetId { asset_id: String },
+    #[error("table alignment width mismatch: expected {expected} alignments, received {actual}")]
+    TableAlignmentWidthMismatch { expected: usize, actual: usize },
+}
+
 #[derive(Debug, Error)]
 pub enum ConversionError {
     #[error("invalid conversion request: {0}")]
