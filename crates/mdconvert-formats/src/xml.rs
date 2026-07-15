@@ -485,9 +485,9 @@ fn validate_processing_instruction(instruction: &BytesPI<'_>) -> Result<(), Conv
             message: format!("processing instruction target is not UTF-8: {error}"),
         }
     })?;
-    if !valid_xml_name(target) {
+    if !valid_ncname(target) {
         return corrupt(format!(
-            "processing instruction target {target:?} is not an XML Name"
+            "processing instruction target {target:?} is not an XML NCName"
         ));
     }
     if target.eq_ignore_ascii_case("xml") {
@@ -513,17 +513,11 @@ fn validate_qname(name: &str, kind: QNameKind) -> Result<(), ConversionError> {
         return corrupt(format!("invalid XML QName {name:?}"));
     }
 
-    if let Some(prefix) = second.map(|_| first) {
-        if prefix.eq_ignore_ascii_case("xml") && prefix != "xml" {
-            return corrupt(format!("reserved XML prefix has invalid case in {name:?}"));
-        }
-        if prefix.eq_ignore_ascii_case("xmlns")
-            && (prefix != "xmlns" || kind != QNameKind::Attribute)
-        {
-            return corrupt(format!("reserved XMLNS prefix is invalid in {name:?}"));
-        }
-    } else if kind == QNameKind::Element && first.eq_ignore_ascii_case("xmlns") {
-        return corrupt("XMLNS is reserved for namespace declaration attributes");
+    if let Some(prefix) = second.map(|_| first)
+        && prefix == "xmlns"
+        && kind != QNameKind::Attribute
+    {
+        return corrupt(format!("reserved XMLNS prefix is invalid in {name:?}"));
     }
     Ok(())
 }
@@ -531,14 +525,6 @@ fn validate_qname(name: &str, kind: QNameKind) -> Result<(), ConversionError> {
 fn valid_ncname(name: &str) -> bool {
     let mut characters = name.chars();
     characters.next().is_some_and(is_name_start_character) && characters.all(is_name_character)
-}
-
-fn valid_xml_name(name: &str) -> bool {
-    let mut characters = name.chars();
-    characters
-        .next()
-        .is_some_and(|character| character == ':' || is_name_start_character(character))
-        && characters.all(|character| character == ':' || is_name_character(character))
 }
 
 fn is_name_start_character(character: char) -> bool {
@@ -567,11 +553,6 @@ fn validate_namespace_binding(prefix: &str, value: &str) -> Result<(), Conversio
     if prefix == "xmlns" || value == XMLNS_NAMESPACE {
         return corrupt("the XMLNS namespace cannot be rebound");
     }
-    if starts_with_xml_case_insensitive(prefix) && prefix != "xml" {
-        return corrupt(format!(
-            "namespace prefix {prefix:?} is reserved for XML specifications"
-        ));
-    }
     if !prefix.is_empty() && value.is_empty() {
         return corrupt("a prefixed namespace binding cannot have an empty URI");
     }
@@ -582,13 +563,6 @@ fn validate_namespace_binding(prefix: &str, value: &str) -> Result<(), Conversio
         return corrupt("reserved XML namespaces cannot be the default namespace");
     }
     Ok(())
-}
-
-fn starts_with_xml_case_insensitive(value: &str) -> bool {
-    value
-        .as_bytes()
-        .get(..3)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"xml"))
 }
 
 fn validate_xml_chars(value: &str, context: &str) -> Result<(), ConversionError> {

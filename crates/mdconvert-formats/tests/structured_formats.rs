@@ -612,14 +612,6 @@ fn xml_enforces_namespace_scope_and_expanded_attribute_names() {
             br#"<root xmlns:xml="urn:wrong"/>"#.as_slice(),
         ),
         (
-            "reserved-xml-case-prefix.xml",
-            br#"<root xmlns:XML="urn:wrong"/>"#.as_slice(),
-        ),
-        (
-            "reserved-xml-leading-prefix.xml",
-            br#"<root xmlns:xmlfuture="urn:wrong"/>"#.as_slice(),
-        ),
-        (
             "xml-uri-other-prefix.xml",
             br#"<root xmlns:p="http://www.w3.org/XML/1998/namespace"/>"#.as_slice(),
         ),
@@ -667,6 +659,15 @@ fn xml_enforces_namespace_scope_and_expanded_attribute_names() {
             "reserved-xml-binding.xml",
             br#"<root xmlns:xml="http://www.w3.org/XML/1998/namespace" xml:lang="en"/>"#.as_slice(),
         ),
+        (
+            "case-sensitive-xml-prefix.xml",
+            br#"<XML:r xmlns:XML="urn:x"/>"#.as_slice(),
+        ),
+        (
+            "longer-xml-prefix.xml",
+            br#"<xmlfuture:r xmlns:xmlfuture="urn:x"/>"#.as_slice(),
+        ),
+        ("unprefixed-xmlns-element.xml", b"<xmlns/>".as_slice()),
     ] {
         convert_temporary(&directory, name, input, &XmlConverter)
             .unwrap_or_else(|error| panic!("{name} should convert: {error}"));
@@ -674,24 +675,24 @@ fn xml_enforces_namespace_scope_and_expanded_attribute_names() {
 }
 
 #[test]
-fn xml_processing_instruction_targets_are_xml_names() {
+fn xml_processing_instruction_targets_are_nc_names() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    assert!(matches!(
-        convert_temporary(
-            &directory,
-            "invalid-pi.xml",
-            b"<?1bad value?><root/>",
-            &XmlConverter,
-        ),
-        Err(ConversionError::CorruptInput { .. })
-    ));
+    for (name, input) in [
+        ("invalid-pi.xml", b"<?1bad value?><root/>".as_slice()),
+        ("colon-pi.xml", b"<?a:b value?><root/>".as_slice()),
+    ] {
+        assert!(matches!(
+            convert_temporary(&directory, name, input, &XmlConverter),
+            Err(ConversionError::CorruptInput { .. })
+        ));
+    }
     convert_temporary(
         &directory,
         "unicode-pi.xml",
         "<?π-name value?><root/>".as_bytes(),
         &XmlConverter,
     )
-    .expect("valid Unicode XML Name PI target converts");
+    .expect("valid Unicode XML NCName PI target converts");
 }
 
 #[test]
