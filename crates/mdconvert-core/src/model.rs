@@ -1,6 +1,9 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ModelError;
 
@@ -22,7 +25,7 @@ pub struct DocumentMetadata {
     pub properties: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct AssetId(String);
 
@@ -38,6 +41,16 @@ impl AssetId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for AssetId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -67,6 +80,7 @@ pub enum Alignment {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Block {
     Heading {
+        #[serde(deserialize_with = "deserialize_heading_level")]
         level: u8,
         content: Vec<Inline>,
     },
@@ -98,12 +112,27 @@ pub enum Block {
 
 impl Block {
     pub fn heading(level: u8, content: Vec<Inline>) -> Result<Self, ModelError> {
-        if !(1..=6).contains(&level) {
-            return Err(ModelError::InvalidHeadingLevel(level));
-        }
+        validate_heading_level(level)?;
 
         Ok(Self::Heading { level, content })
     }
+}
+
+fn validate_heading_level(level: u8) -> Result<(), ModelError> {
+    if !(1..=6).contains(&level) {
+        return Err(ModelError::InvalidHeadingLevel(level));
+    }
+
+    Ok(())
+}
+
+fn deserialize_heading_level<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let level = u8::deserialize(deserializer)?;
+    validate_heading_level(level).map_err(serde::de::Error::custom)?;
+    Ok(level)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,6 +190,7 @@ impl Default for ConversionLimits {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversionRequest {
+    #[serde(deserialize_with = "deserialize_source_path")]
     pub source: PathBuf,
     pub source_url: Option<url::Url>,
     pub limits: ConversionLimits,
@@ -169,9 +199,7 @@ pub struct ConversionRequest {
 impl ConversionRequest {
     pub fn new(source: impl Into<PathBuf>) -> Result<Self, ModelError> {
         let source = source.into();
-        if source.as_os_str().is_empty() {
-            return Err(ModelError::EmptySourcePath);
-        }
+        validate_source_path(&source)?;
 
         Ok(Self {
             source,
@@ -179,4 +207,21 @@ impl ConversionRequest {
             limits: ConversionLimits::default(),
         })
     }
+}
+
+fn validate_source_path(source: &Path) -> Result<(), ModelError> {
+    if source.as_os_str().is_empty() {
+        return Err(ModelError::EmptySourcePath);
+    }
+
+    Ok(())
+}
+
+fn deserialize_source_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let source = PathBuf::deserialize(deserializer)?;
+    validate_source_path(&source).map_err(serde::de::Error::custom)?;
+    Ok(source)
 }

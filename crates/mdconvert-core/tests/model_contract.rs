@@ -116,6 +116,154 @@ fn block_and_inline_use_exact_adjacent_tag_json() {
 }
 
 #[test]
+fn remaining_block_variants_use_exact_adjacent_tag_json() {
+    let asset_id = AssetId::new("figure-1").expect("asset ID should be valid");
+    let cases = [
+        (
+            Block::heading(1, vec![Inline::Text("Heading".into())])
+                .expect("heading level should be valid"),
+            serde_json::json!({
+                "type": "heading",
+                "value": {
+                    "level": 1,
+                    "content": [{"type": "text", "value": "Heading"}]
+                }
+            }),
+        ),
+        (
+            Block::List {
+                ordered: true,
+                start: Some(4),
+                items: vec![ListItem {
+                    blocks: vec![Block::Paragraph {
+                        content: vec![Inline::Text("Item".into())],
+                    }],
+                }],
+            },
+            serde_json::json!({
+                "type": "list",
+                "value": {
+                    "ordered": true,
+                    "start": 4,
+                    "items": [{
+                        "blocks": [{
+                            "type": "paragraph",
+                            "value": {
+                                "content": [{"type": "text", "value": "Item"}]
+                            }
+                        }]
+                    }]
+                }
+            }),
+        ),
+        (
+            Block::Table {
+                alignments: vec![
+                    Alignment::None,
+                    Alignment::Left,
+                    Alignment::Center,
+                    Alignment::Right,
+                ],
+                rows: vec![vec![vec![Inline::Code("cell".into())]]],
+            },
+            serde_json::json!({
+                "type": "table",
+                "value": {
+                    "alignments": ["none", "left", "center", "right"],
+                    "rows": [[[{"type": "code", "value": "cell"}]]]
+                }
+            }),
+        ),
+        (
+            Block::Code {
+                language: Some("rust".into()),
+                text: "fn main() {}".into(),
+            },
+            serde_json::json!({
+                "type": "code",
+                "value": {"language": "rust", "text": "fn main() {}"}
+            }),
+        ),
+        (
+            Block::Quote {
+                blocks: vec![Block::ThematicBreak],
+            },
+            serde_json::json!({
+                "type": "quote",
+                "value": {"blocks": [{"type": "thematic_break"}]}
+            }),
+        ),
+        (
+            Block::Image {
+                asset_id,
+                alt: "Diagram".into(),
+            },
+            serde_json::json!({
+                "type": "image",
+                "value": {"asset_id": "figure-1", "alt": "Diagram"}
+            }),
+        ),
+        (
+            Block::ThematicBreak,
+            serde_json::json!({"type": "thematic_break"}),
+        ),
+    ];
+
+    for (block, expected) in cases {
+        assert_eq!(
+            serde_json::to_value(block).expect("block should serialize"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn remaining_inline_variants_use_exact_adjacent_tag_json() {
+    let cases = [
+        (
+            Inline::Emphasis(vec![Inline::Text("emphasis".into())]),
+            serde_json::json!({
+                "type": "emphasis",
+                "value": [{"type": "text", "value": "emphasis"}]
+            }),
+        ),
+        (
+            Inline::Strong(vec![Inline::Text("strong".into())]),
+            serde_json::json!({
+                "type": "strong",
+                "value": [{"type": "text", "value": "strong"}]
+            }),
+        ),
+        (
+            Inline::Code("code".into()),
+            serde_json::json!({"type": "code", "value": "code"}),
+        ),
+        (Inline::LineBreak, serde_json::json!({"type": "line_break"})),
+    ];
+
+    for (inline, expected) in cases {
+        assert_eq!(
+            serde_json::to_value(inline).expect("inline should serialize"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn every_alignment_uses_its_exact_snake_case_json_value() {
+    assert_eq!(
+        serde_json::to_value([
+            Alignment::None,
+            Alignment::Left,
+            Alignment::Center,
+            Alignment::Right,
+        ])
+        .expect("alignments should serialize"),
+        serde_json::json!(["none", "left", "center", "right"])
+    );
+}
+
+#[test]
 fn heading_levels_are_restricted_to_one_through_six() {
     for level in 1..=6 {
         assert!(Block::heading(level, vec![Inline::Text("Title".into())]).is_ok());
@@ -145,6 +293,31 @@ fn asset_ids_reject_empty_or_whitespace_only_values_and_preserve_valid_input() {
         serde_json::to_value(id).expect("asset ID should serialize transparently"),
         serde_json::json!("  figure-1  ")
     );
+}
+
+#[test]
+fn asset_id_deserialization_rejects_empty_and_whitespace_only_strings() {
+    for json in [r#""""#, r#"" \t\n""#] {
+        assert!(
+            serde_json::from_str::<AssetId>(json).is_err(),
+            "invalid asset ID JSON should be rejected: {json}"
+        );
+    }
+}
+
+#[test]
+fn heading_deserialization_rejects_levels_outside_one_through_six() {
+    for level in [0, 7] {
+        let json = serde_json::json!({
+            "type": "heading",
+            "value": {"level": level, "content": []}
+        });
+
+        assert!(
+            serde_json::from_value::<Block>(json).is_err(),
+            "invalid heading level should be rejected: {level}"
+        );
+    }
 }
 
 #[test]
@@ -200,6 +373,21 @@ fn conversion_requests_reject_only_empty_source_paths() {
 }
 
 #[test]
+fn conversion_request_deserialization_rejects_an_empty_source_path() {
+    let json = serde_json::json!({
+        "source": "",
+        "source_url": null,
+        "limits": {
+            "max_input_bytes": 500 * 1024 * 1024,
+            "max_pages": 2_000,
+            "max_assets": 10_000
+        }
+    });
+
+    assert!(serde_json::from_value::<ConversionRequest>(json).is_err());
+}
+
+#[test]
 fn conversion_errors_expose_stable_codes() {
     let errors = [
         (
@@ -246,6 +434,18 @@ fn conversion_errors_expose_stable_codes() {
     for (error, expected) in errors {
         assert_eq!(error.code(), expected);
     }
+}
+
+#[test]
+fn conversion_errors_preserve_invalid_request_and_io_sources() {
+    let invalid_request = ConversionError::from(ModelError::EmptySourcePath);
+    assert!(std::error::Error::source(&invalid_request).is_some());
+
+    let io = ConversionError::Io {
+        path: PathBuf::from("input.pdf"),
+        source: std::io::Error::other("read failed"),
+    };
+    assert!(std::error::Error::source(&io).is_some());
 }
 
 #[test]
