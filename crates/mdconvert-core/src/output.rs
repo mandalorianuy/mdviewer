@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     time::{SystemTime, UNIX_EPOCH},
@@ -258,6 +258,13 @@ trait FsOps {
 
     fn before_lock_identity(&self, _path: &Path) -> io::Result<()> {
         Ok(())
+    }
+
+    fn write_reacquired_lock_nonce(&self, file: &mut File, nonce: &[u8]) -> io::Result<()> {
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(nonce)?;
+        file.sync_all()
     }
 
     fn before_lock_release(&self, _path: &Path) -> io::Result<()> {
@@ -713,12 +720,14 @@ impl TargetLock {
                 return Err(error);
             }
         };
+        if let Err(source) = fs_ops.write_reacquired_lock_nonce(&mut file, self.nonce.as_bytes()) {
+            let error = incomplete_lock_nonce_error(&file, &self.path, &self.parent, source);
+            self._file = file;
+            self.state = LockState::Unidentified;
+            return Err(error);
+        }
         self.identity = identity;
         self.state = LockState::Owned;
-        if file.write_all(self.nonce.as_bytes()).is_err() || file.sync_all().is_err() {
-            self._file = file;
-            return Ok(());
-        }
         self._file = file;
         Ok(())
     }
@@ -743,6 +752,34 @@ fn unidentified_lock_error(
     parent: &Path,
     source: io::Error,
 ) -> OutputError {
+    retained_unverified_lock_error(
+        file,
+        path,
+        parent,
+        format!("could not establish identity for newly-created output lock: {source}"),
+    )
+}
+
+fn incomplete_lock_nonce_error(
+    file: &File,
+    path: &Path,
+    parent: &Path,
+    source: io::Error,
+) -> OutputError {
+    retained_unverified_lock_error(
+        file,
+        path,
+        parent,
+        format!("could not persist the complete reacquired output-lock nonce: {source}"),
+    )
+}
+
+fn retained_unverified_lock_error(
+    file: &File,
+    path: &Path,
+    parent: &Path,
+    reason: String,
+) -> OutputError {
     let file_sync = file
         .sync_all()
         .err()
@@ -754,8 +791,8 @@ fn unidentified_lock_error(
         .unwrap_or_default();
     OutputError::TransactionFailed {
         message: format!(
-            "could not establish identity for newly-created output lock at {}; the unverified lock was retained and manual recovery/removal is required: {source}{file_sync}{parent_sync}",
-            path.display()
+            "{reason} at {}; the unverified lock was retained and manual recovery/removal is required{file_sync}{parent_sync}",
+            path.display(),
         ),
     }
 }
@@ -1460,9 +1497,12 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> OutputEr
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
+    use std::{
+        io::{Seek, SeekFrom},
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use super::*;
@@ -1488,6 +1528,7 @@ mod tests {
         ReplaceLockDuringAcquireCleanup,
         FailLockIdentityQuery,
         FailReacquiredLockIdentity,
+        FailReacquiredNonceWrite,
     }
 
     struct TestFs {
@@ -1563,7 +1604,10 @@ mod tests {
             if path.join("previous.md").exists() && self.take_fault(Fault::DirectorySync) {
                 return Err(io::Error::other("injected directory sync failure"));
             }
-            if self.hook == Hook::FailReacquiredLockIdentity && self.hook_ran.load(Ordering::SeqCst)
+            if matches!(
+                self.hook,
+                Hook::FailReacquiredLockIdentity | Hook::FailReacquiredNonceWrite
+            ) && self.hook_ran.load(Ordering::SeqCst)
             {
                 return Err(io::Error::other("injected lock release sync failure"));
             }
@@ -1606,7 +1650,10 @@ mod tests {
         }
 
         fn before_lock_release(&self, path: &Path) -> io::Result<()> {
-            if self.hook == Hook::FailReacquiredLockIdentity {
+            if matches!(
+                self.hook,
+                Hook::FailReacquiredLockIdentity | Hook::FailReacquiredNonceWrite
+            ) {
                 self.hook_ran.store(true, Ordering::SeqCst);
             }
             if self.hook == Hook::ReplaceLockBeforeRelease
@@ -1627,6 +1674,17 @@ mod tests {
                 return Err(io::Error::other("injected lock identity query failure"));
             }
             Ok(())
+        }
+
+        fn write_reacquired_lock_nonce(&self, file: &mut File, nonce: &[u8]) -> io::Result<()> {
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            if self.hook == Hook::FailReacquiredNonceWrite {
+                file.write_all(b"partial")?;
+                return Err(io::Error::other("injected reacquired nonce write failure"));
+            }
+            file.write_all(nonce)?;
+            file.sync_all()
         }
     }
 
@@ -1824,6 +1882,58 @@ mod tests {
                 .1,
         );
         assert!(absolute_lock_path.is_file());
+        assert!(directory.path().join("foo.md").is_file());
+        assert_eq!(
+            fs::read(directory.path().join("foo.assets/new.png")).unwrap(),
+            b"new"
+        );
+        assert!(recovery.is_absolute());
+        assert!(recovery.join("new.md").is_file());
+        assert!(recovery.join("new.assets/new.png").is_file());
+
+        let requested_lock_path = directory.path().join(".foo.md.mdviewer.lock");
+        let second_error = publish(
+            &document("next.png", b"next"),
+            &target(directory.path(), OverwritePolicy::Replace),
+            &NeverCancel,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(second_error, OutputError::OutputExists(ref path) if path == &requested_lock_path),
+            "unexpected second publication error: {second_error:?}"
+        );
+        fs::remove_file(absolute_lock_path).unwrap();
+        fs::remove_dir_all(recovery).unwrap();
+    }
+
+    #[test]
+    fn reacquired_nonce_write_failure_retains_lock_outputs_and_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let output_target = target(directory.path(), OverwritePolicy::Deny);
+
+        let error = publish_with_fs(
+            &document("new.png", b"new"),
+            &output_target,
+            &NeverCancel,
+            &TestFs::new(&[], Hook::FailReacquiredNonceWrite),
+        )
+        .unwrap_err();
+        let absolute_lock_path = fs::canonicalize(directory.path())
+            .unwrap()
+            .join(".foo.md.mdviewer.lock");
+        let OutputError::TransactionFailed { message } = error else {
+            panic!("expected transaction failure, got {error:?}");
+        };
+
+        assert!(message.contains(&absolute_lock_path.display().to_string()));
+        assert!(message.contains("manual recovery/removal is required"));
+        let recovery = PathBuf::from(
+            message
+                .split_once("recovery directory: ")
+                .unwrap_or_else(|| panic!("missing recovery path in {message:?}"))
+                .1,
+        );
+        assert_eq!(fs::read(&absolute_lock_path).unwrap(), b"partial");
         assert!(directory.path().join("foo.md").is_file());
         assert_eq!(
             fs::read(directory.path().join("foo.assets/new.png")).unwrap(),
