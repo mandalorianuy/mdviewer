@@ -1,6 +1,10 @@
 .DS_Store
 /.build
 /dist
+node_modules/
+/target
+/apps/desktop/dist
+/apps/desktop/src-tauri/gen
 /legacy/macos-swift/.build
 /legacy/macos-swift/dist
 /.worktrees

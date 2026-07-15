@@ -1,0 +1,16 @@
+[package]
+name = "mdviewer-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "mdviewer_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[dependencies]
+tauri.workspace = true

@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop/src-tauri",
+]
+# Task 3 adds crates/* when the first core crate exists.
+# Task 14 adds platform/macos/* when the PDF workflow crate exists.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "MIT"
+
+[workspace.dependencies]
+tauri = "=2.11.5"
