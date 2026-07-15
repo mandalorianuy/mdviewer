@@ -1,7 +1,7 @@
 # MDViewer cross-platform con Guardar como Markdown universal
 
 **Fecha:** 2026-07-15  
-**Estado:** Diseño aprobado conversacionalmente; listo para revisión escrita  
+**Estado:** Diseño aprobado; plan de implementación preparado
 **Producto:** MDViewer  
 **Licencia:** MIT
 
@@ -48,8 +48,9 @@ cubierto por la evolución de OCR prevista para v1.1.
   editar y guardar Markdown.
 - Preview GFM y exportación existente que siga siendo necesaria para la
   paridad.
-- Conversión directa de los formatos ya soportados por MDViewer, migrados al
-  nuevo contrato común.
+- Conversión directa de los formatos locales ya soportados por MDViewer,
+  migrados al nuevo contrato común. La importación de URLs de YouTube queda
+  fuera de v1 porque requiere red y no forma parte del flujo local acordado.
 - Conversión HTML mediante un parser DOM, no mediante expresiones regulares.
 - Conversión PDF de documentos digitales mediante PDFium y análisis geométrico.
 - Extracción de imágenes, links y metadatos disponibles en el documento.
@@ -67,6 +68,7 @@ cubierto por la evolución de OCR prevista para v1.1.
 - PyTorch, Docling u otros runtimes de modelos de documento.
 - Binarios para Intel, Windows o Linux.
 - Una extensión de navegador que capture HTML directamente.
+- Importación de YouTube u otras fuentes que requieran acceso de red.
 - Sincronización cloud, cuentas, telemetría o procesamiento remoto.
 - Promesas de reconstrucción perfecta de la semántica perdida al imprimir.
 
@@ -332,7 +334,9 @@ el producto.
 2. Mover la implementación Swift sin cambios semánticos a `legacy/macos-swift`.
 3. Crear la aplicación Tauri y el núcleo Rust en paralelo.
 4. Portar apertura, visualización, edición, guardado, preferencias y exportación.
-5. Portar convertidores al modelo intermedio y comparar resultados.
+5. Portar los convertidores locales incluidos en v1 al modelo intermedio y
+   comparar resultados. El convertidor de YouTube permanece sólo en el legado
+   hasta que exista un diseño posterior para importaciones con red explícita.
 6. Alcanzar paridad de tests y pruebas manuales.
 7. Crear un tag de la última versión Swift buildable.
 8. Retirar el target Swift en un commit dedicado.
