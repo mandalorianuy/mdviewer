@@ -336,6 +336,10 @@ fn warning_codes_have_stable_snake_case_values() {
         (WarningCode::InvalidLinkSkipped, "invalid_link_skipped"),
         (WarningCode::InvalidAssetSkipped, "invalid_asset_skipped"),
         (WarningCode::ExternalAssetSkipped, "external_asset_skipped"),
+        (
+            WarningCode::AdditionalArchiveEntriesSkipped,
+            "additional_archive_entries_skipped",
+        ),
         (WarningCode::OcrDeferred, "ocr_deferred"),
     ];
 

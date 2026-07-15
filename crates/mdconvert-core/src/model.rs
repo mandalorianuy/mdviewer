@@ -160,6 +160,7 @@ pub enum WarningCode {
     InvalidLinkSkipped,
     InvalidAssetSkipped,
     ExternalAssetSkipped,
+    AdditionalArchiveEntriesSkipped,
     OcrDeferred,
 }
 

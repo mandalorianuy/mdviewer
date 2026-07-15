@@ -1,6 +1,12 @@
+mod archive;
 mod csv;
 mod detect;
+mod docx;
+mod epub;
+mod image;
 mod json;
+mod pptx;
+mod xlsx;
 mod xml;
 
 use std::{fs, path::Path};
@@ -8,11 +14,71 @@ use std::{fs, path::Path};
 use mdconvert_core::{ConversionError, ConversionRequest};
 
 pub use crate::{
+    archive::{ArchiveLimits, ZipConverter},
     csv::{CsvConverter, DelimiterDetectionError, detect_delimiter},
     detect::{DetectionError, StructuredFormat, detect_format},
+    docx::DocxConverter,
+    epub::EpubConverter,
+    image::{ImageConverter, ImageLimits},
     json::JsonConverter,
+    pptx::PptxConverter,
+    xlsx::XlsxConverter,
     xml::XmlConverter,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalFormat {
+    Pdf,
+    Html,
+    Csv,
+    Json,
+    Xml,
+    Zip,
+    Epub,
+    Docx,
+    Pptx,
+    Xlsx,
+    Png,
+    Jpeg,
+}
+
+impl LocalFormat {
+    pub const fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Pdf => &["pdf"],
+            Self::Html => &["html", "htm"],
+            Self::Csv => &["csv"],
+            Self::Json => &["json"],
+            Self::Xml => &["xml"],
+            Self::Zip => &["zip"],
+            Self::Epub => &["epub"],
+            Self::Docx => &["docx"],
+            Self::Pptx => &["pptx"],
+            Self::Xlsx => &["xlsx"],
+            Self::Png => &["png"],
+            Self::Jpeg => &["jpg", "jpeg"],
+        }
+    }
+}
+
+const LOCAL_V1_FORMATS: &[LocalFormat] = &[
+    LocalFormat::Pdf,
+    LocalFormat::Html,
+    LocalFormat::Csv,
+    LocalFormat::Json,
+    LocalFormat::Xml,
+    LocalFormat::Zip,
+    LocalFormat::Epub,
+    LocalFormat::Docx,
+    LocalFormat::Pptx,
+    LocalFormat::Xlsx,
+    LocalFormat::Png,
+    LocalFormat::Jpeg,
+];
+
+pub const fn local_v1_formats() -> &'static [LocalFormat] {
+    LOCAL_V1_FORMATS
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructuredLimits {

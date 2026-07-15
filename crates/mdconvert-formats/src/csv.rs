@@ -42,28 +42,36 @@ impl CsvConverter {
     ) -> Result<Document, ConversionError> {
         limits.validate()?;
         let bytes = read_input(request)?;
-        utf8(&bytes, &request.source)?;
-        ensure_format(request, &bytes, StructuredFormat::Csv, limits)?;
-        let payload = strip_utf8_bom(&bytes);
-        let delimiter = match detect_delimiter_with_limits(payload, limits) {
-            Ok(delimiter) => delimiter,
-            Err(DelimiterDetectionError::NoDelimiter) => b',',
-            Err(DelimiterDetectionError::LimitExceeded {
-                limit,
-                actual,
-                maximum,
-            }) => return Err(limit_exceeded(limit, actual, maximum)),
-            Err(error) => {
-                return Err(ConversionError::CorruptInput {
-                    message: error.to_string(),
-                });
-            }
-        };
-        let input = utf8(payload, &request.source)?;
-        let records =
-            parse_records(input, delimiter, limits).map_err(parse_failure_to_conversion)?;
-        document_from_records(records, delimiter)
+        convert_csv_bytes(request, &bytes, limits)
     }
+}
+
+pub(crate) fn convert_csv_bytes(
+    request: &ConversionRequest,
+    bytes: &[u8],
+    limits: &StructuredLimits,
+) -> Result<Document, ConversionError> {
+    limits.validate()?;
+    utf8(bytes, &request.source)?;
+    ensure_format(request, bytes, StructuredFormat::Csv, limits)?;
+    let payload = strip_utf8_bom(bytes);
+    let delimiter = match detect_delimiter_with_limits(payload, limits) {
+        Ok(delimiter) => delimiter,
+        Err(DelimiterDetectionError::NoDelimiter) => b',',
+        Err(DelimiterDetectionError::LimitExceeded {
+            limit,
+            actual,
+            maximum,
+        }) => return Err(limit_exceeded(limit, actual, maximum)),
+        Err(error) => {
+            return Err(ConversionError::CorruptInput {
+                message: error.to_string(),
+            });
+        }
+    };
+    let input = utf8(payload, &request.source)?;
+    let records = parse_records(input, delimiter, limits).map_err(parse_failure_to_conversion)?;
+    document_from_records(records, delimiter)
 }
 
 impl Converter for CsvConverter {

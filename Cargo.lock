@@ -1867,12 +1867,16 @@ dependencies = [
 name = "mdconvert-formats"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "mdconvert-core",
+ "mdconvert-html",
  "quick-xml",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]

@@ -46,6 +46,23 @@ pub(crate) fn parse_file(path: &Path, max_input_bytes: u64) -> Result<RcDom, Con
     Ok(dom)
 }
 
+pub(crate) fn parse_bytes(bytes: &[u8], max_input_bytes: u64) -> Result<RcDom, ConversionError> {
+    let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if actual > max_input_bytes {
+        return Err(ConversionError::LimitExceeded {
+            limit: "input_bytes",
+            actual,
+            maximum: max_input_bytes,
+        });
+    }
+    let input = std::str::from_utf8(bytes).map_err(|error| ConversionError::CorruptInput {
+        message: format!("HTML input is not valid UTF-8: {error}"),
+    })?;
+    let dom = parse_document(RcDom::default(), Default::default()).one(input);
+    validate_dom_budget(&dom.document, MAX_DOM_DEPTH, MAX_DOM_NODES)?;
+    Ok(dom)
+}
+
 fn validate_dom_budget(
     root: &Handle,
     max_depth: u64,

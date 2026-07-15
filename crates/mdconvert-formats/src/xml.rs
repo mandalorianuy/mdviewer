@@ -25,27 +25,36 @@ impl XmlConverter {
     ) -> Result<Document, ConversionError> {
         limits.validate()?;
         let bytes = read_input(request)?;
-        ensure_format(request, &bytes, StructuredFormat::Xml, limits)?;
-        let input = utf8(strip_utf8_bom(&bytes), &request.source)?;
-        let parsed = parse_xml(input, limits)?;
-        let mut properties = BTreeMap::new();
-        properties.insert("attribute_order".into(), "source".into());
-        properties.insert("namespace_policy".into(), "qualified_names".into());
-        properties.insert(
-            "indentation_policy".into(),
-            "discard_newline_whitespace_between_child_elements".into(),
-        );
-        Ok(Document {
-            metadata: DocumentMetadata {
-                source_format: Some("xml".into()),
-                properties,
-                ..DocumentMetadata::default()
-            },
-            blocks: vec![element_list(&parsed.roots)],
-            assets: Vec::new(),
-            warnings: Vec::new(),
-        })
+        convert_xml_bytes(request, &bytes, limits)
     }
+}
+
+pub(crate) fn convert_xml_bytes(
+    request: &ConversionRequest,
+    bytes: &[u8],
+    limits: &StructuredLimits,
+) -> Result<Document, ConversionError> {
+    limits.validate()?;
+    ensure_format(request, bytes, StructuredFormat::Xml, limits)?;
+    let input = utf8(strip_utf8_bom(bytes), &request.source)?;
+    let parsed = parse_xml(input, limits)?;
+    let mut properties = BTreeMap::new();
+    properties.insert("attribute_order".into(), "source".into());
+    properties.insert("namespace_policy".into(), "qualified_names".into());
+    properties.insert(
+        "indentation_policy".into(),
+        "discard_newline_whitespace_between_child_elements".into(),
+    );
+    Ok(Document {
+        metadata: DocumentMetadata {
+            source_format: Some("xml".into()),
+            properties,
+            ..DocumentMetadata::default()
+        },
+        blocks: vec![element_list(&parsed.roots)],
+        assets: Vec::new(),
+        warnings: Vec::new(),
+    })
 }
 
 impl Converter for XmlConverter {
@@ -66,10 +75,93 @@ pub(crate) fn validate_xml_candidate(
 }
 
 #[derive(Debug)]
-struct XmlNode {
-    name: String,
-    attributes: Vec<(String, String)>,
-    content: Vec<XmlContent>,
+pub(crate) struct XmlNode {
+    pub(crate) name: String,
+    pub(crate) attributes: Vec<(String, String)>,
+    pub(crate) content: Vec<XmlContent>,
+}
+
+impl XmlNode {
+    pub(crate) fn local_name(&self) -> &str {
+        self.name
+            .rsplit_once(':')
+            .map_or(&self.name, |(_, local)| local)
+    }
+
+    pub(crate) fn attr(&self, wanted: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(name, _)| {
+                name == wanted
+                    || name
+                        .rsplit_once(':')
+                        .is_some_and(|(_, local)| local == wanted)
+            })
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub(crate) fn attr_prefixed(&self, wanted_local: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(name, _)| {
+                name.rsplit_once(':')
+                    .is_some_and(|(_, local)| local == wanted_local)
+            })
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub(crate) fn children(&self) -> impl Iterator<Item = &XmlNode> {
+        self.content.iter().filter_map(|content| match content {
+            XmlContent::Element(node) => Some(node),
+            XmlContent::Text(_) => None,
+        })
+    }
+
+    pub(crate) fn child(&self, wanted: &str) -> Option<&XmlNode> {
+        self.children().find(|node| node.local_name() == wanted)
+    }
+
+    pub(crate) fn descendants<'a>(&'a self, wanted: &'a str) -> Descendants<'a> {
+        let mut stack: Vec<_> = self.children().collect();
+        stack.reverse();
+        Descendants { stack, wanted }
+    }
+
+    pub(crate) fn text(&self) -> String {
+        let mut output = String::new();
+        self.append_text(&mut output);
+        output
+    }
+
+    fn append_text(&self, output: &mut String) {
+        for content in &self.content {
+            match content {
+                XmlContent::Text(text) => output.push_str(text),
+                XmlContent::Element(child) => child.append_text(output),
+            }
+        }
+    }
+}
+
+pub(crate) struct Descendants<'a> {
+    stack: Vec<&'a XmlNode>,
+    wanted: &'a str,
+}
+
+impl<'a> Iterator for Descendants<'a> {
+    type Item = &'a XmlNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(node) = self.stack.pop() {
+            let mut children: Vec<_> = node.children().collect();
+            children.reverse();
+            self.stack.extend(children);
+            if node.local_name() == self.wanted {
+                return Some(node);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -85,13 +177,13 @@ struct NamespaceBinding {
 }
 
 #[derive(Debug)]
-enum XmlContent {
+pub(crate) enum XmlContent {
     Text(String),
     Element(XmlNode),
 }
 
-struct ParsedXml {
-    roots: Vec<XmlNode>,
+pub(crate) struct ParsedXml {
+    pub(crate) roots: Vec<XmlNode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,7 +304,10 @@ impl<'a> XmlBudget<'a> {
     }
 }
 
-fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, ConversionError> {
+pub(crate) fn parse_xml(
+    input: &str,
+    limits: &StructuredLimits,
+) -> Result<ParsedXml, ConversionError> {
     validate_xml_chars(input, "document")?;
     let mut reader = Reader::from_str(input);
     reader.config_mut().enable_all_checks(true);

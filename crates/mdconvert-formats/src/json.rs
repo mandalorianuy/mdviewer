@@ -30,47 +30,56 @@ impl JsonConverter {
     ) -> Result<Document, ConversionError> {
         limits.validate()?;
         let bytes = read_input(request)?;
-        ensure_format(request, &bytes, StructuredFormat::Json, limits)?;
-        let input = utf8(strip_utf8_bom(&bytes), &request.source)?;
-        if contains_reserved_number_key(input) {
-            return Err(ConversionError::CorruptInput {
-                message: format!(
-                    "JSON object key {SERDE_JSON_NUMBER_TOKEN:?} is reserved by the exact-number parser"
-                ),
-            });
-        }
-        enforce_nesting_limit(input, limits.max_json_depth)?;
-        let mut deserializer = serde_json::Deserializer::from_str(input);
-        deserializer.disable_recursion_limit();
-        let mut budget = JsonBudget::new(limits);
-        let parsed = JsonSeed {
-            budget: &mut budget,
-        }
-        .deserialize(&mut deserializer);
-        let value = match parsed {
-            Ok(value) => value,
-            Err(error) => {
-                if let Some(exceeded) = budget.exceeded {
-                    return Err(exceeded.into_conversion());
-                }
-                return Err(json_error(error));
-            }
-        };
-        deserializer.end().map_err(json_error)?;
-
-        let mut properties = BTreeMap::new();
-        properties.insert("object_key_order".into(), "source".into());
-        Ok(Document {
-            metadata: DocumentMetadata {
-                source_format: Some("json".into()),
-                properties,
-                ..DocumentMetadata::default()
-            },
-            blocks: value_blocks(&value),
-            assets: Vec::new(),
-            warnings: Vec::new(),
-        })
+        convert_json_bytes(request, &bytes, limits)
     }
+}
+
+pub(crate) fn convert_json_bytes(
+    request: &ConversionRequest,
+    bytes: &[u8],
+    limits: &StructuredLimits,
+) -> Result<Document, ConversionError> {
+    limits.validate()?;
+    ensure_format(request, bytes, StructuredFormat::Json, limits)?;
+    let input = utf8(strip_utf8_bom(bytes), &request.source)?;
+    if contains_reserved_number_key(input) {
+        return Err(ConversionError::CorruptInput {
+            message: format!(
+                "JSON object key {SERDE_JSON_NUMBER_TOKEN:?} is reserved by the exact-number parser"
+            ),
+        });
+    }
+    enforce_nesting_limit(input, limits.max_json_depth)?;
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    deserializer.disable_recursion_limit();
+    let mut budget = JsonBudget::new(limits);
+    let parsed = JsonSeed {
+        budget: &mut budget,
+    }
+    .deserialize(&mut deserializer);
+    let value = match parsed {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(exceeded) = budget.exceeded {
+                return Err(exceeded.into_conversion());
+            }
+            return Err(json_error(error));
+        }
+    };
+    deserializer.end().map_err(json_error)?;
+
+    let mut properties = BTreeMap::new();
+    properties.insert("object_key_order".into(), "source".into());
+    Ok(Document {
+        metadata: DocumentMetadata {
+            source_format: Some("json".into()),
+            properties,
+            ..DocumentMetadata::default()
+        },
+        blocks: value_blocks(&value),
+        assets: Vec::new(),
+        warnings: Vec::new(),
+    })
 }
 
 impl Converter for JsonConverter {
