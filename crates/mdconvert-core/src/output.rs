@@ -256,6 +256,10 @@ trait FsOps {
         Ok(())
     }
 
+    fn before_lock_identity(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
     fn before_lock_release(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }
@@ -561,8 +565,20 @@ impl TargetLock {
                 return Err(io_error("acquire output lock", &paths.lock_path, source));
             }
         };
-        let identity = LockFileIdentity::from_file(&file)
-            .map_err(|source| io_error("identify output lock", &paths.lock_path, source))?;
+        let identity = match fs_ops
+            .before_lock_identity(&paths.lock_path)
+            .and_then(|()| LockFileIdentity::from_file(&file))
+        {
+            Ok(identity) => identity,
+            Err(source) => {
+                return Err(unidentified_lock_error(
+                    &file,
+                    &paths.lock_path,
+                    &paths.parent,
+                    source,
+                ));
+            }
+        };
         let mut lock = Self {
             path: paths.lock_path.clone(),
             parent: paths.parent.clone(),
@@ -695,6 +711,29 @@ impl Drop for TargetLock {
             let _ = fs::remove_file(&self.path);
             let _ = sync_directory_raw(&self.parent);
         }
+    }
+}
+
+fn unidentified_lock_error(
+    file: &File,
+    path: &Path,
+    parent: &Path,
+    source: io::Error,
+) -> OutputError {
+    let file_sync = file
+        .sync_all()
+        .err()
+        .map(|error| format!("; lock fsync also failed: {error}"))
+        .unwrap_or_default();
+    let parent_sync = sync_directory_raw(parent)
+        .err()
+        .map(|error| format!("; parent fsync also failed: {error}"))
+        .unwrap_or_default();
+    OutputError::TransactionFailed {
+        message: format!(
+            "could not establish identity for newly-created output lock at {}; the unverified lock was retained and manual recovery/removal is required: {source}{file_sync}{parent_sync}",
+            path.display()
+        ),
     }
 }
 
@@ -1424,6 +1463,7 @@ mod tests {
         ReplaceLateMarkdown,
         ReplaceLockBeforeRelease,
         ReplaceLockDuringAcquireCleanup,
+        FailLockIdentityQuery,
     }
 
     struct TestFs {
@@ -1544,6 +1584,13 @@ mod tests {
                 let nonce = fs::read(path)?;
                 fs::remove_file(path)?;
                 fs::write(path, nonce)?;
+            }
+            Ok(())
+        }
+
+        fn before_lock_identity(&self, _path: &Path) -> io::Result<()> {
+            if self.hook == Hook::FailLockIdentityQuery {
+                return Err(io::Error::other("injected lock identity query failure"));
             }
             Ok(())
         }
@@ -1674,6 +1721,45 @@ mod tests {
             "unexpected second publication error: {second_error:?}"
         );
         assert_eq!(fs::read(&lock_path).unwrap(), b"foreign acquisition lock");
+    }
+
+    #[test]
+    fn identity_query_failure_retains_absolute_lock_for_manual_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let output_target = target(directory.path(), OverwritePolicy::Deny);
+
+        let error = publish_with_fs(
+            &document("new.png", b"new"),
+            &output_target,
+            &NeverCancel,
+            &TestFs::new(&[], Hook::FailLockIdentityQuery),
+        )
+        .unwrap_err();
+        let absolute_lock_path = fs::canonicalize(directory.path())
+            .unwrap()
+            .join(".foo.md.mdviewer.lock");
+        let OutputError::TransactionFailed { message } = error else {
+            panic!("expected transaction failure, got {error:?}");
+        };
+
+        assert!(message.contains(&absolute_lock_path.display().to_string()));
+        assert!(message.contains("manual recovery/removal is required"));
+        assert!(absolute_lock_path.is_file());
+        assert!(!directory.path().join("foo.md").exists());
+        assert!(!directory.path().join("foo.assets").exists());
+
+        let requested_lock_path = directory.path().join(".foo.md.mdviewer.lock");
+        let second_error = publish(
+            &document("next.png", b"next"),
+            &target(directory.path(), OverwritePolicy::Deny),
+            &NeverCancel,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(second_error, OutputError::OutputExists(ref path) if path == &requested_lock_path),
+            "unexpected second publication error: {second_error:?}"
+        );
+        fs::remove_file(absolute_lock_path).unwrap();
     }
 
     #[test]
