@@ -4,6 +4,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/mdconvert-core",
     "crates/mdconvert-html",
+    "crates/mdconvert-pdf",
 ]
 # Task 14 adds platform/macos/* when the PDF workflow crate exists.
 
