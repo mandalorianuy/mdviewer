@@ -262,6 +262,36 @@ fn matching_extension_resolves_valid_polyglots_without_hiding_real_conflicts() {
 }
 
 #[test]
+fn csv_delimiter_ties_are_arbitrated_with_json_and_xml_candidates() {
+    let tied_xml = b"<r>a,b;c</r>";
+    assert_eq!(
+        detect_format(PathBuf::from("tie.xml").as_path(), tied_xml),
+        Ok(StructuredFormat::Xml)
+    );
+    assert!(matches!(
+        detect_format(PathBuf::from("tie.data").as_path(), tied_xml),
+        Err(DetectionError::Ambiguous { candidates })
+            if candidates == vec![StructuredFormat::Csv, StructuredFormat::Xml]
+    ));
+    assert!(matches!(
+        detect_format(PathBuf::from("tie.csv").as_path(), tied_xml),
+        Err(DetectionError::Ambiguous { candidates })
+            if candidates == vec![StructuredFormat::Csv, StructuredFormat::Xml]
+    ));
+    assert!(matches!(
+        detect_format(PathBuf::from("tie.json").as_path(), tied_xml),
+        Err(DetectionError::Conflict {
+            extension: StructuredFormat::Json,
+            signatures,
+        }) if signatures == vec![StructuredFormat::Csv, StructuredFormat::Xml]
+    ));
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    convert_temporary(&directory, "tie.xml", tied_xml, &XmlConverter)
+        .expect("XML converter wins when its extension corroborates tied CSV content");
+}
+
+#[test]
 fn csv_quote_and_record_grammar_is_strict() {
     let directory = tempfile::tempdir().expect("temporary directory");
     for (name, input) in [
@@ -561,6 +591,107 @@ fn xml_enforces_declaration_and_qname_grammar() {
         convert_temporary(&directory, name, input, &XmlConverter)
             .unwrap_or_else(|error| panic!("{name} should convert: {error}"));
     }
+}
+
+#[test]
+fn xml_enforces_namespace_scope_and_expanded_attribute_names() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    for (name, input) in [
+        ("undeclared-element.xml", b"<p:root/>".as_slice()),
+        ("undeclared-attribute.xml", br#"<root p:a="x"/>"#.as_slice()),
+        (
+            "empty-prefixed-binding.xml",
+            br#"<p:root xmlns:p=""/>"#.as_slice(),
+        ),
+        (
+            "duplicate-expanded-attribute.xml",
+            br#"<root xmlns:a="urn:same" xmlns:b="urn:same" a:x="1" b:x="2"/>"#.as_slice(),
+        ),
+        (
+            "wrong-xml-binding.xml",
+            br#"<root xmlns:xml="urn:wrong"/>"#.as_slice(),
+        ),
+        (
+            "reserved-xml-case-prefix.xml",
+            br#"<root xmlns:XML="urn:wrong"/>"#.as_slice(),
+        ),
+        (
+            "reserved-xml-leading-prefix.xml",
+            br#"<root xmlns:xmlfuture="urn:wrong"/>"#.as_slice(),
+        ),
+        (
+            "xml-uri-other-prefix.xml",
+            br#"<root xmlns:p="http://www.w3.org/XML/1998/namespace"/>"#.as_slice(),
+        ),
+        (
+            "xmlns-prefix-binding.xml",
+            br#"<root xmlns:xmlns="urn:wrong"/>"#.as_slice(),
+        ),
+        (
+            "xmlns-uri-binding.xml",
+            br#"<root xmlns:p="http://www.w3.org/2000/xmlns/"/>"#.as_slice(),
+        ),
+    ] {
+        assert!(
+            matches!(
+                convert_temporary(&directory, name, input, &XmlConverter),
+                Err(ConversionError::CorruptInput { .. })
+            ),
+            "{name} must fail"
+        );
+    }
+
+    for (name, input) in [
+        (
+            "inherited-prefix.xml",
+            br#"<p:root xmlns:p="urn:p"><p:child p:a="x"/></p:root>"#.as_slice(),
+        ),
+        (
+            "inherited-default.xml",
+            br#"<root xmlns="urn:default"><child><leaf/></child></root>"#.as_slice(),
+        ),
+        (
+            "attribute-default-semantics.xml",
+            br#"<root xmlns="urn:default" xmlns:p="urn:default" a="1" p:a="2"/>"#.as_slice(),
+        ),
+        (
+            "namespace-shadowing.xml",
+            br#"<p:root xmlns:p="urn:outer"><p:child xmlns:p="urn:inner" p:a="x"/></p:root>"#
+                .as_slice(),
+        ),
+        (
+            "default-namespace-undeclaration.xml",
+            br#"<root xmlns="urn:outer"><child xmlns=""><leaf/></child></root>"#.as_slice(),
+        ),
+        (
+            "reserved-xml-binding.xml",
+            br#"<root xmlns:xml="http://www.w3.org/XML/1998/namespace" xml:lang="en"/>"#.as_slice(),
+        ),
+    ] {
+        convert_temporary(&directory, name, input, &XmlConverter)
+            .unwrap_or_else(|error| panic!("{name} should convert: {error}"));
+    }
+}
+
+#[test]
+fn xml_processing_instruction_targets_are_xml_names() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    assert!(matches!(
+        convert_temporary(
+            &directory,
+            "invalid-pi.xml",
+            b"<?1bad value?><root/>",
+            &XmlConverter,
+        ),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+    convert_temporary(
+        &directory,
+        "unicode-pi.xml",
+        "<?π-name value?><root/>".as_bytes(),
+        &XmlConverter,
+    )
+    .expect("valid Unicode XML Name PI target converts");
 }
 
 #[test]

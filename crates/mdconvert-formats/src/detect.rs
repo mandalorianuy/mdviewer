@@ -66,6 +66,7 @@ pub(crate) fn detect_format_with_limits(
     let extension = StructuredFormat::from_extension(path);
     let mut candidates = Vec::new();
     let mut first_limit = None;
+    let mut csv_delimiter_ambiguous = false;
 
     match validate_json_candidate(input, limits) {
         Ok(true) => candidates.push(StructuredFormat::Json),
@@ -80,9 +81,8 @@ pub(crate) fn detect_format_with_limits(
     match detect_delimiter_with_limits(bytes, limits) {
         Ok(_) => candidates.push(StructuredFormat::Csv),
         Err(DelimiterDetectionError::Ambiguous { .. }) => {
-            return Err(DetectionError::Ambiguous {
-                candidates: vec![StructuredFormat::Csv],
-            });
+            csv_delimiter_ambiguous = true;
+            candidates.push(StructuredFormat::Csv);
         }
         Err(DelimiterDetectionError::LimitExceeded {
             limit,
@@ -117,12 +117,20 @@ pub(crate) fn detect_format_with_limits(
             }
         }
         _ => match extension {
-            Some(extension) if candidates.contains(&extension) => Ok(extension),
+            Some(extension)
+                if candidates.contains(&extension)
+                    && !(extension == StructuredFormat::Csv && csv_delimiter_ambiguous) =>
+            {
+                Ok(extension)
+            }
+            Some(StructuredFormat::Csv) if csv_delimiter_ambiguous => {
+                Err(DetectionError::Ambiguous { candidates })
+            }
             Some(extension) => Err(DetectionError::Conflict {
                 extension,
                 signatures: candidates,
             }),
-            None if candidates.len() == 1 => Ok(candidates[0]),
+            None if candidates.len() == 1 && !csv_delimiter_ambiguous => Ok(candidates[0]),
             None => Err(DetectionError::Ambiguous { candidates }),
         },
     }

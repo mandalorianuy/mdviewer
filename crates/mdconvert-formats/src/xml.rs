@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use mdconvert_core::{
     Block, ConversionError, ConversionRequest, Converter, Document, DocumentMetadata, Inline,
@@ -70,6 +70,18 @@ struct XmlNode {
     name: String,
     attributes: Vec<(String, String)>,
     content: Vec<XmlContent>,
+}
+
+#[derive(Debug)]
+struct XmlFrame {
+    node: XmlNode,
+    namespace_bindings: Vec<NamespaceBinding>,
+}
+
+#[derive(Debug)]
+struct NamespaceBinding {
+    prefix: String,
+    uri: String,
 }
 
 #[derive(Debug)]
@@ -236,7 +248,8 @@ fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, Conver
                 }
                 check_depth(stack.len() + 1, limits)?;
                 budget.add_node()?;
-                stack.push(node_from_start(&reader, &start, &mut budget)?);
+                let frame = frame_from_start(&reader, &start, &mut budget, &stack)?;
+                stack.push(frame);
             }
             Event::Empty(start) => {
                 if phase == DocumentPhase::Epilog {
@@ -248,11 +261,8 @@ fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, Conver
                 }
                 check_depth(stack.len() + 1, limits)?;
                 budget.add_node()?;
-                append_node(
-                    node_from_start(&reader, &start, &mut budget)?,
-                    &mut stack,
-                    &mut roots,
-                );
+                let frame = frame_from_start(&reader, &start, &mut budget, &stack)?;
+                append_node(frame.node, &mut stack, &mut roots);
                 if stack.is_empty() {
                     phase = DocumentPhase::Epilog;
                 }
@@ -261,10 +271,10 @@ fn parse_xml(input: &str, limits: &StructuredLimits) -> Result<ParsedXml, Conver
                 if phase != DocumentPhase::Root {
                     return corrupt("XML closing element is outside the root element");
                 }
-                let node = stack.pop().ok_or_else(|| ConversionError::CorruptInput {
+                let frame = stack.pop().ok_or_else(|| ConversionError::CorruptInput {
                     message: "XML closing element has no matching start element".into(),
                 })?;
-                append_node(node, &mut stack, &mut roots);
+                append_node(frame.node, &mut stack, &mut roots);
                 if stack.is_empty() {
                     phase = DocumentPhase::Epilog;
                 }
@@ -470,7 +480,17 @@ fn is_xml_space(byte: u8) -> bool {
 }
 
 fn validate_processing_instruction(instruction: &BytesPI<'_>) -> Result<(), ConversionError> {
-    if instruction.target().eq_ignore_ascii_case(b"xml") {
+    let target = std::str::from_utf8(instruction.target()).map_err(|error| {
+        ConversionError::CorruptInput {
+            message: format!("processing instruction target is not UTF-8: {error}"),
+        }
+    })?;
+    if !valid_xml_name(target) {
+        return corrupt(format!(
+            "processing instruction target {target:?} is not an XML Name"
+        ));
+    }
+    if target.eq_ignore_ascii_case("xml") {
         return corrupt("processing instruction target XML is reserved");
     }
     Ok(())
@@ -513,6 +533,14 @@ fn valid_ncname(name: &str) -> bool {
     characters.next().is_some_and(is_name_start_character) && characters.all(is_name_character)
 }
 
+fn valid_xml_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == ':' || is_name_start_character(character))
+        && characters.all(|character| character == ':' || is_name_character(character))
+}
+
 fn is_name_start_character(character: char) -> bool {
     matches!(character,
         'A'..='Z' | '_' | 'a'..='z'
@@ -533,21 +561,34 @@ fn is_name_character(character: char) -> bool {
         )
 }
 
-fn validate_namespace_declaration(name: &str, value: &str) -> Result<(), ConversionError> {
+fn validate_namespace_binding(prefix: &str, value: &str) -> Result<(), ConversionError> {
     const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
     const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
-    let declared_prefix = name.strip_prefix("xmlns:");
-    if let Some(prefix) = declared_prefix {
-        if prefix == "xmlns" || value == XMLNS_NAMESPACE {
-            return corrupt("the XMLNS namespace cannot be rebound");
-        }
-        if (prefix == "xml") != (value == XML_NAMESPACE) {
-            return corrupt("the XML prefix must bind only to its reserved namespace");
-        }
-    } else if name == "xmlns" && (value == XML_NAMESPACE || value == XMLNS_NAMESPACE) {
+    if prefix == "xmlns" || value == XMLNS_NAMESPACE {
+        return corrupt("the XMLNS namespace cannot be rebound");
+    }
+    if starts_with_xml_case_insensitive(prefix) && prefix != "xml" {
+        return corrupt(format!(
+            "namespace prefix {prefix:?} is reserved for XML specifications"
+        ));
+    }
+    if !prefix.is_empty() && value.is_empty() {
+        return corrupt("a prefixed namespace binding cannot have an empty URI");
+    }
+    if (prefix == "xml") != (value == XML_NAMESPACE) {
+        return corrupt("the XML prefix must bind only to its reserved namespace");
+    }
+    if prefix.is_empty() && (value == XML_NAMESPACE || value == XMLNS_NAMESPACE) {
         return corrupt("reserved XML namespaces cannot be the default namespace");
     }
     Ok(())
+}
+
+fn starts_with_xml_case_insensitive(value: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"xml"))
 }
 
 fn validate_xml_chars(value: &str, context: &str) -> Result<(), ConversionError> {
@@ -599,11 +640,12 @@ fn decode_general_reference(name: &str) -> Result<char, ConversionError> {
     Ok(character)
 }
 
-fn node_from_start(
+fn frame_from_start(
     reader: &Reader<&[u8]>,
     start: &BytesStart<'_>,
     budget: &mut XmlBudget<'_>,
-) -> Result<XmlNode, ConversionError> {
+    ancestors: &[XmlFrame],
+) -> Result<XmlFrame, ConversionError> {
     let name = std::str::from_utf8(start.name().as_ref())
         .map_err(|error| ConversionError::CorruptInput {
             message: format!("XML element name is not UTF-8: {error}"),
@@ -641,33 +683,137 @@ fn node_from_start(
             })?
             .into_owned();
         validate_xml_chars(&value, "attribute value")?;
-        validate_namespace_declaration(&key, &value)?;
         budget.add_text(value.len())?;
         attributes.push((key, value));
     }
-    Ok(XmlNode {
-        name,
-        attributes,
-        content: Vec::new(),
+
+    let namespace_bindings = namespace_bindings(&attributes)?;
+    validate_element_namespace(&name, &namespace_bindings, ancestors)?;
+    validate_expanded_attribute_names(&attributes, &namespace_bindings, ancestors)?;
+    Ok(XmlFrame {
+        node: XmlNode {
+            name,
+            attributes,
+            content: Vec::new(),
+        },
+        namespace_bindings,
     })
 }
 
-fn append_node(node: XmlNode, stack: &mut [XmlNode], roots: &mut Vec<XmlNode>) {
+fn namespace_bindings(
+    attributes: &[(String, String)],
+) -> Result<Vec<NamespaceBinding>, ConversionError> {
+    let mut bindings = Vec::new();
+    let mut declared = HashSet::new();
+    for (name, value) in attributes {
+        let prefix = if name == "xmlns" {
+            Some("")
+        } else {
+            name.strip_prefix("xmlns:")
+        };
+        let Some(prefix) = prefix else {
+            continue;
+        };
+        if !declared.insert(prefix) {
+            return corrupt(format!(
+                "namespace prefix {prefix:?} is declared more than once on an element"
+            ));
+        }
+        validate_namespace_binding(prefix, value)?;
+        bindings.push(NamespaceBinding {
+            prefix: prefix.to_owned(),
+            uri: value.clone(),
+        });
+    }
+    Ok(bindings)
+}
+
+fn validate_element_namespace(
+    name: &str,
+    current: &[NamespaceBinding],
+    ancestors: &[XmlFrame],
+) -> Result<(), ConversionError> {
+    if let Some((prefix, _)) = name.split_once(':')
+        && resolve_namespace(prefix, current, ancestors).is_none()
+    {
+        return corrupt(format!(
+            "element prefix {prefix:?} is not declared in scope"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_expanded_attribute_names(
+    attributes: &[(String, String)],
+    current: &[NamespaceBinding],
+    ancestors: &[XmlFrame],
+) -> Result<(), ConversionError> {
+    let mut expanded = HashSet::new();
+    for (name, _) in attributes {
+        if name == "xmlns" || name.starts_with("xmlns:") {
+            continue;
+        }
+        let (namespace, local) = if let Some((prefix, local)) = name.split_once(':') {
+            let namespace = resolve_namespace(prefix, current, ancestors).ok_or_else(|| {
+                ConversionError::CorruptInput {
+                    message: format!("attribute prefix {prefix:?} is not declared in scope"),
+                }
+            })?;
+            (Some(namespace.to_owned()), local)
+        } else {
+            (None, name.as_str())
+        };
+        if !expanded.insert((namespace, local.to_owned())) {
+            return corrupt(format!(
+                "duplicate expanded XML attribute name for local name {local:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_namespace<'a>(
+    prefix: &str,
+    current: &'a [NamespaceBinding],
+    ancestors: &'a [XmlFrame],
+) -> Option<&'a str> {
+    const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+    if prefix == "xml" {
+        return Some(XML_NAMESPACE);
+    }
+    current
+        .iter()
+        .rev()
+        .find(|binding| binding.prefix == prefix)
+        .map(|binding| binding.uri.as_str())
+        .or_else(|| {
+            ancestors.iter().rev().find_map(|frame| {
+                frame
+                    .namespace_bindings
+                    .iter()
+                    .rev()
+                    .find(|binding| binding.prefix == prefix)
+                    .map(|binding| binding.uri.as_str())
+            })
+        })
+}
+
+fn append_node(node: XmlNode, stack: &mut [XmlFrame], roots: &mut Vec<XmlNode>) {
     if let Some(parent) = stack.last_mut() {
-        parent.content.push(XmlContent::Element(node));
+        parent.node.content.push(XmlContent::Element(node));
     } else {
         roots.push(node);
     }
 }
 
-fn append_text(text: String, stack: &mut [XmlNode]) {
+fn append_text(text: String, stack: &mut [XmlFrame]) {
     let parent = stack
         .last_mut()
         .expect("document grammar ensures text has an open element");
-    if let Some(XmlContent::Text(existing)) = parent.content.last_mut() {
+    if let Some(XmlContent::Text(existing)) = parent.node.content.last_mut() {
         existing.push_str(&text);
     } else {
-        parent.content.push(XmlContent::Text(text));
+        parent.node.content.push(XmlContent::Text(text));
     }
 }
 
