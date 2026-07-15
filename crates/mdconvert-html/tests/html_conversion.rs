@@ -36,6 +36,12 @@ fn emitted(document: &mdconvert_core::Document) -> String {
     .expect("shared emitter should render converted document")
 }
 
+fn convert_html(temp: &TempDir, html: &str) -> mdconvert_core::Document {
+    let source = temp.path().join("source.html");
+    fs::write(&source, html).unwrap();
+    HtmlConverter.convert(&request_for(source)).unwrap()
+}
+
 #[test]
 fn semantic_fixture_maps_dom_structure_and_uses_shared_golden() {
     let document = convert_fixture("semantic");
@@ -165,6 +171,182 @@ fn invalid_document_base_falls_back_to_request_source_url() {
         emitted(&document),
         "[Child](https://request.example/root/child)\n"
     );
+}
+
+#[test]
+fn table_and_code_extraction_exclude_invisible_descendants() {
+    let temp = TempDir::new().unwrap();
+    let document = convert_html(
+        &temp,
+        "<table><tr><td>visible</td><td hidden>hidden cell</td></tr><tr hidden><td>hidden row</td></tr><tr><td><span hidden>hidden span</span>last</td></tr></table><pre>before<script>script in pre</script><span hidden>hidden in pre</span>after</pre><p><code>one<script>script in code</script><span hidden>hidden in code</span>two</code></p>",
+    );
+
+    assert_eq!(
+        document.blocks,
+        vec![
+            Block::Table {
+                alignments: vec![Alignment::None],
+                rows: vec![
+                    vec![vec![Inline::Text("visible".into())]],
+                    vec![vec![Inline::Text("last".into())]],
+                ],
+            },
+            Block::Code {
+                language: None,
+                text: "beforeafter".into(),
+            },
+            Block::Paragraph {
+                content: vec![Inline::Code("onetwo".into())],
+            },
+        ]
+    );
+}
+
+#[test]
+fn excessive_dom_depth_returns_an_exact_typed_limit() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("deep.html");
+    let html = format!("{}text{}", "<div>".repeat(300), "</div>".repeat(300));
+    fs::write(&source, html).unwrap();
+
+    assert!(matches!(
+        HtmlConverter.convert(&request_for(source)),
+        Err(ConversionError::LimitExceeded {
+            limit: "html_dom_depth",
+            actual: 257,
+            maximum: 256,
+        })
+    ));
+}
+
+#[test]
+fn effective_base_uses_first_nonempty_href_and_resolves_relative_to_request() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.html");
+    fs::write(
+        &source,
+        "<base><base href='../assets/'><base href='https://ignored.test/'><p><a href='guide'>Guide</a></p>",
+    )
+    .unwrap();
+    let mut request = request_for(source);
+    request.source_url = Some(Url::parse("https://request.test/docs/page/").unwrap());
+
+    let document = HtmlConverter.convert(&request).unwrap();
+    assert_eq!(
+        emitted(&document),
+        "[Guide](https://request.test/docs/assets/guide)\n"
+    );
+}
+
+#[test]
+fn effective_base_controls_external_and_file_based_images() {
+    let external = TempDir::new().unwrap();
+    fs::write(external.path().join("same.png"), b"must not load").unwrap();
+    let external_document = convert_html(
+        &external,
+        "<base href='https://cdn.test/assets/'><img src='same.png' alt='Remote'>",
+    );
+    assert!(external_document.assets.is_empty());
+    assert_eq!(
+        external_document.blocks,
+        vec![Block::Paragraph {
+            content: vec![Inline::Text("Remote".into())],
+        }]
+    );
+    assert_eq!(
+        external_document
+            .warnings
+            .iter()
+            .map(|warning| warning.code.clone())
+            .collect::<Vec<_>>(),
+        vec![WarningCode::ExternalAssetSkipped]
+    );
+
+    let local = TempDir::new().unwrap();
+    fs::create_dir(local.path().join("assets")).unwrap();
+    fs::write(local.path().join("assets/local.png"), b"local").unwrap();
+    let local_document = convert_html(
+        &local,
+        "<base href='assets/'><img src='local.png' alt='Local'>",
+    );
+    assert_eq!(local_document.assets.len(), 1);
+    assert_eq!(local_document.assets[0].data, b"local");
+}
+
+#[test]
+fn inline_whitespace_is_normalized_across_nested_boundaries() {
+    let temp = TempDir::new().unwrap();
+    let document = convert_html(
+        &temp,
+        "<p>  Hello<strong> world</strong> and <em>friends </em><a href='x'> link</a>  </p>",
+    );
+
+    assert_eq!(
+        document.blocks,
+        vec![Block::Paragraph {
+            content: vec![
+                Inline::Text("Hello".into()),
+                Inline::Text(" ".into()),
+                Inline::Strong(vec![Inline::Text("world".into())]),
+                Inline::Text(" ".into()),
+                Inline::Text("and".into()),
+                Inline::Text(" ".into()),
+                Inline::Emphasis(vec![Inline::Text("friends".into())]),
+                Inline::Text(" ".into()),
+                Inline::Link {
+                    url: "x".into(),
+                    title: None,
+                    content: vec![Inline::Text("link".into())],
+                },
+            ],
+        }]
+    );
+    assert_eq!(
+        emitted(&document),
+        "Hello **world** and *friends* [link](x)\n"
+    );
+}
+
+#[test]
+fn invalid_and_external_images_use_exact_warning_taxonomy() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("note.txt"), b"not an image").unwrap();
+    fs::create_dir(temp.path().join("folder.png")).unwrap();
+    let outside = TempDir::new().unwrap();
+    let outside_path = outside.path().join("outside.png");
+    fs::write(&outside_path, b"outside").unwrap();
+    let outside_url = Url::from_file_path(&outside_path).unwrap();
+    let html = format!(
+        "<img alt='Missing'><img src='data:image/png;base64,%%%' alt='Malformed'><img src='data:text/plain,hello' alt='Unsupported data'><img src='note.txt' alt='Unsupported local'><img src='gone.png' alt='Gone'><img src='folder.png' alt='Folder'><img src='https://cdn.test/a.png' alt='Remote'><img src='{outside_url}' alt='Outside'><img>"
+    );
+    let document = convert_html(&temp, &html);
+
+    assert_eq!(
+        document
+            .warnings
+            .iter()
+            .map(|warning| warning.code.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            WarningCode::InvalidAssetSkipped,
+            WarningCode::InvalidAssetSkipped,
+            WarningCode::InvalidAssetSkipped,
+            WarningCode::InvalidAssetSkipped,
+            WarningCode::InvalidAssetSkipped,
+            WarningCode::InvalidAssetSkipped,
+            WarningCode::ExternalAssetSkipped,
+            WarningCode::ExternalAssetSkipped,
+            WarningCode::MissingImageAlt,
+            WarningCode::InvalidAssetSkipped,
+        ]
+    );
+    assert!(
+        document
+            .warnings
+            .iter()
+            .all(|warning| warning.page.is_none())
+    );
+    assert_eq!(document.blocks.len(), 8);
 }
 
 #[test]
