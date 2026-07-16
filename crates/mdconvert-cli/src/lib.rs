@@ -1216,6 +1216,7 @@ mod tests {
         assert!(!output.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_replacement_after_open_is_rejected_as_input_changed() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -1237,5 +1238,28 @@ mod tests {
                 .unwrap()
                 .contains("replacement bytes")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_replacement_after_open_is_blocked_by_the_input_handle() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let source = directory.path().join("source.html");
+        let original = b"<!doctype html><p>original bytes</p>";
+        fs::write(&source, original).unwrap();
+        let mut replacement_was_blocked = false;
+
+        let opened = read_local_input_with_hook(
+            &source,
+            ConversionLimits::default().max_input_bytes,
+            || {
+                replacement_was_blocked = fs::remove_file(&source).is_err();
+            },
+        )
+        .unwrap();
+
+        assert!(replacement_was_blocked);
+        assert_eq!(opened.bytes, original);
+        assert_eq!(fs::read(&source).unwrap(), original);
     }
 }

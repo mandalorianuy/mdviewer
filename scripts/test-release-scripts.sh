@@ -325,6 +325,8 @@ grep -q 'ubuntu-22.04' "$ROOT/.github/workflows/ci.yml" || fail "Linux CI lane i
 grep -q 'windows-latest' "$ROOT/.github/workflows/ci.yml" || fail "Windows CI lane is missing"
 grep -q 'macos-15' "$ROOT/.github/workflows/ci.yml" || fail "Apple Silicon CI lane is missing"
 grep -q -- '--no-bundle' "$ROOT/.github/workflows/ci.yml" || fail "portable Tauri smoke is missing"
+grep -q 'GITHUB_ENV' "$ROOT/.github/workflows/ci.yml" ||
+  fail "macOS CI must expose the verified PDFium runtime to later test steps"
 grep -q 'aarch64-apple-darwin' "$ROOT/.github/workflows/release-macos.yml" || fail "arm64 release target is missing"
 if grep -Eq 'x86_64-apple-darwin|universal-apple-darwin' "$ROOT/.github/workflows/release-macos.yml"; then
   fail "release workflow must not build Intel or universal artifacts"

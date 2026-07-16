@@ -210,10 +210,10 @@ pub fn run() {
     builder_with_pending_opened_files(pending_opened_files.clone())
         .build(tauri::generate_context!())
         .expect("MDViewer failed to build")
-        .run(move |app, event| {
+        .run(move |_app, _event| {
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Opened { urls } = event
-                && let Some(report) = route_opened_print_files(app, &pending_opened_files, &urls)
+            if let tauri::RunEvent::Opened { urls } = _event
+                && let Some(report) = route_opened_print_files(_app, &pending_opened_files, &urls)
             {
                 log_opened_print_report(&report);
             }

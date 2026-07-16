@@ -1,18 +1,22 @@
+use std::collections::BTreeMap;
+
+#[cfg(target_os = "macos")]
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
-use mdconvert_core::{
-    Block, ConversionError, ConversionRequest, Converter, DocumentMetadata, GfmOptions, Inline,
-    WarningCode, emit_gfm,
-};
+use mdconvert_core::{Block, ConversionError, DocumentMetadata, Inline, WarningCode};
+#[cfg(target_os = "macos")]
+use mdconvert_core::{ConversionRequest, Converter, GfmOptions, emit_gfm};
+#[cfg(target_os = "macos")]
+use mdconvert_pdf::PdfConverter;
 use mdconvert_pdf::{
-    HeuristicConfig, PdfConverter, RawDocument, RawGlyph, RawImage, RawLink, RawPage, RawRect,
-    RawRule, RawWord, RuleKind, reconstruct, reconstruct_with_config,
+    HeuristicConfig, RawDocument, RawGlyph, RawImage, RawLink, RawPage, RawRect, RawRule, RawWord,
+    RuleKind, reconstruct, reconstruct_with_config,
 };
 
+#[cfg(target_os = "macos")]
 fn workspace_path(relative: impl AsRef<Path>) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -1052,6 +1056,7 @@ fn rejects_non_finite_or_negative_thresholds_without_panicking() {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn pdf_converter_matches_shared_emitter_goldens_for_digital_layout_fixtures() {
     for fixture in [
@@ -1080,6 +1085,7 @@ fn pdf_converter_matches_shared_emitter_goldens_for_digital_layout_fixtures() {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn fixture_models_cover_columns_headings_lists_tables_chrome_images_and_links() {
     let convert = |name: &str| {
@@ -1157,6 +1163,7 @@ fn fixture_models_cover_columns_headings_lists_tables_chrome_images_and_links() 
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn scanned_fixture_reaches_task_7_ocr_required_through_pdf_converter() {
     let error = PdfConverter

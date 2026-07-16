@@ -60,6 +60,8 @@ jobs:
           ./scripts/fetch-pdfium.sh
           source scripts/release-common.sh
           verify_pdfium_receipt "$PWD"
+          printf 'PDFIUM_DYNAMIC_LIB_PATH=%s\n' \
+            "$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib" >> "$GITHUB_ENV"
       - name: Rust format and lint
         run: |
           cargo fmt --all -- --check

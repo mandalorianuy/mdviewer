@@ -14,6 +14,7 @@ use mdconvert_formats::{
     XlsxConverter, XmlConverter, ZipConverter,
 };
 use mdconvert_html::HtmlConverter;
+#[cfg(target_os = "macos")]
 use mdconvert_pdf::PdfConverter;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -207,6 +208,7 @@ fn human_warning_diagnostics_do_not_echo_authored_urls() {
 #[test]
 fn dispatches_every_local_v1_registry_format() {
     let fixtures = [
+        #[cfg(target_os = "macos")]
         ("pdf/digital-basic.pdf", "pdf"),
         ("html/semantic.html", "html"),
         ("formats/sample.csv", "csv"),
@@ -258,11 +260,14 @@ fn every_registry_converter_accepts_the_same_owned_bytes_after_source_removal() 
     }
 
     let temp = TestDir::new();
-    let (bytes, request) = removed_source(&temp, "pdf/digital-basic.pdf");
-    assert_eq!(
-        source_format(PdfConverter.convert_bytes(&bytes, &request).unwrap()),
-        "pdf"
-    );
+    #[cfg(target_os = "macos")]
+    {
+        let (bytes, request) = removed_source(&temp, "pdf/digital-basic.pdf");
+        assert_eq!(
+            source_format(PdfConverter.convert_bytes(&bytes, &request).unwrap()),
+            "pdf"
+        );
+    }
     let (bytes, request) = removed_source(&temp, "html/semantic.html");
     assert_eq!(
         source_format(HtmlConverter.convert_bytes(&bytes, &request).unwrap()),
@@ -583,6 +588,7 @@ fn preexisting_cancel_file_stops_before_conversion_and_leaves_no_partials() {
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn scanned_pdf_returns_ocr_required_without_outputs() {
     let temp = TestDir::new();
