@@ -7,7 +7,7 @@ pub mod output;
 
 pub use converter::Converter;
 pub use error::{ConversionError, EmitError, ModelError};
-pub use gfm::{GfmOptions, emit_gfm};
+pub use gfm::{GfmOptions, emit_gfm, emit_gfm_with_asset_prefix};
 pub use model::{
     Alignment, Asset, AssetId, Block, ConversionLimits, ConversionRequest, ConversionWarning,
     Document, DocumentMetadata, Inline, ListItem, WarningCode,

@@ -12,17 +12,6 @@ pub(crate) fn document_from_dom(
     dom: RcDom,
     request: &ConversionRequest,
 ) -> Result<Document, ConversionError> {
-    document_from_dom_with_asset_refs(dom, request, &HashMap::new())
-}
-
-pub(crate) fn document_from_dom_with_asset_refs(
-    dom: RcDom,
-    request: &ConversionRequest,
-    asset_refs: &HashMap<String, AssetId>,
-) -> Result<Document, ConversionError> {
-    let title = find_first_element(&dom.document, "title")
-        .map(|node| normalized_unfiltered_text(&node))
-        .filter(|value| !value.is_empty());
     let canonical_source = request
         .source
         .canonicalize()
@@ -30,6 +19,46 @@ pub(crate) fn document_from_dom_with_asset_refs(
             path: request.source.clone(),
             source,
         })?;
+    document_from_dom_at(dom, request, &HashMap::new(), canonical_source)
+}
+
+pub(crate) fn document_from_dom_bytes(
+    dom: RcDom,
+    request: &ConversionRequest,
+) -> Result<Document, ConversionError> {
+    document_from_dom_at(dom, request, &HashMap::new(), absolute_source(request)?)
+}
+
+pub(crate) fn document_from_dom_with_asset_refs(
+    dom: RcDom,
+    request: &ConversionRequest,
+    asset_refs: &HashMap<String, AssetId>,
+) -> Result<Document, ConversionError> {
+    document_from_dom_at(dom, request, asset_refs, absolute_source(request)?)
+}
+
+fn absolute_source(request: &ConversionRequest) -> Result<PathBuf, ConversionError> {
+    if request.source.is_absolute() {
+        Ok(request.source.clone())
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(&request.source))
+            .map_err(|source| ConversionError::Io {
+                path: request.source.clone(),
+                source,
+            })
+    }
+}
+
+fn document_from_dom_at(
+    dom: RcDom,
+    request: &ConversionRequest,
+    asset_refs: &HashMap<String, AssetId>,
+    canonical_source: PathBuf,
+) -> Result<Document, ConversionError> {
+    let title = find_first_element(&dom.document, "title")
+        .map(|node| normalized_unfiltered_text(&node))
+        .filter(|value| !value.is_empty());
     let canonical_parent = canonical_source
         .parent()
         .expect("a canonical file path has a parent")

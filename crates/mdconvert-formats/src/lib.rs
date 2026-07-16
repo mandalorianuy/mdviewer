@@ -184,6 +184,18 @@ fn read_input(request: &ConversionRequest) -> Result<Vec<u8>, ConversionError> {
     Ok(bytes)
 }
 
+fn ensure_input_bytes(request: &ConversionRequest, bytes: &[u8]) -> Result<(), ConversionError> {
+    let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if actual > request.limits.max_input_bytes {
+        return Err(ConversionError::LimitExceeded {
+            limit: "input_bytes",
+            actual,
+            maximum: request.limits.max_input_bytes,
+        });
+    }
+    Ok(())
+}
+
 fn utf8<'a>(bytes: &'a [u8], path: &Path) -> Result<&'a str, ConversionError> {
     std::str::from_utf8(bytes).map_err(|error| ConversionError::CorruptInput {
         message: format!("{} is not valid UTF-8: {error}", path.display()),

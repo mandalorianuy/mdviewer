@@ -18,6 +18,15 @@ use crate::{
 pub struct XmlConverter;
 
 impl XmlConverter {
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        crate::ensure_input_bytes(request, bytes)?;
+        convert_xml_bytes(request, bytes, &StructuredLimits::default())
+    }
+
     pub fn convert_with_limits(
         &self,
         request: &ConversionRequest,

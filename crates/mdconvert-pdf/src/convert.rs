@@ -8,12 +8,22 @@ use url::Url;
 
 use crate::{
     HeuristicConfig, RawDocument, RawImage, RawLink, RawPage, RawRect, RawRule, RuleKind,
-    extract_pdf,
+    extract_pdf, extract_pdf_bytes,
     layout::{Line, group_page_lines, intersects, line_position_cmp},
 };
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PdfConverter;
+
+impl PdfConverter {
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &mdconvert_core::ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        reconstruct(extract_pdf_bytes(bytes, request)?)
+    }
+}
 
 impl Converter for PdfConverter {
     fn convert(

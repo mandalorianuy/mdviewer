@@ -23,6 +23,15 @@ const SERDE_JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
 pub struct JsonConverter;
 
 impl JsonConverter {
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        crate::ensure_input_bytes(request, bytes)?;
+        convert_json_bytes(request, bytes, &StructuredLimits::default())
+    }
+
     pub fn convert_with_limits(
         &self,
         request: &ConversionRequest,

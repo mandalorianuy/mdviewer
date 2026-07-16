@@ -12,7 +12,7 @@ use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    ConversionWarning, Document, EmitError, GfmOptions, emit_gfm,
+    ConversionWarning, Document, EmitError, GfmOptions, emit_gfm_with_asset_prefix,
     manifest::{AssetManifest, MANIFEST_FILE_NAME, SCHEMA_VERSION, sha256_hex},
 };
 
@@ -100,15 +100,12 @@ fn publish_with_fs(
     let initial_outputs = inspect_existing_outputs(&paths)?;
     enforce_initial_policy(target.overwrite, &paths, &initial_outputs)?;
 
-    let mut rendered_document = document.clone();
-    for asset in &mut rendered_document.assets {
-        asset.file_name = format!("{}/{}", paths.assets_name, asset.file_name);
-    }
-    let markdown = emit_gfm(
-        &rendered_document,
+    let markdown = emit_gfm_with_asset_prefix(
+        document,
         &GfmOptions {
             final_newline: true,
         },
+        &paths.assets_name,
     )?;
 
     let staging = Builder::new()

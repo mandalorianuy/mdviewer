@@ -27,7 +27,18 @@ pub struct DocxConverter;
 
 impl Converter for DocxConverter {
     fn convert(&self, request: &ConversionRequest) -> Result<Document, ConversionError> {
-        let archive = Archive::open(request, &ArchiveLimits::default())?;
+        let bytes = crate::read_input(request)?;
+        self.convert_bytes(&bytes, request)
+    }
+}
+
+impl DocxConverter {
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        let archive = Archive::from_bytes(request, bytes, &ArchiveLimits::default())?;
         let content_types =
             authenticate_ooxml(&archive, "word/document.xml", DOCX_MAIN_CONTENT_TYPE)?;
         let document = parse_xml_bytes(

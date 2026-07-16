@@ -14,8 +14,21 @@ file in an existing directory. The CLI refuses an existing Markdown path, existi
 source/output alias, output assets directory that contains the source, unsafe path, or non-regular
 input. It never overwrites an existing output.
 
+Every path argument is syntax-checked before any filesystem lookup. UNC, network, device/verbatim,
+drive-relative, and foreign drive syntax are rejected as `unsafe_path`; platform network-mount
+prefixes are rejected too. Option values cannot be another `--flag`, and duplicate, missing, or
+unknown options are `invalid_arguments`. JSON diagnostics are enabled only by a standalone
+`--json`, never by text consumed as another option's value.
+
+The input is opened once with no-follow/reparse protection, checked as a regular file, bounded by
+the configured input limit, and read once. Detection and conversion use that same owned byte
+buffer. A handle whose size or modification metadata changes while it is read fails as
+`input_changed`; the CLI never reopens the source for a format-specific converter.
+
 The local v1 registry contains PDF, HTML, CSV, JSON, XML, ZIP, EPUB, DOCX, PPTX, XLSX, PNG, and
-JPEG. Dispatch combines the registry extension with validated content. Unrecognized, ambiguous,
+JPEG. Dispatch combines the registry extension with validated content. HTML is recognized through
+the HTML5 tokenizer, including fragments, custom elements, and comments, rather than a tag
+allowlist. Strong binary signatures still take precedence. Unrecognized, ambiguous,
 and conflicting inputs fail with `unknown_format`, `ambiguous_format`, and `format_conflict`
 respectively. An extensionless ZIP container is intentionally ambiguous because its package type
 cannot be selected safely without an explicit `.zip`, `.epub`, `.docx`, `.pptx`, or `.xlsx`
@@ -83,10 +96,10 @@ Failure writes one envelope to stderr and leaves stdout empty:
 
 Stable error codes are grouped by boundary:
 
-- Command and path policy: `invalid_arguments`, `invalid_output`, `invalid_assets_path`,
-  `source_output_alias`.
-- Local input and detection: `network_input_unsupported`, `input_not_found`, `input_unreadable`,
-  `input_symlink`, `input_not_regular`, `invalid_input`, `unknown_format`, `ambiguous_format`,
+- Command and path policy: `invalid_arguments`, `unsafe_path`, `invalid_output`,
+  `invalid_assets_path`, `source_output_alias`.
+- Local input and detection: `input_not_found`, `input_unreadable`, `input_symlink`,
+  `input_not_regular`, `input_changed`, `invalid_input`, `unknown_format`, `ambiguous_format`,
   `format_conflict`.
 - Conversion: `invalid_request`, `input_io`, `unsupported_format`, `unsupported_input`,
   `corrupt_input`, `encrypted_input`, `limit_exceeded`, `ocr_required`, `pdfium_unavailable`,
@@ -110,7 +123,7 @@ the stable `cancelled` error code, exits with 6, and leaves no Markdown or asset
 | ---: | --- |
 | 0 | Conversion and publication succeeded |
 | 2 | Invalid command, argument, output path, or assets policy |
-| 3 | Missing/invalid local input or unsafe format detection |
-| 4 | Converter failure, including PDFium, encryption, limits, or OCR requirement |
+| 3 | Missing/invalid local input or unknown, ambiguous, or conflicting format detection |
+| 4 | Converter or detection-limit failure, including PDFium, encryption, limits, or OCR requirement |
 | 5 | Existing/invalid output or transactional publication failure |
 | 6 | Cancellation requested |

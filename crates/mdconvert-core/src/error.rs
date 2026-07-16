@@ -49,6 +49,8 @@ pub enum ConversionError {
     },
     #[error("OCR is required to convert this input")]
     OcrRequired,
+    #[error("the pinned PDFium runtime is unavailable")]
+    PdfiumUnavailable,
     #[error("conversion failed: {message}")]
     ConversionFailed { message: String },
 }
@@ -64,6 +66,7 @@ impl ConversionError {
             Self::EncryptedInput => "encrypted_input",
             Self::LimitExceeded { .. } => "limit_exceeded",
             Self::OcrRequired => "ocr_required",
+            Self::PdfiumUnavailable => "pdfium_unavailable",
             Self::ConversionFailed { .. } => "conversion_failed",
         }
     }

@@ -448,6 +448,17 @@ fn conversion_errors_expose_stable_codes() {
 }
 
 #[test]
+fn pdfium_unavailable_has_a_dedicated_stable_error_code() {
+    let error = ConversionError::PdfiumUnavailable;
+
+    assert_eq!(error.code(), "pdfium_unavailable");
+    assert_eq!(
+        error.to_string(),
+        "the pinned PDFium runtime is unavailable"
+    );
+}
+
+#[test]
 fn conversion_errors_preserve_invalid_request_and_io_sources() {
     let invalid_request = ConversionError::from(ModelError::EmptySourcePath);
     assert!(std::error::Error::source(&invalid_request).is_some());

@@ -5,6 +5,14 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use mdconvert_core::{ConversionRequest, Document};
+use mdconvert_formats::{
+    CsvConverter, DocxConverter, EpubConverter, ImageConverter, JsonConverter, PptxConverter,
+    XlsxConverter, XmlConverter, ZipConverter,
+};
+use mdconvert_html::HtmlConverter;
+use mdconvert_pdf::PdfConverter;
+
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 struct TestDir(PathBuf);
@@ -229,6 +237,83 @@ fn dispatches_every_local_v1_registry_format() {
         assert_eq!(value["metadata"]["source_format"], *expected_format);
         assert!(output_path.is_file());
     }
+}
+
+#[test]
+fn every_registry_converter_accepts_the_same_owned_bytes_after_source_removal() {
+    fn removed_source(temp: &TestDir, relative: &str) -> (Vec<u8>, ConversionRequest) {
+        let original = fixture(relative);
+        let source = temp.path().join(original.file_name().unwrap());
+        fs::copy(&original, &source).unwrap();
+        let bytes = fs::read(&source).unwrap();
+        fs::remove_file(&source).unwrap();
+        (bytes, ConversionRequest::new(source).unwrap())
+    }
+
+    fn source_format(document: Document) -> String {
+        document.metadata.source_format.unwrap()
+    }
+
+    let temp = TestDir::new();
+    let (bytes, request) = removed_source(&temp, "pdf/digital-basic.pdf");
+    assert_eq!(
+        source_format(PdfConverter.convert_bytes(&bytes, &request).unwrap()),
+        "pdf"
+    );
+    let (bytes, request) = removed_source(&temp, "html/semantic.html");
+    assert_eq!(
+        source_format(HtmlConverter.convert_bytes(&bytes, &request).unwrap()),
+        "html"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/sample.csv");
+    assert_eq!(
+        source_format(CsvConverter.convert_bytes(&bytes, &request).unwrap()),
+        "csv"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/sample.json");
+    assert_eq!(
+        source_format(JsonConverter.convert_bytes(&bytes, &request).unwrap()),
+        "json"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/sample.xml");
+    assert_eq!(
+        source_format(XmlConverter.convert_bytes(&bytes, &request).unwrap()),
+        "xml"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/bounded.zip");
+    assert!(
+        source_format(ZipConverter.convert_bytes(&bytes, &request).unwrap()).starts_with("zip")
+    );
+    let (bytes, request) = removed_source(&temp, "formats/spine.epub");
+    assert_eq!(
+        source_format(EpubConverter.convert_bytes(&bytes, &request).unwrap()),
+        "epub"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/semantic.docx");
+    assert_eq!(
+        source_format(DocxConverter.convert_bytes(&bytes, &request).unwrap()),
+        "docx"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/ordered.pptx");
+    assert_eq!(
+        source_format(PptxConverter.convert_bytes(&bytes, &request).unwrap()),
+        "pptx"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/displayed.xlsx");
+    assert_eq!(
+        source_format(XlsxConverter.convert_bytes(&bytes, &request).unwrap()),
+        "xlsx"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/metadata.png");
+    assert_eq!(
+        source_format(ImageConverter.convert_bytes(&bytes, &request).unwrap()),
+        "png"
+    );
+    let (bytes, request) = removed_source(&temp, "formats/metadata.jpg");
+    assert_eq!(
+        source_format(ImageConverter.convert_bytes(&bytes, &request).unwrap()),
+        "jpeg"
+    );
 }
 
 #[test]
@@ -595,7 +680,205 @@ fn local_only_interface_rejects_urls() {
         .arg("--json")
         .output()
         .unwrap();
-    assert_failed_json(&output, "network_input_unsupported", 3);
+    assert_failed_json(&output, "unsafe_path", 2);
+}
+
+#[test]
+fn rejects_network_device_and_foreign_drive_syntax_for_every_path_argument() {
+    let temp = TestDir::new();
+    let valid_input = fixture("html/semantic.html");
+    let mut hostile = vec![
+        r"\\server\share\document.pdf",
+        "//server/share/document.pdf",
+        r"\\?\C:\document.pdf",
+        r"\\.\PhysicalDrive0",
+        r"\??\C:\document.pdf",
+        r"C:document.pdf",
+        "smb://server/share/document.pdf",
+    ];
+    #[cfg(unix)]
+    hostile.extend([
+        r"C:\document.pdf",
+        "/Network/Servers/share/document.pdf",
+        "/net/server/document.pdf",
+    ]);
+
+    for (index, path) in hostile.iter().enumerate() {
+        let input_result = command()
+            .args(["convert", path, "--output"])
+            .arg(temp.path().join(format!("input-{index}.md")))
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_failed_json(&input_result, "unsafe_path", 2);
+
+        let output_result = command()
+            .args(["convert"])
+            .arg(&valid_input)
+            .args(["--output", path, "--json"])
+            .output()
+            .unwrap();
+        assert_failed_json(&output_result, "unsafe_path", 2);
+
+        let assets_result = command()
+            .args(["convert"])
+            .arg(&valid_input)
+            .args(["--output"])
+            .arg(temp.path().join(format!("assets-{index}.md")))
+            .args(["--assets", path, "--json"])
+            .output()
+            .unwrap();
+        assert_failed_json(&assets_result, "unsafe_path", 2);
+
+        let cancel_result = command()
+            .args(["convert"])
+            .arg(&valid_input)
+            .args(["--output"])
+            .arg(temp.path().join(format!("cancel-{index}.md")))
+            .args(["--cancel-file", path, "--json"])
+            .output()
+            .unwrap();
+        assert_failed_json(&cancel_result, "unsafe_path", 2);
+    }
+}
+
+#[test]
+fn option_values_cannot_be_recognized_flags_and_consumed_json_is_not_json_mode() {
+    let temp = TestDir::new();
+    let input = fixture("html/semantic.html");
+    for arguments in [
+        vec!["--output", "--json"],
+        vec!["--assets", "--json"],
+        vec!["--cancel-file", "--json"],
+    ] {
+        let output = command()
+            .args(["convert"])
+            .arg(&input)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "error[invalid_arguments]: usage: mdconvert convert <INPUT> --output <FILE.md> [--assets <DIR>] [--json] [--cancel-file <PATH>]\n"
+        );
+    }
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn unknown_flag_like_option_values_are_invalid_arguments() {
+    let input = fixture("html/semantic.html");
+    for option in ["--output", "--assets", "--cancel-file"] {
+        let output = command()
+            .args(["convert"])
+            .arg(&input)
+            .args([option, "--not-a-value"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .starts_with("error[invalid_arguments]:")
+        );
+    }
+}
+
+#[test]
+fn duplicate_and_unknown_options_are_invalid_arguments() {
+    let temp = TestDir::new();
+    let input = fixture("html/semantic.html");
+    let output_path = temp.path().join("document.md");
+    for extra in [
+        vec!["--json", "--json"],
+        vec!["--output", output_path.to_str().unwrap()],
+        vec!["--assets", "document.assets", "--assets", "document.assets"],
+        vec!["--cancel-file", "cancel", "--cancel-file", "cancel"],
+        vec!["--unknown"],
+    ] {
+        let mut arguments = vec!["convert", input.to_str().unwrap(), "--output"];
+        arguments.push(output_path.to_str().unwrap());
+        arguments.extend(extra);
+        arguments.push("--json");
+        let output = command().args(arguments).output().unwrap();
+        assert_failed_json(&output, "invalid_arguments", 2);
+    }
+    assert!(!output_path.exists());
+}
+
+#[test]
+fn parser_backed_html_detection_accepts_fragments_custom_elements_and_comments() {
+    let temp = TestDir::new();
+    for (index, html) in [
+        "<span>inline fragment</span>",
+        "<widget-card>custom element</widget-card>",
+        "<!-- authored comment -->comment-only fragment",
+        "<!doctype html><html></html>",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let input = temp.path().join(format!("fragment-{index}.html"));
+        let output_path = temp.path().join(format!("fragment-{index}.md"));
+        fs::write(&input, html).unwrap();
+        let output = command()
+            .args(["convert"])
+            .arg(&input)
+            .args(["--output"])
+            .arg(&output_path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{html:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let incompatible = temp.path().join("not-html.html");
+    fs::copy(fixture("pdf/digital-basic.pdf"), &incompatible).unwrap();
+    let output = command()
+        .args(["convert"])
+        .arg(&incompatible)
+        .args(["--output"])
+        .arg(temp.path().join("not-html.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&output, "format_conflict", 3);
+}
+
+#[test]
+fn structured_detection_depth_limit_uses_conversion_exit_code() {
+    let temp = TestDir::new();
+    for (depth, expected_code) in [(127, 0), (129, 4)] {
+        let input = temp.path().join(format!("depth-{depth}.bin"));
+        let output_path = temp.path().join(format!("depth-{depth}.md"));
+        fs::write(
+            &input,
+            format!("{}0{}", "[".repeat(depth), "]".repeat(depth)),
+        )
+        .unwrap();
+        let output = command()
+            .args(["convert"])
+            .arg(&input)
+            .args(["--output"])
+            .arg(&output_path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected_code));
+        if expected_code == 4 {
+            assert_failed_json(&output, "limit_exceeded", 4);
+            assert!(!output_path.exists());
+        } else {
+            assert!(output_path.is_file());
+        }
+    }
 }
 
 #[cfg(unix)]

@@ -98,6 +98,14 @@ impl ZipConverter {
     pub fn with_limits(limits: ArchiveLimits) -> BoundedZipConverter {
         BoundedZipConverter { limits }
     }
+
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        convert_zip_bytes(request, bytes, &ArchiveLimits::default())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,7 +129,17 @@ fn convert_zip(
     request: &ConversionRequest,
     limits: &ArchiveLimits,
 ) -> Result<Document, ConversionError> {
-    let archive = Archive::open(request, limits)?;
+    limits.validate()?;
+    let bytes = read_input(request)?;
+    convert_zip_bytes(request, &bytes, limits)
+}
+
+fn convert_zip_bytes(
+    request: &ConversionRequest,
+    bytes: &[u8],
+    limits: &ArchiveLimits,
+) -> Result<Document, ConversionError> {
+    let archive = Archive::from_bytes(request, bytes, limits)?;
     if let Some(entry) = archive.entries.iter().find(|entry| is_archive(&entry.data)) {
         return Err(ConversionError::UnsupportedFormat {
             format: format!("nested archive entry {}", entry.name),
@@ -244,13 +262,14 @@ pub(crate) struct ArchiveEntry {
 }
 
 impl Archive {
-    pub(crate) fn open(
+    pub(crate) fn from_bytes(
         request: &ConversionRequest,
+        bytes: &[u8],
         limits: &ArchiveLimits,
     ) -> Result<Self, ConversionError> {
+        crate::ensure_input_bytes(request, bytes)?;
         let limits = limits.bounded_by_request(request)?;
-        let bytes = read_input(request)?;
-        Self::parse(&bytes, &limits)
+        Self::parse(bytes, &limits)
     }
 
     pub(crate) fn entry(&self, name: &str) -> Result<&ArchiveEntry, ConversionError> {

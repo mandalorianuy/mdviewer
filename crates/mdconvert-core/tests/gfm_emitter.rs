@@ -5,6 +5,8 @@ use mdconvert_core::{
     ListItem, emit_gfm,
 };
 
+use mdconvert_core::emit_gfm_with_asset_prefix;
+
 fn empty_document(blocks: Vec<Block>) -> Document {
     Document {
         metadata: DocumentMetadata::default(),
@@ -383,4 +385,35 @@ fn missing_and_duplicate_asset_ids_are_typed_errors() {
         ),
         Err(EmitError::DuplicateAssetId { asset_id }) if asset_id == "figure"
     ));
+}
+
+#[test]
+fn asset_prefix_rendering_borrows_the_document_without_rewriting_assets() {
+    let document = Document {
+        metadata: DocumentMetadata::default(),
+        blocks: vec![Block::Image {
+            asset_id: AssetId::new("figure").unwrap(),
+            alt: "Figure".into(),
+        }],
+        assets: vec![Asset {
+            id: AssetId::new("figure").unwrap(),
+            file_name: "image.png".into(),
+            media_type: "image/png".into(),
+            data: vec![1, 2, 3],
+        }],
+        warnings: vec![],
+    };
+
+    let markdown = emit_gfm_with_asset_prefix(
+        &document,
+        &GfmOptions {
+            final_newline: true,
+        },
+        "document.assets",
+    )
+    .unwrap();
+
+    assert_eq!(markdown, "![Figure](document.assets/image.png)\n");
+    assert_eq!(document.assets[0].data, vec![1, 2, 3]);
+    assert_eq!(document.assets[0].file_name, "image.png");
 }

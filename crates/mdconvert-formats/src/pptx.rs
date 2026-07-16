@@ -28,7 +28,18 @@ pub struct PptxConverter;
 
 impl Converter for PptxConverter {
     fn convert(&self, request: &ConversionRequest) -> Result<Document, ConversionError> {
-        let archive = Archive::open(request, &ArchiveLimits::default())?;
+        let bytes = crate::read_input(request)?;
+        self.convert_bytes(&bytes, request)
+    }
+}
+
+impl PptxConverter {
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        let archive = Archive::from_bytes(request, bytes, &ArchiveLimits::default())?;
         let content_types =
             authenticate_ooxml(&archive, "ppt/presentation.xml", PPTX_MAIN_CONTENT_TYPE)?;
         let presentation = parse_xml_bytes(

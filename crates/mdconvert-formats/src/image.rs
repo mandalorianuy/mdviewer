@@ -77,6 +77,22 @@ impl ImageConverter {
     pub fn with_limits(limits: ImageLimits) -> BoundedImageConverter {
         BoundedImageConverter { limits }
     }
+
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        convert_owned_bytes(request, bytes.to_vec(), &ImageLimits::default())
+    }
+
+    pub fn convert_owned_bytes(
+        &self,
+        bytes: Vec<u8>,
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        convert_owned_bytes(request, bytes, &ImageLimits::default())
+    }
 }
 
 pub struct BoundedImageConverter {
@@ -101,6 +117,19 @@ fn convert(request: &ConversionRequest, limits: &ImageLimits) -> Result<Document
         return Err(limit_exceeded("assets", 1, 0));
     }
     let bytes = read_input(request)?;
+    convert_owned_bytes(request, bytes, limits)
+}
+
+fn convert_owned_bytes(
+    request: &ConversionRequest,
+    bytes: Vec<u8>,
+    limits: &ImageLimits,
+) -> Result<Document, ConversionError> {
+    limits.validate()?;
+    crate::ensure_input_bytes(request, &bytes)?;
+    if request.limits.max_assets == 0 {
+        return Err(limit_exceeded("assets", 1, 0));
+    }
     let parsed = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         parse_png(&bytes, limits)?
     } else if bytes.starts_with(&[0xff, 0xd8]) {

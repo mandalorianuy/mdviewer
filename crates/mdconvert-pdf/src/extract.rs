@@ -16,6 +16,21 @@ static PDFIUM_EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn extract_pdf(request: &ConversionRequest) -> Result<RawDocument, ConversionError> {
     let bytes = read_source(request)?;
+    extract_pdf_bytes(&bytes, request)
+}
+
+pub fn extract_pdf_bytes(
+    bytes: &[u8],
+    request: &ConversionRequest,
+) -> Result<RawDocument, ConversionError> {
+    let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if actual > request.limits.max_input_bytes {
+        return Err(ConversionError::LimitExceeded {
+            limit: "input_bytes",
+            actual,
+            maximum: request.limits.max_input_bytes,
+        });
+    }
     let _extraction_guard =
         PDFIUM_EXTRACTION_LOCK
             .lock()
@@ -24,7 +39,7 @@ pub fn extract_pdf(request: &ConversionRequest) -> Result<RawDocument, Conversio
             })?;
     let pdfium = load_pdfium()?;
     let document = pdfium
-        .load_pdf_from_byte_vec(bytes, None)
+        .load_pdf_from_byte_slice(bytes, None)
         .map_err(map_document_load_error)?;
     ensure_unencrypted(&document)?;
     let page_count =

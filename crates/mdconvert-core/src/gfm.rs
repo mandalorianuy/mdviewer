@@ -8,7 +8,23 @@ pub struct GfmOptions {
 }
 
 pub fn emit_gfm(document: &Document, options: &GfmOptions) -> Result<String, EmitError> {
-    let assets = AssetIndex::new(document)?;
+    emit_gfm_with_optional_asset_prefix(document, options, None)
+}
+
+pub fn emit_gfm_with_asset_prefix(
+    document: &Document,
+    options: &GfmOptions,
+    asset_prefix: &str,
+) -> Result<String, EmitError> {
+    emit_gfm_with_optional_asset_prefix(document, options, Some(asset_prefix))
+}
+
+fn emit_gfm_with_optional_asset_prefix(
+    document: &Document,
+    options: &GfmOptions,
+    asset_prefix: Option<&str>,
+) -> Result<String, EmitError> {
+    let assets = AssetIndex::new(document, asset_prefix)?;
     let mut markdown = render_blocks(&document.blocks, &assets)?;
     markdown = normalize_line_endings(&markdown);
 
@@ -24,10 +40,11 @@ pub fn emit_gfm(document: &Document, options: &GfmOptions) -> Result<String, Emi
 
 struct AssetIndex<'a> {
     file_names: HashMap<&'a str, &'a str>,
+    prefix: Option<&'a str>,
 }
 
 impl<'a> AssetIndex<'a> {
-    fn new(document: &'a Document) -> Result<Self, EmitError> {
+    fn new(document: &'a Document, prefix: Option<&'a str>) -> Result<Self, EmitError> {
         let mut file_names = HashMap::with_capacity(document.assets.len());
         for asset in &document.assets {
             if file_names
@@ -40,16 +57,21 @@ impl<'a> AssetIndex<'a> {
             }
         }
 
-        Ok(Self { file_names })
+        Ok(Self { file_names, prefix })
     }
 
-    fn file_name(&self, asset_id: &str) -> Result<&'a str, EmitError> {
-        self.file_names
-            .get(asset_id)
-            .copied()
-            .ok_or_else(|| EmitError::MissingAsset {
-                asset_id: asset_id.to_owned(),
-            })
+    fn file_name(&self, asset_id: &str) -> Result<String, EmitError> {
+        let file_name =
+            self.file_names
+                .get(asset_id)
+                .copied()
+                .ok_or_else(|| EmitError::MissingAsset {
+                    asset_id: asset_id.to_owned(),
+                })?;
+        Ok(self.prefix.map_or_else(
+            || file_name.to_owned(),
+            |prefix| format!("{prefix}/{file_name}"),
+        ))
     }
 }
 
@@ -95,7 +117,7 @@ fn render_block(block: &Block, assets: &AssetIndex<'_>) -> Result<String, EmitEr
             Ok(format!(
                 "![{}]({})",
                 escape_text(alt, InlineContext::Text),
-                escape_destination(file_name, InlineContext::Text)
+                escape_destination(&file_name, InlineContext::Text)
             ))
         }
         Block::ThematicBreak => Ok("***".into()),

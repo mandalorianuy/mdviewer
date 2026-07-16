@@ -35,6 +35,15 @@ pub enum DelimiterDetectionError {
 pub struct CsvConverter;
 
 impl CsvConverter {
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        crate::ensure_input_bytes(request, bytes)?;
+        convert_csv_bytes(request, bytes, &StructuredLimits::default())
+    }
+
     pub fn convert_with_limits(
         &self,
         request: &ConversionRequest,

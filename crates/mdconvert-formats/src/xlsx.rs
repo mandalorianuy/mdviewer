@@ -30,7 +30,18 @@ pub struct XlsxConverter;
 
 impl Converter for XlsxConverter {
     fn convert(&self, request: &ConversionRequest) -> Result<Document, ConversionError> {
-        let archive = Archive::open(request, &ArchiveLimits::default())?;
+        let bytes = crate::read_input(request)?;
+        self.convert_bytes(&bytes, request)
+    }
+}
+
+impl XlsxConverter {
+    pub fn convert_bytes(
+        &self,
+        bytes: &[u8],
+        request: &ConversionRequest,
+    ) -> Result<Document, ConversionError> {
+        let archive = Archive::from_bytes(request, bytes, &ArchiveLimits::default())?;
         let content_types =
             authenticate_ooxml(&archive, "xl/workbook.xml", XLSX_MAIN_CONTENT_TYPE)?;
         reject_external_data(&archive, &content_types)?;

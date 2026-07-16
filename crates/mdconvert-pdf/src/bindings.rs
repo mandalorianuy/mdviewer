@@ -13,9 +13,7 @@ static LOADED_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub(crate) fn load_pdfium() -> Result<Pdfium, ConversionError> {
     let configured =
-        env::var_os(PDFIUM_DYNAMIC_LIB_PATH).ok_or_else(|| ConversionError::ConversionFailed {
-            message: format!("{PDFIUM_DYNAMIC_LIB_PATH} is not set"),
-        })?;
+        env::var_os(PDFIUM_DYNAMIC_LIB_PATH).ok_or(ConversionError::PdfiumUnavailable)?;
     let configured = PathBuf::from(configured);
     let canonical = canonical_library_path(&configured)?;
 
@@ -54,35 +52,17 @@ pub(crate) fn load_pdfium() -> Result<Pdfium, ConversionError> {
 }
 
 fn canonical_library_path(configured: &Path) -> Result<PathBuf, ConversionError> {
-    let metadata =
-        std::fs::metadata(configured).map_err(|source| ConversionError::ConversionFailed {
-            message: format!(
-                "could not access PDFium at {}: {source}",
-                configured.display()
-            ),
-        })?;
+    let metadata = std::fs::metadata(configured).map_err(|_| ConversionError::PdfiumUnavailable)?;
     if !metadata.is_file() {
-        return Err(ConversionError::ConversionFailed {
-            message: format!(
-                "{PDFIUM_DYNAMIC_LIB_PATH} does not name a regular file: {}",
-                configured.display()
-            ),
-        });
+        return Err(ConversionError::PdfiumUnavailable);
     }
     configured
         .canonicalize()
-        .map_err(|source| ConversionError::ConversionFailed {
-            message: format!(
-                "could not resolve PDFium path {}: {source}",
-                configured.display()
-            ),
-        })
+        .map_err(|_| ConversionError::PdfiumUnavailable)
 }
 
-fn binding_error(path: &Path, error: PdfiumError) -> ConversionError {
-    ConversionError::ConversionFailed {
-        message: format!("could not load PDFium from {}: {error}", path.display()),
-    }
+fn binding_error(_path: &Path, _error: PdfiumError) -> ConversionError {
+    ConversionError::PdfiumUnavailable
 }
 
 #[cfg(test)]
@@ -90,10 +70,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absent_library_is_a_typed_conversion_failure() {
+    fn absent_library_is_typed_pdfium_unavailable() {
         assert!(matches!(
             canonical_library_path(Path::new("/definitely/absent/libpdfium.dylib")),
-            Err(ConversionError::ConversionFailed { .. })
+            Err(ConversionError::PdfiumUnavailable)
         ));
     }
 }
