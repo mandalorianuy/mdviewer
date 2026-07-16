@@ -154,6 +154,64 @@ fn stage_rejects_non_pdf_and_symlink_sources_without_creating_a_job() {
     fs::remove_dir_all(temp).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn stage_rejects_a_parent_replaced_with_a_symlink_after_scope_authorization() {
+    let temp = temp_dir("source-parent-swap");
+    let root = temp.join("jobs");
+    let allowed = temp.join("allowed");
+    let selected_parent = allowed.join("selected");
+    let held_parent = allowed.join("selected-held");
+    let outside = temp.join("outside");
+    fs::create_dir_all(&selected_parent).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let selected_source = selected_parent.join("input.pdf");
+    pdf(&selected_source);
+    pdf(&outside.join("input.pdf"));
+    let store = store(&root, &allowed);
+
+    fs::rename(&selected_parent, &held_parent).unwrap();
+    std::os::unix::fs::symlink(&outside, &selected_parent).unwrap();
+    let error = store.stage_pdf(&selected_source, None).unwrap_err();
+
+    assert!(matches!(
+        error.code(),
+        "unsafe_job_path" | "unauthorized_source"
+    ));
+    assert!(fs::read_dir(&root).unwrap().next().is_none());
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn source_opening_is_anchored_to_authorized_scope_handles() {
+    let source =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/jobs.rs")).unwrap();
+    assert!(source.contains("struct AuthorizedScope"));
+    assert!(source.contains("libc::openat("));
+    assert!(source.contains("FILE_FLAG_BACKUP_SEMANTICS"));
+    assert!(source.contains("FILE_FLAG_OPEN_REPARSE_POINT"));
+}
+
+#[test]
+fn windows_private_storage_has_explicit_owner_and_protected_user_only_dacl_proof() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(manifest.join("src/jobs.rs")).unwrap();
+    let cargo = fs::read_to_string(manifest.join("Cargo.toml")).unwrap();
+    for api in [
+        "SetFileSecurityW",
+        "GetFileSecurityW",
+        "SetSecurityDescriptorOwner",
+        "SetSecurityDescriptorDacl",
+        "PROTECTED_DACL_SECURITY_INFORMATION",
+        "EqualSid",
+        "GetAce",
+    ] {
+        assert!(source.contains(api), "missing Windows ACL API proof: {api}");
+    }
+    assert!(cargo.contains("Win32_System_Threading"));
+    assert!(cargo.contains("Win32_System_SystemServices"));
+}
+
 #[test]
 fn claim_is_exactly_once_and_missing_input_or_tampered_metadata_fail_closed() {
     let temp = temp_dir("claim");

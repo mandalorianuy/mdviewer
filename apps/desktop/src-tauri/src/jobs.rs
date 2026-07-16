@@ -4,6 +4,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     str::FromStr,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -151,7 +152,13 @@ impl JobError {
 #[derive(Debug, Clone)]
 pub struct PrintJobStore {
     root: PathBuf,
-    authorized_scopes: Vec<PathBuf>,
+    authorized_scopes: Vec<AuthorizedScope>,
+}
+
+#[derive(Debug, Clone)]
+struct AuthorizedScope {
+    path: PathBuf,
+    directory: Arc<File>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -192,10 +199,18 @@ impl PrintJobStore {
             {
                 return Err(JobError::UnsafePath);
             }
-            scopes.push(canonical);
+            let directory = open_scope_directory(&canonical).map_err(|_| JobError::UnsafePath)?;
+            let opened_metadata = directory.metadata().map_err(|_| JobError::UnsafePath)?;
+            if !opened_metadata.is_dir() || is_reparse_or_symlink(&opened_metadata) {
+                return Err(JobError::UnsafePath);
+            }
+            scopes.push(AuthorizedScope {
+                path: canonical,
+                directory: Arc::new(directory),
+            });
         }
-        scopes.sort();
-        scopes.dedup();
+        scopes.sort_by(|left, right| left.path.cmp(&right.path));
+        scopes.dedup_by(|left, right| left.path == right.path);
 
         Ok(Self {
             root,
@@ -398,25 +413,28 @@ impl PrintJobStore {
         if !is_local_absolute(source) {
             return Err(JobError::UnauthorizedSource);
         }
-        let lexical_metadata =
-            fs::symlink_metadata(source).map_err(|_| JobError::UnauthorizedSource)?;
-        if is_reparse_or_symlink(&lexical_metadata) {
-            return Err(JobError::UnsafePath);
-        }
-        let canonical = fs::canonicalize(source).map_err(|_| JobError::UnauthorizedSource)?;
-        if !self
+        let parent = source.parent().ok_or(JobError::UnauthorizedSource)?;
+        let file_name = source.file_name().ok_or(JobError::UnauthorizedSource)?;
+        let normalized = fs::canonicalize(parent)
+            .map_err(|_| JobError::UnauthorizedSource)?
+            .join(file_name);
+        let scope_and_relative = self
             .authorized_scopes
             .iter()
-            .any(|scope| canonical.starts_with(scope) && canonical != *scope)
-        {
-            return Err(JobError::UnauthorizedSource);
-        }
-        open_read_no_follow(source).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => {
-                JobError::UnauthorizedSource
-            }
-            _ => JobError::Io(error),
-        })
+            .find_map(|scope| {
+                normalized
+                    .strip_prefix(&scope.path)
+                    .ok()
+                    .map(|relative| (scope, relative))
+            })
+            .filter(|(_, relative)| {
+                relative.components().next().is_some()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, Component::Normal(_)))
+            })
+            .ok_or(JobError::UnauthorizedSource)?;
+        open_source_beneath(scope_and_relative.0, scope_and_relative.1)
     }
 
     fn validate_root(&self) -> Result<(), JobError> {
@@ -466,7 +484,7 @@ impl PrintJobStore {
             }
         })?;
         validate_regular_single_link_file(&input_metadata)?;
-        validate_private_file_permissions(&input_metadata)?;
+        validate_private_file_permissions(&input_pdf, &input_metadata)?;
         let mut input = open_read_no_follow(&input_pdf).map_err(JobError::Io)?;
         validate_open_file_links(&input)?;
         let mut signature = [0_u8; 5];
@@ -483,7 +501,8 @@ impl PrintJobStore {
         let file_metadata =
             fs::symlink_metadata(&metadata_path).map_err(|_| JobError::InvalidMetadata)?;
         validate_regular_single_link_file(&file_metadata).map_err(|_| JobError::InvalidMetadata)?;
-        validate_private_file_permissions(&file_metadata).map_err(|_| JobError::InvalidMetadata)?;
+        validate_private_file_permissions(&metadata_path, &file_metadata)
+            .map_err(|_| JobError::InvalidMetadata)?;
         if file_metadata.len() > MAX_METADATA_BYTES {
             return Err(JobError::InvalidMetadata);
         }
@@ -597,6 +616,231 @@ fn is_local_absolute(path: &Path) -> bool {
     })
 }
 
+#[cfg(windows)]
+struct OwnedSid {
+    storage: Vec<usize>,
+}
+
+#[cfg(windows)]
+impl OwnedSid {
+    fn as_ptr(&self) -> windows_sys::Win32::Security::PSID {
+        self.storage.as_ptr().cast_mut().cast()
+    }
+}
+
+#[cfg(windows)]
+fn current_user_sid() -> Result<OwnedSid, JobError> {
+    use std::{mem::size_of, ptr};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        Security::{GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    let mut token: HANDLE = ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(JobError::Io(io::Error::last_os_error()));
+    }
+    let result = (|| {
+        let mut needed = 0_u32;
+        unsafe {
+            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
+        }
+        if needed == 0 {
+            return Err(JobError::Io(io::Error::last_os_error()));
+        }
+        let words = (needed as usize).div_ceil(size_of::<usize>());
+        let mut token_information = vec![0_usize; words];
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                token_information.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        } == 0
+        {
+            return Err(JobError::Io(io::Error::last_os_error()));
+        }
+        let user = unsafe { &*token_information.as_ptr().cast::<TOKEN_USER>() };
+        let sid_length = unsafe { GetLengthSid(user.User.Sid) } as usize;
+        if sid_length == 0 {
+            return Err(JobError::Io(io::Error::last_os_error()));
+        }
+        let mut storage = vec![0_usize; sid_length.div_ceil(size_of::<usize>())];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                user.User.Sid.cast::<u8>(),
+                storage.as_mut_ptr().cast::<u8>(),
+                sid_length,
+            );
+        }
+        Ok(OwnedSid { storage })
+    })();
+    unsafe {
+        CloseHandle(token);
+    }
+    result
+}
+
+#[cfg(windows)]
+pub(crate) fn apply_private_windows_security(path: &Path, directory: bool) -> Result<(), JobError> {
+    use std::{mem::size_of, os::windows::ffi::OsStrExt};
+    use windows_sys::Win32::{
+        Security::{
+            ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE,
+            DACL_SECURITY_INFORMATION, InitializeAcl, InitializeSecurityDescriptor,
+            OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            SECURITY_DESCRIPTOR, SetFileSecurityW, SetSecurityDescriptorDacl,
+            SetSecurityDescriptorOwner,
+        },
+        Storage::FileSystem::FILE_ALL_ACCESS,
+        System::SystemServices::SECURITY_DESCRIPTOR_REVISION,
+    };
+
+    let sid = current_user_sid()?;
+    let sid_length = unsafe { windows_sys::Win32::Security::GetLengthSid(sid.as_ptr()) } as usize;
+    let acl_length =
+        size_of::<ACL>() + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>() + sid_length;
+    let mut acl_storage = vec![0_usize; acl_length.div_ceil(size_of::<usize>())];
+    let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+    if unsafe { InitializeAcl(acl, acl_length as u32, ACL_REVISION) } == 0 {
+        return Err(JobError::Io(io::Error::last_os_error()));
+    }
+    let ace_flags = if directory {
+        CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
+    } else {
+        0
+    };
+    if unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, ace_flags, FILE_ALL_ACCESS, sid.as_ptr()) }
+        == 0
+    {
+        return Err(JobError::Io(io::Error::last_os_error()));
+    }
+
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
+    if unsafe {
+        InitializeSecurityDescriptor((&raw mut descriptor).cast(), SECURITY_DESCRIPTOR_REVISION)
+    } == 0
+        || unsafe { SetSecurityDescriptorOwner((&raw mut descriptor).cast(), sid.as_ptr(), 0) } == 0
+        || unsafe { SetSecurityDescriptorDacl((&raw mut descriptor).cast(), 1, acl, 0) } == 0
+    {
+        return Err(JobError::Io(io::Error::last_os_error()));
+    }
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let information = OWNER_SECURITY_INFORMATION
+        | DACL_SECURITY_INFORMATION
+        | PROTECTED_DACL_SECURITY_INFORMATION;
+    if unsafe { SetFileSecurityW(wide.as_ptr(), information, (&raw mut descriptor).cast()) } == 0 {
+        return Err(JobError::Io(io::Error::last_os_error()));
+    }
+    validate_private_windows_security(path, directory)
+}
+
+#[cfg(windows)]
+pub(crate) fn validate_private_windows_security(
+    path: &Path,
+    directory: bool,
+) -> Result<(), JobError> {
+    use std::{mem::size_of, os::windows::ffi::OsStrExt, ptr};
+    use windows_sys::Win32::{
+        Security::{
+            ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
+            CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
+            GetFileSecurityW, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+            GetSecurityDescriptorOwner, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSID,
+            SE_DACL_PROTECTED,
+        },
+        Storage::FileSystem::FILE_ALL_ACCESS,
+        System::SystemServices::ACCESS_ALLOWED_ACE_TYPE,
+    };
+
+    let sid = current_user_sid()?;
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut needed = 0_u32;
+    unsafe {
+        GetFileSecurityW(wide.as_ptr(), information, ptr::null_mut(), 0, &mut needed);
+    }
+    if needed == 0 {
+        return Err(JobError::Io(io::Error::last_os_error()));
+    }
+    let mut descriptor_storage = vec![0_usize; (needed as usize).div_ceil(size_of::<usize>())];
+    let descriptor = descriptor_storage.as_mut_ptr().cast();
+    if unsafe { GetFileSecurityW(wide.as_ptr(), information, descriptor, needed, &mut needed) } == 0
+    {
+        return Err(JobError::Io(io::Error::last_os_error()));
+    }
+
+    let mut owner: PSID = ptr::null_mut();
+    let mut owner_defaulted = 0;
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut dacl_present = 0;
+    let mut dacl_defaulted = 0;
+    let mut control = 0_u16;
+    let mut revision = 0_u32;
+    if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted) } == 0
+        || owner.is_null()
+        || unsafe { EqualSid(owner, sid.as_ptr()) } == 0
+        || unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor,
+                &mut dacl_present,
+                &mut dacl,
+                &mut dacl_defaulted,
+            )
+        } == 0
+        || dacl_present == 0
+        || dacl.is_null()
+        || unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0
+        || control & SE_DACL_PROTECTED == 0
+    {
+        return Err(JobError::UnsafePath);
+    }
+
+    let mut acl_information = ACL_SIZE_INFORMATION::default();
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&raw mut acl_information).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+        || acl_information.AceCount != 1
+    {
+        return Err(JobError::UnsafePath);
+    }
+    let mut raw_ace = ptr::null_mut();
+    if unsafe { GetAce(dacl, 0, &mut raw_ace) } == 0 || raw_ace.is_null() {
+        return Err(JobError::UnsafePath);
+    }
+    let ace = raw_ace.cast::<ACCESS_ALLOWED_ACE>();
+    let expected_flags = if directory {
+        (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) as u8
+    } else {
+        0
+    };
+    let ace_sid = unsafe { (&raw mut (*ace).SidStart).cast() };
+    if unsafe { (*ace).Header.AceType } != ACCESS_ALLOWED_ACE_TYPE as u8
+        || unsafe { (*ace).Header.AceFlags } != expected_flags
+        || unsafe { (*ace).Mask } != FILE_ALL_ACCESS
+        || unsafe { EqualSid(ace_sid, sid.as_ptr()) } == 0
+    {
+        return Err(JobError::UnsafePath);
+    }
+    Ok(())
+}
+
 fn create_private_directory(path: &Path) -> Result<(), JobError> {
     if path.exists() {
         return validate_private_directory(path, true);
@@ -614,6 +858,8 @@ fn create_private_directory_new(path: &Path) -> Result<(), JobError> {
     }
     #[cfg(not(unix))]
     fs::create_dir(path).map_err(JobError::Io)?;
+    #[cfg(windows)]
+    apply_private_windows_security(path, true)?;
     validate_private_directory(path, true)
 }
 
@@ -634,6 +880,8 @@ fn validate_private_directory(path: &Path, require_owner: bool) -> Result<(), Jo
     }
     #[cfg(not(unix))]
     let _ = require_owner;
+    #[cfg(windows)]
+    validate_private_windows_security(path, true)?;
     Ok(())
 }
 
@@ -666,7 +914,155 @@ fn create_private_file(path: &Path) -> Result<File, JobError> {
             .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
             .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
     }
-    options.open(path).map_err(JobError::Io)
+    let file = options.open(path).map_err(JobError::Io)?;
+    #[cfg(windows)]
+    apply_private_windows_security(path, false)?;
+    Ok(file)
+}
+
+fn open_scope_directory(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        options
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    options.open(path)
+}
+
+#[cfg(unix)]
+fn open_source_beneath(scope: &AuthorizedScope, relative: &Path) -> Result<File, JobError> {
+    use std::{
+        ffi::CString,
+        os::fd::{AsRawFd, FromRawFd},
+        os::unix::ffi::OsStrExt,
+    };
+    let scope_metadata = scope.directory.metadata().map_err(JobError::Io)?;
+    if !scope_metadata.is_dir() || is_reparse_or_symlink(&scope_metadata) {
+        return Err(JobError::UnsafePath);
+    }
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => {
+                CString::new(name.as_bytes()).map_err(|_| JobError::UnsafePath)
+            }
+            _ => Err(JobError::UnsafePath),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut opened_directories = Vec::<File>::new();
+    for (index, component) in components.iter().enumerate() {
+        let parent_descriptor = opened_directories
+            .last()
+            .map_or_else(|| scope.directory.as_raw_fd(), AsRawFd::as_raw_fd);
+        let final_component = index + 1 == components.len();
+        let flags = libc::O_RDONLY
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | if final_component {
+                0
+            } else {
+                libc::O_DIRECTORY
+            };
+        let descriptor = unsafe { libc::openat(parent_descriptor, component.as_ptr(), flags) };
+        if descriptor < 0 {
+            let error = io::Error::last_os_error();
+            return Err(match error.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => {
+                    JobError::UnauthorizedSource
+                }
+                _ => JobError::UnsafePath,
+            });
+        }
+        let opened = unsafe { File::from_raw_fd(descriptor) };
+        let metadata = opened.metadata().map_err(JobError::Io)?;
+        if final_component {
+            if !metadata.is_file() || is_reparse_or_symlink(&metadata) {
+                return Err(JobError::UnsafePath);
+            }
+            return Ok(opened);
+        }
+        if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
+            return Err(JobError::UnsafePath);
+        }
+        opened_directories.push(opened);
+    }
+    Err(JobError::UnauthorizedSource)
+}
+
+#[cfg(windows)]
+fn open_source_beneath(scope: &AuthorizedScope, relative: &Path) -> Result<File, JobError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let scope_metadata = scope.directory.metadata().map_err(JobError::Io)?;
+    if !scope_metadata.is_dir() || is_reparse_or_symlink(&scope_metadata) {
+        return Err(JobError::UnsafePath);
+    }
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name.to_os_string()),
+            _ => Err(JobError::UnsafePath),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut path = scope.path.clone();
+    let mut opened_directories = Vec::<File>::new();
+    for (index, component) in components.iter().enumerate() {
+        path.push(component);
+        let final_component = index + 1 == components.len();
+        let mut options = OpenOptions::new();
+        options.read(true).custom_flags(
+            FILE_FLAG_OPEN_REPARSE_POINT
+                | if final_component {
+                    0
+                } else {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                },
+        );
+        if !final_component {
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        }
+        let opened = options.open(&path).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => {
+                JobError::UnauthorizedSource
+            }
+            _ => JobError::Io(error),
+        })?;
+        let metadata = opened.metadata().map_err(JobError::Io)?;
+        if is_reparse_or_symlink(&metadata) {
+            return Err(JobError::UnsafePath);
+        }
+        if final_component {
+            if !metadata.is_file() {
+                return Err(JobError::UnsafePath);
+            }
+            return Ok(opened);
+        }
+        if !metadata.is_dir() {
+            return Err(JobError::UnsafePath);
+        }
+        opened_directories.push(opened);
+    }
+    Err(JobError::UnauthorizedSource)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_source_beneath(scope: &AuthorizedScope, relative: &Path) -> Result<File, JobError> {
+    open_read_no_follow(&scope.path.join(relative)).map_err(JobError::Io)
 }
 
 fn open_read_no_follow(path: &Path) -> io::Result<File> {
@@ -701,7 +1097,7 @@ fn validate_regular_single_link_file(metadata: &fs::Metadata) -> Result<(), JobE
     Ok(())
 }
 
-fn validate_private_file_permissions(metadata: &fs::Metadata) -> Result<(), JobError> {
+fn validate_private_file_permissions(path: &Path, metadata: &fs::Metadata) -> Result<(), JobError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -713,6 +1109,10 @@ fn validate_private_file_permissions(metadata: &fs::Metadata) -> Result<(), JobE
     }
     #[cfg(not(unix))]
     let _ = metadata;
+    #[cfg(windows)]
+    validate_private_windows_security(path, false)?;
+    #[cfg(not(windows))]
+    let _ = path;
     Ok(())
 }
 
@@ -827,7 +1227,7 @@ fn remove_incomplete_directory(root: &Path, path: &Path) -> Result<(), JobError>
         }
         let metadata = fs::symlink_metadata(entry.path()).map_err(JobError::Io)?;
         validate_regular_single_link_file(&metadata)?;
-        validate_private_file_permissions(&metadata)?;
+        validate_private_file_permissions(&entry.path(), &metadata)?;
     }
     for entry in entries {
         fs::remove_file(entry.path()).map_err(JobError::Io)?;

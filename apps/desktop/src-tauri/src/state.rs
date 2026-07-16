@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, VecDeque},
+    ffi::OsString,
     fs::{self, File, OpenOptions},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
@@ -25,6 +26,29 @@ pub(crate) struct AuthorizedSelection {
     pub path: PathBuf,
     pub access: SelectionAccess,
     identity: Option<FileIdentity>,
+    write_authority: Option<WriteAuthority>,
+}
+
+#[derive(Debug, Clone)]
+struct WriteAuthority {
+    #[cfg(not(unix))]
+    parent_path: PathBuf,
+    parent: Arc<File>,
+    parent_identity: DirectoryIdentity,
+    file_name: OsString,
+    expected_target: Option<FileIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectoryIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume: u64,
+    #[cfg(windows)]
+    file_id: [u8; 16],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +80,29 @@ struct FileIdentity {
 #[derive(Debug)]
 pub(crate) struct AuthorizedInput {
     file: tempfile::NamedTempFile,
+}
+
+#[derive(Debug)]
+pub(crate) struct ConversionStaging {
+    directory: PathBuf,
+    markdown: PathBuf,
+    assets: PathBuf,
+}
+
+impl ConversionStaging {
+    pub(crate) fn markdown_path(&self) -> &Path {
+        &self.markdown
+    }
+
+    pub(crate) fn assets_path(&self) -> &Path {
+        &self.assets
+    }
+}
+
+impl Drop for ConversionStaging {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
 }
 
 impl AuthorizedInput {
@@ -112,14 +159,14 @@ impl StateError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AppState {
     jobs: PrintJobStore,
     runtime: PathBuf,
-    selections: RwLock<HashMap<String, AuthorizedSelection>>,
-    conversions: Mutex<HashMap<String, RunningConversion>>,
-    warnings: RwLock<HashMap<String, Vec<String>>>,
-    pending_print_jobs: Mutex<VecDeque<PrintJobId>>,
+    selections: Arc<RwLock<HashMap<String, AuthorizedSelection>>>,
+    conversions: Arc<Mutex<HashMap<String, RunningConversion>>>,
+    warnings: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pending_print_jobs: Arc<Mutex<VecDeque<PrintJobId>>>,
 }
 
 impl AppState {
@@ -133,10 +180,10 @@ impl AppState {
         Ok(Self {
             jobs,
             runtime,
-            selections: RwLock::new(HashMap::new()),
-            conversions: Mutex::new(HashMap::new()),
-            warnings: RwLock::new(HashMap::new()),
-            pending_print_jobs: Mutex::new(VecDeque::new()),
+            selections: Arc::new(RwLock::new(HashMap::new())),
+            conversions: Arc::new(Mutex::new(HashMap::new())),
+            warnings: Arc::new(RwLock::new(HashMap::new())),
+            pending_print_jobs: Arc::new(Mutex::new(VecDeque::new())),
         })
     }
 
@@ -169,6 +216,36 @@ impl AppState {
             }
             Err(_) => return Err(StateError::InvalidSelection),
         };
+        let write_authority = if access == SelectionAccess::Write {
+            let parent_path = path
+                .parent()
+                .ok_or(StateError::InvalidSelection)?
+                .to_path_buf();
+            let file_name = path
+                .file_name()
+                .ok_or(StateError::InvalidSelection)?
+                .to_os_string();
+            let parent =
+                open_directory_no_follow(&parent_path).map_err(|_| StateError::InvalidSelection)?;
+            let parent_metadata = parent
+                .metadata()
+                .map_err(|_| StateError::InvalidSelection)?;
+            if !parent_metadata.is_dir() || is_reparse_or_symlink(&parent_metadata) {
+                return Err(StateError::InvalidSelection);
+            }
+            let parent_identity = DirectoryIdentity::from_open_directory(&parent)
+                .map_err(|_| StateError::InvalidSelection)?;
+            Some(WriteAuthority {
+                #[cfg(not(unix))]
+                parent_path,
+                parent: Arc::new(parent),
+                parent_identity,
+                file_name,
+                expected_target: identity.clone(),
+            })
+        } else {
+            None
+        };
         let token = Uuid::new_v4().hyphenated().to_string();
         self.selections
             .write()
@@ -179,6 +256,7 @@ impl AppState {
                     path,
                     access,
                     identity,
+                    write_authority,
                 },
             );
         Ok(token)
@@ -264,6 +342,28 @@ impl AppState {
         Ok(AuthorizedInput { file: staged })
     }
 
+    pub(crate) fn conversion_staging(
+        &self,
+        operation_id: &str,
+        requested_output: &Path,
+    ) -> Result<ConversionStaging, StateError> {
+        validate_uuid_v4(operation_id)?;
+        let nonce = Uuid::new_v4();
+        let directory = self
+            .runtime
+            .join(format!("conversion-{operation_id}-{nonce}"));
+        create_private_directory(&directory)?;
+        let file_name = requested_output
+            .file_name()
+            .ok_or(StateError::InvalidSelection)?;
+        let markdown = directory.join(file_name);
+        Ok(ConversionStaging {
+            assets: markdown.with_extension("assets"),
+            directory,
+            markdown,
+        })
+    }
+
     pub(crate) fn begin_conversion(&self, operation_id: &str) -> Result<PathBuf, StateError> {
         validate_uuid_v4(operation_id)?;
         let marker = self.runtime.join(format!("cancel-{operation_id}"));
@@ -271,6 +371,10 @@ impl AppState {
         if conversions.contains_key(operation_id) {
             return Err(StateError::AlreadyRunning);
         }
+        self.warnings
+            .write()
+            .map_err(|_| StateError::Poisoned)?
+            .remove(operation_id);
         match fs::remove_file(&marker) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -366,10 +470,21 @@ impl AppState {
             .copied()
             .collect())
     }
+
+    pub(crate) fn dequeue_print_job(&self, id: PrintJobId) -> Result<(), StateError> {
+        self.pending_print_jobs
+            .lock()
+            .map_err(|_| StateError::Poisoned)?
+            .retain(|pending| *pending != id);
+        Ok(())
+    }
 }
 
 impl AuthorizedSelection {
     fn verify(&self) -> Result<(), StateError> {
+        if let Some(authority) = &self.write_authority {
+            return authority.verify_current_target();
+        }
         match (&self.identity, fs::symlink_metadata(&self.path)) {
             (Some(expected), Ok(metadata))
                 if !metadata.file_type().is_symlink() && metadata.is_file() =>
@@ -410,12 +525,846 @@ impl AuthorizedSelection {
             StateError::ScopeChanged
         }
     }
+
+    pub(crate) fn persist_content(&self, content: &[u8]) -> Result<(), StateError> {
+        if self.access != SelectionAccess::Write {
+            return Err(StateError::AccessDenied);
+        }
+        self.write_authority
+            .as_ref()
+            .ok_or(StateError::InvalidSelection)?
+            .persist_content(content)
+    }
+
+    pub(crate) fn publish_conversion(
+        &self,
+        staging: &ConversionStaging,
+    ) -> Result<Option<PathBuf>, StateError> {
+        if self.access != SelectionAccess::Write {
+            return Err(StateError::AccessDenied);
+        }
+        let authority = self
+            .write_authority
+            .as_ref()
+            .ok_or(StateError::InvalidSelection)?;
+        authority.publish_new_conversion(staging, &self.path)
+    }
+}
+
+impl WriteAuthority {
+    fn verify_parent(&self) -> Result<(), StateError> {
+        let actual = DirectoryIdentity::from_open_directory(&self.parent)
+            .map_err(|_| StateError::ScopeChanged)?;
+        if actual == self.parent_identity {
+            Ok(())
+        } else {
+            Err(StateError::ScopeChanged)
+        }
+    }
+
+    fn verify_current_target(&self) -> Result<(), StateError> {
+        self.verify_parent()?;
+        match (
+            &self.expected_target,
+            open_relative_read(self, &self.file_name),
+        ) {
+            (Some(expected), Ok(file)) => {
+                let metadata = file.metadata().map_err(|_| StateError::ScopeChanged)?;
+                let actual = FileIdentity::from_open_file(&file, &metadata)
+                    .map_err(|_| StateError::ScopeChanged)?;
+                if metadata.is_file() && *expected == actual {
+                    Ok(())
+                } else {
+                    Err(StateError::ScopeChanged)
+                }
+            }
+            (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            _ => Err(StateError::ScopeChanged),
+        }
+    }
+
+    fn persist_content(&self, content: &[u8]) -> Result<(), StateError> {
+        self.verify_parent()?;
+        let (mut staged, staged_name) = create_relative_private_file(self)?;
+        let result = (|| {
+            staged.write_all(content).map_err(StateError::Io)?;
+            staged.sync_all().map_err(StateError::Io)?;
+            drop(staged);
+            match &self.expected_target {
+                None => publish_new_relative(self, &staged_name)
+                    .map_err(|_| StateError::ScopeChanged)?,
+                Some(expected) => {
+                    let captured = replace_and_capture_relative(self, &staged_name)
+                        .map_err(|_| StateError::ScopeChanged)?;
+                    let actual = open_relative_read(self, &captured)
+                        .and_then(|file| {
+                            let metadata = file.metadata()?;
+                            FileIdentity::from_open_file(&file, &metadata)
+                        })
+                        .ok();
+                    if !actual
+                        .as_ref()
+                        .is_some_and(|actual| expected.matches_after_atomic_rename(actual))
+                    {
+                        let _ = rollback_replace_relative(self, &captured);
+                        let _ = remove_relative(self, &staged_name);
+                        return Err(StateError::ScopeChanged);
+                    }
+                    remove_relative(self, &captured).map_err(StateError::Io)?;
+                }
+            }
+            self.parent.sync_all().map_err(StateError::Io)
+        })();
+        if result.is_err() {
+            let _ = remove_relative(self, &staged_name);
+        }
+        result
+    }
+
+    fn stage_file_from_path(&self, source: &Path) -> Result<OsString, StateError> {
+        let mut source = File::open(source).map_err(StateError::Io)?;
+        let (mut staged, staged_name) = create_relative_private_file(self)?;
+        let result = io::copy(&mut source, &mut staged)
+            .and_then(|_| staged.sync_all())
+            .map_err(StateError::Io);
+        if let Err(error) = result {
+            let _ = remove_relative(self, &staged_name);
+            return Err(error);
+        }
+        Ok(staged_name)
+    }
+
+    fn publish_new_conversion(
+        &self,
+        staging: &ConversionStaging,
+        requested_path: &Path,
+    ) -> Result<Option<PathBuf>, StateError> {
+        self.verify_parent()?;
+        if self.expected_target.is_some() {
+            return Err(StateError::ScopeChanged);
+        }
+        let markdown_staged = self.stage_file_from_path(staging.markdown_path())?;
+        let assets_target_name = requested_path
+            .with_extension("assets")
+            .file_name()
+            .ok_or(StateError::InvalidSelection)?
+            .to_os_string();
+        let assets_authority = Self {
+            #[cfg(not(unix))]
+            parent_path: self.parent_path.clone(),
+            parent: Arc::clone(&self.parent),
+            parent_identity: self.parent_identity.clone(),
+            file_name: assets_target_name,
+            expected_target: None,
+        };
+        let staged_assets = if staging.assets_path().exists() {
+            Some(stage_asset_directory(
+                &assets_authority,
+                staging.assets_path(),
+            )?)
+        } else {
+            None
+        };
+
+        let mut assets_published = false;
+        let result = (|| {
+            if let Some((directory_name, _)) = &staged_assets {
+                publish_new_relative(&assets_authority, directory_name)
+                    .map_err(|_| StateError::ScopeChanged)?;
+                assets_published = true;
+            }
+            publish_new_relative(self, &markdown_staged).map_err(|_| StateError::ScopeChanged)?;
+            self.parent.sync_all().map_err(StateError::Io)
+        })();
+        if let Err(error) = result {
+            let _ = remove_relative(self, &markdown_staged);
+            if let Some((directory_name, entries)) = &staged_assets {
+                if assets_published {
+                    let _ = remove_known_relative_directory(&assets_authority, entries);
+                } else {
+                    let staging_authority = WriteAuthority {
+                        file_name: directory_name.clone(),
+                        ..assets_authority.clone()
+                    };
+                    let _ = remove_known_relative_directory(&staging_authority, entries);
+                }
+            }
+            return Err(error);
+        }
+        Ok(staged_assets.map(|_| requested_path.with_extension("assets")))
+    }
+}
+
+impl DirectoryIdentity {
+    fn from_open_directory(directory: &File) -> io::Result<Self> {
+        directory_identity(directory)
+    }
 }
 
 impl FileIdentity {
     fn from_open_file(file: &File, metadata: &fs::Metadata) -> io::Result<Self> {
         platform_file_identity(file, metadata)
     }
+
+    fn matches_after_atomic_rename(&self, actual: &Self) -> bool {
+        self.len == actual.len
+            && self.modified == actual.modified
+            && same_platform_identity_after_rename(self, actual)
+    }
+}
+
+#[cfg(unix)]
+fn same_platform_identity_after_rename(expected: &FileIdentity, actual: &FileIdentity) -> bool {
+    expected.device == actual.device
+        && expected.inode == actual.inode
+        && expected.links == actual.links
+}
+
+#[cfg(windows)]
+fn same_platform_identity_after_rename(expected: &FileIdentity, actual: &FileIdentity) -> bool {
+    expected.volume == actual.volume
+        && expected.file_id == actual.file_id
+        && expected.last_write == actual.last_write
+        && expected.links == actual.links
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_platform_identity_after_rename(_expected: &FileIdentity, _actual: &FileIdentity) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn directory_identity(directory: &File) -> io::Result<DirectoryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = directory.metadata()?;
+    Ok(DirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn directory_identity(directory: &File) -> io::Result<DirectoryIdentity> {
+    let state = windows_file_state(directory)?;
+    Ok(DirectoryIdentity {
+        volume: state.volume_serial_number,
+        file_id: state.file_id,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn directory_identity(_directory: &File) -> io::Result<DirectoryIdentity> {
+    Ok(DirectoryIdentity {})
+}
+
+fn open_directory_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        options
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    options.open(path)
+}
+
+#[cfg(unix)]
+fn relative_c_string(name: &std::ffi::OsStr) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid relative name"))
+}
+
+#[cfg(unix)]
+fn open_relative_read(authority: &WriteAuthority, name: &std::ffi::OsStr) -> io::Result<File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let name = relative_c_string(name)?;
+    let descriptor = unsafe {
+        libc::openat(
+            authority.parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(descriptor) })
+    }
+}
+
+#[cfg(windows)]
+fn open_relative_read(authority: &WriteAuthority, name: &std::ffi::OsStr) -> io::Result<File> {
+    open_read_no_follow(&authority.parent_path.join(name))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_relative_read(authority: &WriteAuthority, name: &std::ffi::OsStr) -> io::Result<File> {
+    open_read_no_follow(&authority.parent_path.join(name))
+}
+
+#[cfg(unix)]
+fn create_relative_private_file(
+    authority: &WriteAuthority,
+) -> Result<(File, OsString), StateError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    for _ in 0..16 {
+        let name = OsString::from(format!(".mdviewer-save-{}", Uuid::new_v4()));
+        let encoded = relative_c_string(&name).map_err(StateError::Io)?;
+        let descriptor = unsafe {
+            libc::openat(
+                authority.parent.as_raw_fd(),
+                encoded.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if descriptor >= 0 {
+            return Ok((unsafe { File::from_raw_fd(descriptor) }, name));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(StateError::Io(error));
+        }
+    }
+    Err(StateError::Io(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate private save file",
+    )))
+}
+
+fn stage_asset_directory(
+    authority: &WriteAuthority,
+    source: &Path,
+) -> Result<(OsString, Vec<OsString>), StateError> {
+    let directory_name = OsString::from(format!(".mdviewer-assets-{}", Uuid::new_v4()));
+    let mut source_entries = fs::read_dir(source)
+        .map_err(StateError::Io)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StateError::Io)?;
+    source_entries.sort_by_key(fs::DirEntry::file_name);
+    let directory = create_relative_private_directory(authority, &directory_name)?;
+    let mut copied_names = Vec::new();
+    let result = (|| {
+        for entry in source_entries {
+            let metadata = fs::symlink_metadata(entry.path()).map_err(StateError::Io)?;
+            if !metadata.is_file() || is_reparse_or_symlink(&metadata) {
+                return Err(StateError::InvalidSelection);
+            }
+            let name = entry.file_name();
+            let mut source_file = open_read_no_follow(&entry.path()).map_err(StateError::Io)?;
+            let mut destination =
+                create_file_in_directory(&directory, authority, &directory_name, &name)?;
+            io::copy(&mut source_file, &mut destination).map_err(StateError::Io)?;
+            destination.sync_all().map_err(StateError::Io)?;
+            copied_names.push(name);
+        }
+        directory.sync_all().map_err(StateError::Io)
+    })();
+    if let Err(error) = result {
+        let staging_authority = WriteAuthority {
+            file_name: directory_name.clone(),
+            ..authority.clone()
+        };
+        let _ = remove_known_relative_directory(&staging_authority, &copied_names);
+        return Err(error);
+    }
+    Ok((directory_name, copied_names))
+}
+
+#[cfg(unix)]
+fn create_relative_private_directory(
+    authority: &WriteAuthority,
+    name: &std::ffi::OsStr,
+) -> Result<File, StateError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let name = relative_c_string(name).map_err(StateError::Io)?;
+    if unsafe { libc::mkdirat(authority.parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+        return Err(StateError::Io(io::Error::last_os_error()));
+    }
+    let descriptor = unsafe {
+        libc::openat(
+            authority.parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(StateError::Io(io::Error::last_os_error()));
+    }
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(not(unix))]
+fn create_relative_private_directory(
+    authority: &WriteAuthority,
+    name: &std::ffi::OsStr,
+) -> Result<File, StateError> {
+    let path = authority.parent_path.join(name);
+    fs::create_dir(&path).map_err(StateError::Io)?;
+    #[cfg(windows)]
+    crate::jobs::apply_private_windows_security(&path, true).map_err(|error| match error {
+        crate::jobs::JobError::Io(error) => StateError::Io(error),
+        _ => StateError::InvalidSelection,
+    })?;
+    open_directory_no_follow(&path).map_err(StateError::Io)
+}
+
+#[cfg(unix)]
+fn create_file_in_directory(
+    directory: &File,
+    _authority: &WriteAuthority,
+    _directory_name: &std::ffi::OsStr,
+    name: &std::ffi::OsStr,
+) -> Result<File, StateError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let name = relative_c_string(name).map_err(StateError::Io)?;
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        Err(StateError::Io(io::Error::last_os_error()))
+    } else {
+        Ok(unsafe { File::from_raw_fd(descriptor) })
+    }
+}
+
+#[cfg(not(unix))]
+fn create_file_in_directory(
+    _directory: &File,
+    authority: &WriteAuthority,
+    directory_name: &std::ffi::OsStr,
+    name: &std::ffi::OsStr,
+) -> Result<File, StateError> {
+    let path = authority.parent_path.join(directory_name).join(name);
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(StateError::Io)?;
+    #[cfg(windows)]
+    crate::jobs::apply_private_windows_security(&path, false).map_err(|error| match error {
+        crate::jobs::JobError::Io(error) => StateError::Io(error),
+        _ => StateError::InvalidSelection,
+    })?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn remove_known_relative_directory(
+    authority: &WriteAuthority,
+    entries: &[OsString],
+) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let directory_name = relative_c_string(&authority.file_name)?;
+    let descriptor = unsafe {
+        libc::openat(
+            authority.parent.as_raw_fd(),
+            directory_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let directory = unsafe { File::from_raw_fd(descriptor) };
+    for entry in entries {
+        let entry = relative_c_string(entry)?;
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), entry.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    if unsafe {
+        libc::unlinkat(
+            authority.parent.as_raw_fd(),
+            directory_name.as_ptr(),
+            libc::AT_REMOVEDIR,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_known_relative_directory(
+    authority: &WriteAuthority,
+    entries: &[OsString],
+) -> io::Result<()> {
+    let directory = authority.parent_path.join(&authority.file_name);
+    for entry in entries {
+        fs::remove_file(directory.join(entry))?;
+    }
+    fs::remove_dir(directory)
+}
+
+#[cfg(not(unix))]
+fn create_relative_private_file(
+    authority: &WriteAuthority,
+) -> Result<(File, OsString), StateError> {
+    for _ in 0..16 {
+        let name = OsString::from(format!(".mdviewer-save-{}", Uuid::new_v4()));
+        let path = authority.parent_path.join(&name);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        match options.open(path) {
+            Ok(file) => {
+                #[cfg(windows)]
+                crate::jobs::apply_private_windows_security(
+                    &authority.parent_path.join(&name),
+                    false,
+                )
+                .map_err(|error| match error {
+                    crate::jobs::JobError::Io(error) => StateError::Io(error),
+                    _ => StateError::InvalidSelection,
+                })?;
+                return Ok((file, name));
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(StateError::Io(error)),
+        }
+    }
+    Err(StateError::Io(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate private save file",
+    )))
+}
+
+#[cfg(unix)]
+fn remove_relative(authority: &WriteAuthority, name: &std::ffi::OsStr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let name = relative_c_string(name)?;
+    let result = unsafe { libc::unlinkat(authority.parent.as_raw_fd(), name.as_ptr(), 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_relative(authority: &WriteAuthority, name: &std::ffi::OsStr) -> io::Result<()> {
+    fs::remove_file(authority.parent_path.join(name))
+}
+
+#[cfg(target_os = "linux")]
+fn publish_new_relative(authority: &WriteAuthority, staged: &std::ffi::OsStr) -> io::Result<()> {
+    renameat2_relative(
+        authority,
+        staged,
+        &authority.file_name,
+        libc::RENAME_NOREPLACE,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn replace_and_capture_relative(
+    authority: &WriteAuthority,
+    staged: &std::ffi::OsStr,
+) -> io::Result<OsString> {
+    renameat2_relative(
+        authority,
+        staged,
+        &authority.file_name,
+        libc::RENAME_EXCHANGE,
+    )?;
+    Ok(staged.to_os_string())
+}
+
+#[cfg(target_os = "linux")]
+fn rollback_replace_relative(
+    authority: &WriteAuthority,
+    captured: &std::ffi::OsStr,
+) -> io::Result<()> {
+    renameat2_relative(
+        authority,
+        captured,
+        &authority.file_name,
+        libc::RENAME_EXCHANGE,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn renameat2_relative(
+    authority: &WriteAuthority,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+    flags: u32,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let from = relative_c_string(from)?;
+    let to = relative_c_string(to)?;
+    let result = unsafe {
+        libc::renameat2(
+            authority.parent.as_raw_fd(),
+            from.as_ptr(),
+            authority.parent.as_raw_fd(),
+            to.as_ptr(),
+            flags,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn publish_new_relative(authority: &WriteAuthority, staged: &std::ffi::OsStr) -> io::Result<()> {
+    renameatx_relative(authority, staged, &authority.file_name, libc::RENAME_EXCL)
+}
+
+#[cfg(target_os = "macos")]
+fn replace_and_capture_relative(
+    authority: &WriteAuthority,
+    staged: &std::ffi::OsStr,
+) -> io::Result<OsString> {
+    renameatx_relative(authority, staged, &authority.file_name, libc::RENAME_SWAP)?;
+    Ok(staged.to_os_string())
+}
+
+#[cfg(target_os = "macos")]
+fn rollback_replace_relative(
+    authority: &WriteAuthority,
+    captured: &std::ffi::OsStr,
+) -> io::Result<()> {
+    renameatx_relative(authority, captured, &authority.file_name, libc::RENAME_SWAP)
+}
+
+#[cfg(target_os = "macos")]
+fn renameatx_relative(
+    authority: &WriteAuthority,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+    flags: u32,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let from = relative_c_string(from)?;
+    let to = relative_c_string(to)?;
+    let result = unsafe {
+        libc::renameatx_np(
+            authority.parent.as_raw_fd(),
+            from.as_ptr(),
+            authority.parent.as_raw_fd(),
+            to.as_ptr(),
+            flags,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn publish_new_relative(authority: &WriteAuthority, staged: &std::ffi::OsStr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let staged = relative_c_string(staged)?;
+    let target = relative_c_string(&authority.file_name)?;
+    let result = unsafe {
+        libc::linkat(
+            authority.parent.as_raw_fd(),
+            staged.as_ptr(),
+            authority.parent.as_raw_fd(),
+            target.as_ptr(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    remove_relative(authority, staged.as_c_str().to_bytes().as_ref())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn replace_and_capture_relative(
+    _authority: &WriteAuthority,
+    _staged: &std::ffi::OsStr,
+) -> io::Result<OsString> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic replacement is unavailable",
+    ))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn rollback_replace_relative(
+    _authority: &WriteAuthority,
+    _captured: &std::ffi::OsStr,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic replacement is unavailable",
+    ))
+}
+
+#[cfg(windows)]
+fn publish_new_relative(authority: &WriteAuthority, staged: &std::ffi::OsStr) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+    let from = authority
+        .parent_path
+        .join(staged)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let to = authority
+        .parent_path
+        .join(&authority.file_name)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn replace_and_capture_relative(
+    authority: &WriteAuthority,
+    staged: &std::ffi::OsStr,
+) -> io::Result<OsString> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
+    let captured = OsString::from(format!(".mdviewer-backup-{}", Uuid::new_v4()));
+    let target = authority.parent_path.join(&authority.file_name);
+    let replacement = authority.parent_path.join(staged);
+    let backup = authority.parent_path.join(&captured);
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let replacement = replacement
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let backup = backup
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        ReplaceFileW(
+            target.as_ptr(),
+            replacement.as_ptr(),
+            backup.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if result != 0 {
+        Ok(captured)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rollback_replace_relative(
+    authority: &WriteAuthority,
+    captured: &std::ffi::OsStr,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
+    let displaced = authority
+        .parent_path
+        .join(format!(".mdviewer-rollback-{}", Uuid::new_v4()));
+    let target = authority.parent_path.join(&authority.file_name);
+    let replacement = authority.parent_path.join(captured);
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let replacement = replacement
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let displaced_wide = displaced
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        ReplaceFileW(
+            target.as_ptr(),
+            replacement.as_ptr(),
+            displaced_wide.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    fs::remove_file(displaced)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn publish_new_relative(authority: &WriteAuthority, staged: &std::ffi::OsStr) -> io::Result<()> {
+    fs::rename(
+        authority.parent_path.join(staged),
+        authority.parent_path.join(&authority.file_name),
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_and_capture_relative(
+    _authority: &WriteAuthority,
+    _staged: &std::ffi::OsStr,
+) -> io::Result<OsString> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic replacement is unavailable",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn rollback_replace_relative(
+    _authority: &WriteAuthority,
+    _captured: &std::ffi::OsStr,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic replacement is unavailable",
+    ))
 }
 
 #[cfg(unix)]
@@ -589,7 +1538,8 @@ fn is_local_absolute(path: &Path) -> bool {
 }
 
 fn create_private_directory(path: &Path) -> Result<(), StateError> {
-    if !path.exists() {
+    let created = !path.exists();
+    if created {
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -604,6 +1554,16 @@ fn create_private_directory(path: &Path) -> Result<(), StateError> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(StateError::InvalidSelection);
     }
+    #[cfg(windows)]
+    if created {
+        crate::jobs::apply_private_windows_security(path, true).map_err(|error| match error {
+            crate::jobs::JobError::Io(error) => StateError::Io(error),
+            _ => StateError::InvalidSelection,
+        })?;
+    }
+    #[cfg(windows)]
+    crate::jobs::validate_private_windows_security(path, true)
+        .map_err(|_| StateError::InvalidSelection)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -647,6 +1607,55 @@ mod tests {
         assert!(marker.exists(), "duplicate request removed cancellation");
 
         state.end_conversion(&operation_id).unwrap();
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn restarting_an_operation_clears_stale_warning_codes() {
+        let temp = std::env::temp_dir().join(format!(
+            "mdviewer-task12-warning-state-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let scope = temp.join("scope");
+        fs::create_dir_all(&scope).unwrap();
+        let jobs = PrintJobStore::new(temp.join("jobs"), [&scope]).unwrap();
+        let state = AppState::new(jobs, temp.join("runtime")).unwrap();
+        let operation_id = Uuid::new_v4().to_string();
+
+        state.begin_conversion(&operation_id).unwrap();
+        state
+            .record_warnings(&operation_id, vec!["old_warning".to_owned()])
+            .unwrap();
+        state.end_conversion(&operation_id).unwrap();
+        state.begin_conversion(&operation_id).unwrap();
+
+        assert!(state.warning_codes(&operation_id).unwrap().is_empty());
+        state.end_conversion(&operation_id).unwrap();
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn successful_claim_dequeues_only_the_matching_pending_job() {
+        let temp = std::env::temp_dir().join(format!(
+            "mdviewer-task12-pending-state-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let scope = temp.join("scope");
+        fs::create_dir_all(&scope).unwrap();
+        let source = scope.join("input.pdf");
+        fs::write(&source, b"%PDF-1.7\n%%EOF\n").unwrap();
+        let jobs = PrintJobStore::new(temp.join("jobs"), [&scope]).unwrap();
+        let state = AppState::new(jobs, temp.join("runtime")).unwrap();
+        let pending = state.jobs().stage_pdf(&source, None).unwrap();
+        let other = PrintJobId::new();
+        state.queue_print_job(pending.id).unwrap();
+        state.queue_print_job(other).unwrap();
+
+        crate::commands::claim_print_job(&state, &pending.id.to_string()).unwrap();
+
+        assert_eq!(state.pending_print_jobs().unwrap(), vec![other]);
         fs::remove_dir_all(temp).unwrap();
     }
 }

@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Read,
     path::Path,
 };
 
@@ -118,23 +118,7 @@ pub fn save_document(
     content: &str,
 ) -> Result<SaveDocumentResult, CommandError> {
     let selection = state.take_selection(token, SelectionAccess::Write)?;
-    let parent = selection
-        .path
-        .parent()
-        .ok_or_else(|| CommandError::new("save_failed"))?;
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".mdviewer-save-")
-        .tempfile_in(parent)
-        .map_err(|_| CommandError::new("save_failed"))?;
-    temporary
-        .write_all(content.as_bytes())
-        .and_then(|()| temporary.as_file().sync_all())
-        .map_err(|_| CommandError::new("save_failed"))?;
-
-    temporary
-        .persist(&selection.path)
-        .map_err(|_| CommandError::new("save_failed"))?;
-    sync_directory(parent).map_err(|_| CommandError::new("save_failed"))?;
+    selection.persist_content(content.as_bytes())?;
     Ok(SaveDocumentResult { saved: true })
 }
 
@@ -148,11 +132,12 @@ pub fn convert_document(
     let result = (|| {
         let source = state.snapshot_source(source_token)?;
         let output = state.take_selection(output_token, SelectionAccess::Write)?;
+        let staging = state.conversion_staging(operation_id, &output.path)?;
         let arguments = vec![
             OsString::from("convert"),
             source.path().as_os_str().to_owned(),
             OsString::from("--output"),
-            output.path.clone().into_os_string(),
+            staging.markdown_path().as_os_str().to_owned(),
             OsString::from("--json"),
             OsString::from("--cancel-file"),
             cancel_marker.into_os_string(),
@@ -183,11 +168,12 @@ pub fn convert_document(
             .map(stable_warning_code)
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        let assets_path = output.publish_conversion(&staging)?;
         state.record_warnings(operation_id, warning_codes.clone())?;
         Ok(ConversionResult {
             operation_id: operation_id.to_owned(),
             markdown_path: output.path.to_string_lossy().into_owned(),
-            assets_path: payload["assets_path"].as_str().map(str::to_owned),
+            assets_path: assets_path.map(|path| path.to_string_lossy().into_owned()),
             warning_codes,
         })
     })();
@@ -196,6 +182,19 @@ pub fn convert_document(
         (_, Err(error)) => Err(error.into()),
         (result, Ok(())) => result,
     }
+}
+
+pub async fn convert_document_async(
+    state: AppState,
+    operation_id: String,
+    source_token: String,
+    output_token: String,
+) -> Result<ConversionResult, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        convert_document(&state, &operation_id, &source_token, &output_token)
+    })
+    .await
+    .map_err(|_| CommandError::new("conversion_failed"))?
 }
 
 pub fn cancel_conversion(state: &AppState, operation_id: &str) -> Result<(), CommandError> {
@@ -209,6 +208,7 @@ pub fn warning_codes(state: &AppState, operation_id: &str) -> Result<Vec<String>
 pub fn claim_print_job(state: &AppState, id: &str) -> Result<ClaimedPrintJob, CommandError> {
     let id = PrintJobId::parse(id)?;
     let job = state.jobs().claim(id)?;
+    state.dequeue_print_job(id)?;
     Ok(ClaimedPrintJob {
         id: job.id.to_string(),
         title: job.title,
@@ -266,16 +266,6 @@ fn open_read_no_follow(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
 mod ipc {
     use super::*;
 
@@ -297,13 +287,19 @@ mod ipc {
     }
 
     #[tauri::command]
-    pub(super) fn convert(
+    pub(super) async fn convert(
         state: State<'_, AppState>,
         operation_id: String,
         source_token: String,
         output_token: String,
     ) -> Result<ConversionResult, CommandError> {
-        convert_document(&state, &operation_id, &source_token, &output_token)
+        convert_document_async(
+            state.inner().clone(),
+            operation_id,
+            source_token,
+            output_token,
+        )
+        .await
     }
 
     #[tauri::command]
