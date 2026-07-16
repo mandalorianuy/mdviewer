@@ -176,6 +176,16 @@ struct JobMetadata {
     created_unix_ms: u64,
 }
 
+struct LoadedJob {
+    job: PrintJob,
+    #[cfg(windows)]
+    directory: File,
+    #[cfg(windows)]
+    input: File,
+    #[cfg(windows)]
+    metadata: File,
+}
+
 impl PrintJobStore {
     pub fn new<I, P>(root: impl AsRef<Path>, authorized_scopes: I) -> Result<Self, JobError>
     where
@@ -325,6 +335,16 @@ impl PrintJobStore {
                 rename_noreplace(&temporary, &final_path)?;
                 sync_directory(&self.root)?;
             }
+            drop(staged);
+            drop(metadata_file);
+            #[cfg(windows)]
+            {
+                let validation_directory = temporary_directory.try_clone().map_err(JobError::Io)?;
+                Ok(self
+                    .load_job_retained_from_directory(id, JobState::Staged, validation_directory)?
+                    .job)
+            }
+            #[cfg(not(windows))]
             self.load_job(id, JobState::Staged)
         })();
 
@@ -386,9 +406,18 @@ impl PrintJobStore {
             }
             return Err(JobError::NotFound);
         }
-        self.load_job(id, JobState::Claimed)?;
-        remove_known_job_directory(&claimed)?;
-        sync_directory(&self.root)
+        let loaded = self.load_job_retained(id, JobState::Claimed)?;
+        #[cfg(windows)]
+        {
+            remove_loaded_windows_job(loaded)?;
+            self.root_directory.sync_all().map_err(JobError::Io)
+        }
+        #[cfg(not(windows))]
+        {
+            drop(loaded);
+            remove_known_job_directory(&claimed)?;
+            sync_directory(&self.root)
+        }
     }
 
     pub fn cleanup_older_than(&self, age: Duration) -> Result<CleanupReport, JobError> {
@@ -411,6 +440,30 @@ impl PrintJobStore {
             };
             let Some((id, state)) = parse_job_directory_name(&name) else {
                 if parse_incomplete_directory_name(&name) {
+                    #[cfg(windows)]
+                    let (entry_directory, metadata) = match open_private_windows_directory_relative(
+                        &self.root_directory,
+                        entry.file_name().as_os_str(),
+                    ) {
+                        Ok(directory) => match directory.metadata() {
+                            Ok(metadata) => (directory, metadata),
+                            Err(_) => {
+                                report.rejected.push(CleanupRejection {
+                                    job_id: None,
+                                    code: "unsafe_job_path",
+                                });
+                                continue;
+                            }
+                        },
+                        Err(_) => {
+                            report.rejected.push(CleanupRejection {
+                                job_id: None,
+                                code: "unsafe_job_path",
+                            });
+                            continue;
+                        }
+                    };
+                    #[cfg(not(windows))]
                     let metadata = match fs::symlink_metadata(entry.path()) {
                         Ok(metadata) if !is_reparse_or_symlink(&metadata) && metadata.is_dir() => {
                             metadata
@@ -428,7 +481,14 @@ impl PrintJobStore {
                         report.skipped_recent_incomplete += 1;
                         continue;
                     }
-                    match remove_incomplete_directory(&self.root, &entry.path()) {
+                    #[cfg(windows)]
+                    let removal = remove_incomplete_windows_directory(entry_directory);
+                    #[cfg(not(windows))]
+                    let removal = {
+                        let entry_path = entry.path();
+                        remove_incomplete_directory(&self.root, &entry_path)
+                    };
+                    match removal {
                         Ok(()) => report.removed_incomplete += 1,
                         Err(error) => report.rejected.push(CleanupRejection {
                             job_id: None,
@@ -443,6 +503,30 @@ impl PrintJobStore {
                 }
                 continue;
             };
+            #[cfg(windows)]
+            let (entry_directory, metadata) = match open_private_windows_directory_relative(
+                &self.root_directory,
+                entry.file_name().as_os_str(),
+            ) {
+                Ok(directory) => match directory.metadata() {
+                    Ok(metadata) => (directory, metadata),
+                    Err(_) => {
+                        report.rejected.push(CleanupRejection {
+                            job_id: Some(id),
+                            code: "unsafe_job_path",
+                        });
+                        continue;
+                    }
+                },
+                Err(_) => {
+                    report.rejected.push(CleanupRejection {
+                        job_id: Some(id),
+                        code: "unsafe_job_path",
+                    });
+                    continue;
+                }
+            };
+            #[cfg(not(windows))]
             let metadata = match fs::symlink_metadata(entry.path()) {
                 Ok(metadata) if !is_reparse_or_symlink(&metadata) && metadata.is_dir() => metadata,
                 _ => {
@@ -458,10 +542,16 @@ impl PrintJobStore {
                 report.skipped_recent.push(id);
                 continue;
             }
-            match self
-                .load_job(id, state)
-                .and_then(|_| remove_known_job_directory(&entry.path()))
-            {
+            #[cfg(windows)]
+            let removal = self
+                .load_job_retained_from_directory(id, state, entry_directory)
+                .and_then(remove_loaded_windows_job);
+            #[cfg(not(windows))]
+            let removal = self.load_job(id, state).and_then(|_| {
+                let entry_path = entry.path();
+                remove_known_job_directory(&entry_path)
+            });
+            match removal {
                 Ok(()) => match state {
                     JobState::Staged => report.removed_staged.push(id),
                     JobState::Claimed => report.removed_claimed.push(id),
@@ -472,6 +562,9 @@ impl PrintJobStore {
                 }),
             }
         }
+        #[cfg(windows)]
+        self.root_directory.sync_all().map_err(JobError::Io)?;
+        #[cfg(not(windows))]
         sync_directory(&self.root)?;
         Ok(report)
     }
@@ -518,45 +611,45 @@ impl PrintJobStore {
     }
 
     fn load_job(&self, id: PrintJobId, state: JobState) -> Result<PrintJob, JobError> {
+        Ok(self.load_job_retained(id, state)?.job)
+    }
+
+    fn load_job_retained(&self, id: PrintJobId, state: JobState) -> Result<LoadedJob, JobError> {
+        #[cfg(windows)]
         let directory = self.job_path(id, state);
         #[cfg(windows)]
-        let directory_handle = crate::state::windows_open_relative_for_mutation(
+        let directory_handle = open_private_windows_directory_relative(
             &self.root_directory,
             directory.file_name().ok_or(JobError::UnsafePath)?,
         )
         .map_err(|_| JobError::UnsafePath)?;
-        #[cfg(windows)]
-        {
-            let metadata = directory_handle.metadata().map_err(JobError::Io)?;
-            if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
-                return Err(JobError::UnsafePath);
-            }
-            validate_private_windows_security_handle(&directory_handle, true)
-                .map_err(|_| JobError::UnsafePath)?;
-        }
+        self.load_job_retained_from_directory(
+            id,
+            state,
+            #[cfg(windows)]
+            directory_handle,
+        )
+    }
+
+    fn load_job_retained_from_directory(
+        &self,
+        id: PrintJobId,
+        state: JobState,
+        #[cfg(windows)] directory_handle: File,
+    ) -> Result<LoadedJob, JobError> {
+        let directory = self.job_path(id, state);
         #[cfg(not(windows))]
         validate_job_directory(&self.root, &directory)?;
 
-        let mut entry_names = fs::read_dir(&directory)
+        #[cfg(windows)]
+        let entry_names = windows_directory_entry_names(&directory_handle)?;
+        #[cfg(not(windows))]
+        let entry_names = fs::read_dir(&directory)
             .map_err(JobError::Io)?
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(JobError::Io)?;
-        entry_names.sort();
-        if entry_names
-            != [
-                std::ffi::OsString::from(INPUT_NAME),
-                std::ffi::OsString::from(METADATA_NAME),
-            ]
-        {
-            if !entry_names.iter().any(|name| name == INPUT_NAME) {
-                return Err(JobError::MissingInput);
-            }
-            if !entry_names.iter().any(|name| name == METADATA_NAME) {
-                return Err(JobError::InvalidMetadata);
-            }
-            return Err(JobError::UnsafePath);
-        }
+        validate_known_job_entry_names(entry_names, KnownEntryMode::Complete)?;
 
         let input_pdf = directory.join(INPUT_NAME);
         #[cfg(windows)]
@@ -597,7 +690,7 @@ impl PrintJobStore {
 
         let metadata_path = directory.join(METADATA_NAME);
         #[cfg(windows)]
-        let metadata_file =
+        let mut metadata_file =
             open_private_windows_file_relative(&directory_handle, OsStr::new(METADATA_NAME))
                 .map_err(|_| JobError::InvalidMetadata)?;
         #[cfg(windows)]
@@ -615,11 +708,11 @@ impl PrintJobStore {
             return Err(JobError::InvalidMetadata);
         }
         #[cfg(not(windows))]
-        let metadata_file =
+        let mut metadata_file =
             open_read_no_follow(&metadata_path).map_err(|_| JobError::InvalidMetadata)?;
         validate_open_file_links(&metadata_file).map_err(|_| JobError::InvalidMetadata)?;
         let mut raw = Vec::with_capacity(file_metadata.len() as usize);
-        metadata_file
+        Read::by_ref(&mut metadata_file)
             .take(MAX_METADATA_BYTES + 1)
             .read_to_end(&mut raw)
             .map_err(|_| JobError::InvalidMetadata)?;
@@ -633,14 +726,22 @@ impl PrintJobStore {
             return Err(JobError::InvalidMetadata);
         }
 
-        Ok(PrintJob {
-            id,
-            state,
-            title: metadata.title,
-            created_unix_ms: metadata.created_unix_ms,
-            directory,
-            input_pdf,
-            metadata_path,
+        Ok(LoadedJob {
+            job: PrintJob {
+                id,
+                state,
+                title: metadata.title,
+                created_unix_ms: metadata.created_unix_ms,
+                directory,
+                input_pdf,
+                metadata_path,
+            },
+            #[cfg(windows)]
+            directory: directory_handle,
+            #[cfg(windows)]
+            input,
+            #[cfg(windows)]
+            metadata: metadata_file,
         })
     }
 }
@@ -1049,6 +1150,7 @@ fn validate_private_directory(path: &Path, require_owner: bool) -> Result<(), Jo
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn validate_job_directory(root: &Path, directory: &Path) -> Result<(), JobError> {
     validate_private_directory(directory, true).map_err(|error| match error {
         JobError::InvalidRoot => JobError::UnsafePath,
@@ -1163,15 +1265,37 @@ fn create_private_windows_file_relative(parent: &File, name: &OsStr) -> Result<F
 }
 
 #[cfg(windows)]
+fn open_private_windows_directory_relative(parent: &File, name: &OsStr) -> Result<File, JobError> {
+    use windows_sys::{
+        Wdk::Storage::FileSystem::FILE_OPEN,
+        Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_READ, SYNCHRONIZE},
+    };
+    let directory = crate::state::windows_nt_open_relative(
+        parent,
+        name,
+        FILE_GENERIC_READ | DELETE | SYNCHRONIZE,
+        FILE_OPEN,
+        Some(true),
+    )
+    .map_err(JobError::Io)?;
+    let metadata = directory.metadata().map_err(JobError::Io)?;
+    if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
+        return Err(JobError::UnsafePath);
+    }
+    validate_private_windows_security_handle(&directory, true)?;
+    Ok(directory)
+}
+
+#[cfg(windows)]
 fn open_private_windows_file_relative(parent: &File, name: &OsStr) -> Result<File, JobError> {
     use windows_sys::{
         Wdk::Storage::FileSystem::FILE_OPEN,
-        Win32::Storage::FileSystem::{FILE_GENERIC_READ, SYNCHRONIZE},
+        Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_READ, SYNCHRONIZE},
     };
     let file = crate::state::windows_nt_open_relative(
         parent,
         name,
-        FILE_GENERIC_READ | SYNCHRONIZE,
+        FILE_GENERIC_READ | DELETE | SYNCHRONIZE,
         FILE_OPEN,
         Some(false),
     )
@@ -1182,6 +1306,124 @@ fn open_private_windows_file_relative(parent: &File, name: &OsStr) -> Result<Fil
     }
     validate_private_windows_security_handle(&file, false)?;
     Ok(file)
+}
+
+#[cfg(windows)]
+fn windows_directory_entry_names(directory: &File) -> Result<Vec<OsString>, JobError> {
+    use std::{
+        mem::{offset_of, size_of},
+        os::windows::{ffi::OsStringExt, io::AsRawHandle},
+    };
+    use windows_sys::Win32::{
+        Foundation::ERROR_NO_MORE_FILES,
+        Storage::FileSystem::{
+            FILE_ID_BOTH_DIR_INFO, FileIdBothDirectoryInfo, GetFileInformationByHandleEx,
+        },
+    };
+
+    const BUFFER_BYTES: usize = 64 * 1024;
+    const MAX_BATCHES: usize = 1_024;
+    let mut names = Vec::new();
+    for _ in 0..MAX_BATCHES {
+        let mut buffer = [0_u64; BUFFER_BYTES / size_of::<u64>()];
+        if unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle().cast(),
+                FileIdBothDirectoryInfo,
+                buffer.as_mut_ptr().cast(),
+                BUFFER_BYTES as u32,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                return Ok(names);
+            }
+            return Err(JobError::Io(error));
+        }
+
+        let bytes = buffer.as_ptr().cast::<u8>();
+        let mut offset = 0_usize;
+        loop {
+            let minimum = offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+            if offset > BUFFER_BYTES.saturating_sub(minimum) {
+                return Err(JobError::UnsafePath);
+            }
+            let information = unsafe {
+                bytes
+                    .add(offset)
+                    .cast::<FILE_ID_BOTH_DIR_INFO>()
+                    .read_unaligned()
+            };
+            let name_bytes = information.FileNameLength as usize;
+            if !name_bytes.is_multiple_of(size_of::<u16>())
+                || !(offset + minimum).is_multiple_of(std::mem::align_of::<u16>())
+                || name_bytes > BUFFER_BYTES.saturating_sub(offset + minimum)
+            {
+                return Err(JobError::UnsafePath);
+            }
+            let name = OsString::from_wide(unsafe {
+                std::slice::from_raw_parts(
+                    bytes.add(offset + minimum).cast::<u16>(),
+                    name_bytes / size_of::<u16>(),
+                )
+            });
+            if name != "." && name != ".." {
+                names.push(name);
+            }
+
+            let next = information.NextEntryOffset as usize;
+            if next == 0 {
+                break;
+            }
+            if next < minimum || next > BUFFER_BYTES.saturating_sub(offset) {
+                return Err(JobError::UnsafePath);
+            }
+            offset += next;
+        }
+    }
+    Err(JobError::UnsafePath)
+}
+
+#[cfg(windows)]
+fn remove_loaded_windows_job(loaded: LoadedJob) -> Result<(), JobError> {
+    let LoadedJob {
+        directory,
+        input,
+        metadata,
+        ..
+    } = loaded;
+    crate::state::windows_delete_open_handle(&input).map_err(JobError::Io)?;
+    crate::state::windows_delete_open_handle(&metadata).map_err(JobError::Io)?;
+    drop(input);
+    drop(metadata);
+    crate::state::windows_delete_open_handle(&directory).map_err(JobError::Io)
+}
+
+#[cfg(windows)]
+fn remove_incomplete_windows_directory(directory: File) -> Result<(), JobError> {
+    let entries = validate_known_job_entry_names(
+        windows_directory_entry_names(&directory)?,
+        KnownEntryMode::Incomplete,
+    )?;
+    let input = entries
+        .input
+        .then(|| open_private_windows_file_relative(&directory, OsStr::new(INPUT_NAME)))
+        .transpose()?;
+    let metadata = entries
+        .metadata
+        .then(|| open_private_windows_file_relative(&directory, OsStr::new(METADATA_NAME)))
+        .transpose()?;
+
+    if let Some(input) = input {
+        crate::state::windows_delete_open_handle(&input).map_err(JobError::Io)?;
+        drop(input);
+    }
+    if let Some(metadata) = metadata {
+        crate::state::windows_delete_open_handle(&metadata).map_err(JobError::Io)?;
+        drop(metadata);
+    }
+    crate::state::windows_delete_open_handle(&directory).map_err(JobError::Io)
 }
 
 #[cfg(windows)]
@@ -1335,6 +1577,7 @@ fn open_source_beneath(scope: &AuthorizedScope, relative: &Path) -> Result<File,
     open_read_no_follow(&scope.path.join(relative)).map_err(JobError::Io)
 }
 
+#[cfg(not(windows))]
 fn open_read_no_follow(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -1367,6 +1610,7 @@ fn validate_regular_single_link_file(metadata: &fs::Metadata) -> Result<(), JobE
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn validate_private_file_permissions(path: &Path, metadata: &fs::Metadata) -> Result<(), JobError> {
     #[cfg(unix)]
     {
@@ -1462,6 +1706,51 @@ fn path_exists_no_follow(path: &Path) -> Result<bool, JobError> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum KnownEntryMode {
+    Complete,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KnownJobEntries {
+    input: bool,
+    metadata: bool,
+}
+
+fn validate_known_job_entry_names(
+    names: Vec<OsString>,
+    mode: KnownEntryMode,
+) -> Result<KnownJobEntries, JobError> {
+    let mut entries = KnownJobEntries {
+        input: false,
+        metadata: false,
+    };
+    let mut invalid = false;
+    for name in names {
+        if name == INPUT_NAME && !entries.input {
+            entries.input = true;
+        } else if name == METADATA_NAME && !entries.metadata {
+            entries.metadata = true;
+        } else {
+            invalid = true;
+        }
+    }
+    if matches!(mode, KnownEntryMode::Complete) {
+        if !entries.input {
+            return Err(JobError::MissingInput);
+        }
+        if !entries.metadata {
+            return Err(JobError::InvalidMetadata);
+        }
+    }
+    if invalid {
+        return Err(JobError::UnsafePath);
+    }
+    Ok(entries)
+}
+
+#[cfg(not(windows))]
 fn remove_known_job_directory(path: &Path) -> Result<(), JobError> {
     let input = path.join(INPUT_NAME);
     let metadata = path.join(METADATA_NAME);
@@ -1485,17 +1774,18 @@ fn remove_known_directory(path: &Path) -> Result<(), JobError> {
     fs::remove_dir(path).map_err(JobError::Io)
 }
 
+#[cfg(not(windows))]
 fn remove_incomplete_directory(root: &Path, path: &Path) -> Result<(), JobError> {
     validate_job_directory(root, path)?;
     let entries = fs::read_dir(path)
         .map_err(JobError::Io)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(JobError::Io)?;
+    validate_known_job_entry_names(
+        entries.iter().map(fs::DirEntry::file_name).collect(),
+        KnownEntryMode::Incomplete,
+    )?;
     for entry in &entries {
-        let name = entry.file_name();
-        if name != INPUT_NAME && name != METADATA_NAME {
-            return Err(JobError::UnsafePath);
-        }
         let metadata = fs::symlink_metadata(entry.path()).map_err(JobError::Io)?;
         validate_regular_single_link_file(&metadata)?;
         validate_private_file_permissions(&entry.path(), &metadata)?;
@@ -1513,7 +1803,7 @@ fn sync_directory(path: &Path) -> Result<(), JobError> {
         .map_err(JobError::Io)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn sync_directory(_path: &Path) -> Result<(), JobError> {
     Ok(())
 }
@@ -1561,4 +1851,63 @@ fn rename_noreplace(from: &Path, to: &Path) -> Result<(), JobError> {
         )));
     }
     fs::rename(from, to).map_err(JobError::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_entry_set_requires_each_known_file_exactly_once() {
+        let entries = validate_known_job_entry_names(
+            vec![OsString::from(METADATA_NAME), OsString::from(INPUT_NAME)],
+            KnownEntryMode::Complete,
+        )
+        .unwrap();
+        assert!(entries.input);
+        assert!(entries.metadata);
+
+        assert_eq!(
+            validate_known_job_entry_names(
+                vec![OsString::from(METADATA_NAME)],
+                KnownEntryMode::Complete,
+            )
+            .unwrap_err()
+            .code(),
+            "missing_input"
+        );
+        assert_eq!(
+            validate_known_job_entry_names(
+                vec![OsString::from(INPUT_NAME)],
+                KnownEntryMode::Complete,
+            )
+            .unwrap_err()
+            .code(),
+            "invalid_job_metadata"
+        );
+    }
+
+    #[test]
+    fn cleanup_entry_set_rejects_unknown_and_duplicate_names_before_deletion() {
+        for names in [
+            vec![OsString::from("junction")],
+            vec![OsString::from(INPUT_NAME), OsString::from(INPUT_NAME)],
+            vec![OsString::from(METADATA_NAME), OsString::from(METADATA_NAME)],
+        ] {
+            assert_eq!(
+                validate_known_job_entry_names(names, KnownEntryMode::Incomplete)
+                    .unwrap_err()
+                    .code(),
+                "unsafe_job_path"
+            );
+        }
+
+        let partial = validate_known_job_entry_names(
+            vec![OsString::from(INPUT_NAME)],
+            KnownEntryMode::Incomplete,
+        )
+        .unwrap();
+        assert!(partial.input);
+        assert!(!partial.metadata);
+    }
 }

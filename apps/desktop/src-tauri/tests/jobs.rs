@@ -199,6 +199,19 @@ fn source_opening_is_anchored_to_authorized_scope_handles() {
 }
 
 #[test]
+fn windows_job_removal_keeps_validated_directory_and_child_handles() {
+    let jobs_source =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/jobs.rs")).unwrap();
+    assert!(jobs_source.contains("struct LoadedJob"));
+    assert!(jobs_source.contains("windows_directory_entry_names"));
+    assert!(jobs_source.contains("GetFileInformationByHandleEx"));
+    assert!(jobs_source.contains("remove_loaded_windows_job(loaded: LoadedJob)"));
+    assert!(jobs_source.contains("remove_incomplete_windows_directory(directory: File)"));
+    assert!(!jobs_source.contains("remove_known_job_directory(&entry.path())"));
+    assert!(!jobs_source.contains("remove_incomplete_directory(&self.root, &entry.path())"));
+}
+
+#[test]
 fn windows_private_storage_has_explicit_owner_and_protected_user_only_dacl_proof() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source = fs::read_to_string(manifest.join("src/jobs.rs")).unwrap();
