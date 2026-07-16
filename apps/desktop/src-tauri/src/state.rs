@@ -26,6 +26,7 @@ pub(crate) struct AuthorizedSelection {
     pub path: PathBuf,
     pub access: SelectionAccess,
     identity: Option<FileIdentity>,
+    read_handle: Option<Arc<File>>,
     write_authority: Option<WriteAuthority>,
 }
 
@@ -303,6 +304,7 @@ impl AppState {
                     path,
                     access,
                     identity,
+                    read_handle: None,
                     write_authority,
                 },
             );
@@ -327,6 +329,72 @@ impl AppState {
         }
         selection.verify()?;
         Ok(selection)
+    }
+
+    pub(crate) fn authorize_published_output(
+        &self,
+        selection: &AuthorizedSelection,
+    ) -> Result<String, StateError> {
+        let authority = selection
+            .write_authority
+            .as_ref()
+            .ok_or(StateError::InvalidSelection)?;
+        authority.verify_parent()?;
+        let file = open_relative_read(authority, &authority.file_name).map_err(StateError::Io)?;
+        let metadata = file.metadata().map_err(StateError::Io)?;
+        if !metadata.is_file() || is_reparse_or_symlink(&metadata) {
+            return Err(StateError::InvalidSelection);
+        }
+        let identity = FileIdentity::from_open_file(&file, &metadata).map_err(StateError::Io)?;
+        let token = Uuid::new_v4().hyphenated().to_string();
+        self.selections
+            .write()
+            .map_err(|_| StateError::Poisoned)?
+            .insert(
+                token.clone(),
+                AuthorizedSelection {
+                    path: selection.path.clone(),
+                    access: SelectionAccess::Read,
+                    identity: Some(identity),
+                    read_handle: Some(Arc::new(file)),
+                    write_authority: None,
+                },
+            );
+        Ok(token)
+    }
+
+    pub(crate) fn renew_write_selection(
+        &self,
+        selection: &AuthorizedSelection,
+    ) -> Result<String, StateError> {
+        let authority = selection
+            .write_authority
+            .as_ref()
+            .ok_or(StateError::InvalidSelection)?;
+        authority.verify_parent()?;
+        let file = open_relative_read(authority, &authority.file_name).map_err(StateError::Io)?;
+        let metadata = file.metadata().map_err(StateError::Io)?;
+        if !metadata.is_file() || is_reparse_or_symlink(&metadata) {
+            return Err(StateError::InvalidSelection);
+        }
+        let identity = FileIdentity::from_open_file(&file, &metadata).map_err(StateError::Io)?;
+        let mut renewed_authority = authority.clone();
+        renewed_authority.expected_target = Some(identity.clone());
+        let token = Uuid::new_v4().hyphenated().to_string();
+        self.selections
+            .write()
+            .map_err(|_| StateError::Poisoned)?
+            .insert(
+                token.clone(),
+                AuthorizedSelection {
+                    path: selection.path.clone(),
+                    access: SelectionAccess::Write,
+                    identity: Some(identity),
+                    read_handle: None,
+                    write_authority: Some(renewed_authority),
+                },
+            );
+        Ok(token)
     }
 
     pub(crate) fn take_selection(
@@ -359,8 +427,9 @@ impl AppState {
             return Err(StateError::AccessDenied);
         }
 
-        let mut source =
-            open_read_no_follow(&selection.path).map_err(|_| StateError::SourceChanged)?;
+        let mut source = selection
+            .open_read()
+            .map_err(|_| StateError::SourceChanged)?;
         let before = source.metadata().map_err(|_| StateError::SourceChanged)?;
         selection.verify_handle(&source)?;
         let limit = mdconvert_core::ConversionLimits::default().max_input_bytes;
@@ -543,6 +612,9 @@ impl AuthorizedSelection {
         if let Some(authority) = &self.write_authority {
             return authority.verify_current_target();
         }
+        if let Some(file) = &self.read_handle {
+            return self.verify_handle(file);
+        }
         match (&self.identity, fs::symlink_metadata(&self.path)) {
             (Some(expected), Ok(metadata))
                 if !metadata.file_type().is_symlink() && metadata.is_file() =>
@@ -559,6 +631,16 @@ impl AuthorizedSelection {
             (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             _ => Err(self.changed_error()),
         }
+    }
+
+    pub(crate) fn open_read(&self) -> Result<File, StateError> {
+        if self.access != SelectionAccess::Read {
+            return Err(StateError::AccessDenied);
+        }
+        if let Some(file) = &self.read_handle {
+            return file.try_clone().map_err(StateError::Io);
+        }
+        open_read_no_follow(&self.path).map_err(StateError::Io)
     }
 
     pub(crate) fn verify_handle(&self, file: &File) -> Result<(), StateError> {

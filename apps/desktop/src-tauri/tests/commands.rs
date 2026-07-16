@@ -2,8 +2,9 @@ use std::{fs, path::PathBuf};
 
 use mdviewer_desktop_lib::{
     commands::{
-        cancel_conversion, claim_print_job, convert_document, integration_status, invoke_handler,
-        open_document, save_document, warning_codes,
+        authorize_open_selection, authorize_save_selection, cancel_conversion, claim_print_job,
+        convert_document, finish_print_job, integration_status, invoke_handler, open_document,
+        save_document, validate_external_url, warning_codes,
     },
     deep_link::parse_print_deep_link,
     jobs::PrintJobStore,
@@ -80,8 +81,10 @@ fn file_commands_require_unforgeable_access_typed_selection_tokens() {
         save_document(&state, &read, "changed").unwrap_err().code,
         "access_denied"
     );
-    save_document(&state, &write, "changed").unwrap();
+    let saved = save_document(&state, &write, "changed").unwrap();
     assert_eq!(fs::read_to_string(&file).unwrap(), "changed");
+    save_document(&state, &saved.write_token, "changed again").unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "changed again");
     fs::remove_dir_all(temp).unwrap();
 }
 
@@ -483,11 +486,105 @@ fn job_claim_and_integration_status_are_local_and_minimal() {
     let claimed = claim_print_job(&state, &staged.id.to_string()).unwrap();
     assert_eq!(claimed.id, staged.id.to_string());
     assert_eq!(claimed.title, "Print");
+    assert_eq!(
+        open_document(&state, &claimed.source_token)
+            .unwrap()
+            .content,
+        "%PDF-1.7\n%%EOF\n"
+    );
+    finish_print_job(&state, &claimed.id).unwrap();
+    assert_eq!(
+        finish_print_job(&state, &claimed.id).unwrap_err().code,
+        "job_not_found"
+    );
 
     let status = integration_status(&state).unwrap();
     assert_eq!(status.deep_link_scheme, "mdviewer");
     assert!(status.print_jobs_available);
     fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn native_selection_helpers_return_names_and_opaque_capabilities_only() {
+    let temp = temp_dir("native-selections");
+    let state = state(&temp);
+    let markdown = temp.join("scope").join("notes.md");
+    let output = temp.join("scope").join("copy.md");
+    fs::write(&markdown, "# Notes").unwrap();
+
+    let selected = authorize_open_selection(&state, &markdown, true).unwrap();
+    assert_eq!(selected.name, "notes.md");
+    assert!(!selected.read_token.contains(std::path::MAIN_SEPARATOR));
+    assert!(selected.write_token.is_some());
+    assert_eq!(
+        open_document(&state, &selected.read_token).unwrap().content,
+        "# Notes"
+    );
+
+    let destination = authorize_save_selection(&state, &output).unwrap();
+    assert_eq!(destination.name, "copy.md");
+    assert!(!destination.write_token.contains(std::path::MAIN_SEPARATOR));
+    save_document(&state, &destination.write_token, "saved").unwrap();
+    assert_eq!(fs::read_to_string(output).unwrap(), "saved");
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn converted_result_can_be_reopened_only_through_its_new_read_capability() {
+    let temp = temp_dir("converted-token");
+    let state = state(&temp);
+    let source = temp.join("scope").join("source.html");
+    let output = temp.join("scope").join("result.md");
+    fs::write(&source, "<h1>Token result</h1>").unwrap();
+    let source_token = state
+        .authorize_user_selection(&source, SelectionAccess::Read)
+        .unwrap();
+    let output_token = state
+        .authorize_user_selection(&output, SelectionAccess::Write)
+        .unwrap();
+
+    let result = convert_document(
+        &state,
+        &uuid::Uuid::new_v4().to_string(),
+        &source_token,
+        &output_token,
+    )
+    .unwrap();
+    assert!(
+        open_document(&state, &result.markdown_token)
+            .unwrap()
+            .content
+            .contains("# Token result")
+    );
+    let wire = serde_json::to_value(&result).unwrap();
+    assert!(wire.get("markdown_token").is_some());
+    assert!(wire.get("write_token").is_some());
+    assert!(wire.get("markdown_path").is_none());
+    assert!(wire.get("assets_path").is_none());
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn external_url_allowlist_rejects_active_and_ambiguous_schemes() {
+    assert_eq!(
+        validate_external_url("https://example.com/path?q=local#section")
+            .unwrap()
+            .as_str(),
+        "https://example.com/path?q=local#section"
+    );
+    for hostile in [
+        "javascript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "file:///etc/passwd",
+        "https://user:secret@example.com/",
+        "https:///missing-host",
+        "http://127.0.0.1@evil.example/",
+    ] {
+        assert!(
+            validate_external_url(hostile).is_err(),
+            "accepted {hostile:?}"
+        );
+    }
 }
 
 #[test]
@@ -508,7 +605,13 @@ fn tauri_configuration_has_one_scheme_strict_csp_and_no_shell_or_fs_permissions(
     let capability_json: serde_json::Value = serde_json::from_str(&capability).unwrap();
     assert_eq!(
         capability_json["permissions"],
-        serde_json::json!(["core:event:allow-listen", "core:event:allow-unlisten"])
+        serde_json::json!([
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            "core:window:allow-close",
+            "core:window:allow-set-focus",
+            "core:window:allow-show"
+        ])
     );
     assert!(!capability.contains("shell:"));
     assert!(!capability.contains("fs:"));

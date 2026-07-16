@@ -15,6 +15,8 @@ tauri-build = { version = "=2.6.3", features = [] }
 [dependencies]
 mdconvert-cli = { path = "../../../crates/mdconvert-cli" }
 mdconvert-core = { path = "../../../crates/mdconvert-core" }
+open = "=5.3.2"
+rfd = "=0.15.4"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 tauri.workspace = true

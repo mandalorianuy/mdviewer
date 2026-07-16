@@ -1,13 +1,9 @@
-use std::{
-    ffi::OsString,
-    fs::{self, File, OpenOptions},
-    io::Read,
-    path::Path,
-};
+use std::{ffi::OsString, fs, io::Read, path::Path};
 
 use mdconvert_core::ConversionLimits;
 use serde::Serialize;
 use tauri::State;
+use url::Url;
 
 use crate::{
     jobs::{JobError, PrintJobId},
@@ -38,6 +34,7 @@ impl CommandError {
             "job_not_found" => "print job was not found",
             "already_claimed" => "print job was already claimed",
             "invalid_job_metadata" => "print job metadata is invalid",
+            "invalid_external_url" => "external URL is not allowed",
             _ => "operation could not be completed",
         };
         Self {
@@ -67,14 +64,32 @@ pub struct OpenDocumentResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SaveDocumentResult {
     pub saved: bool,
+    pub write_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpenSelectionResult {
+    pub name: String,
+    pub read_token: String,
+    pub write_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SaveSelectionResult {
+    pub name: String,
+    pub write_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConversionResult {
     pub operation_id: String,
+    #[serde(skip_serializing)]
     pub markdown_path: String,
+    #[serde(skip_serializing)]
     pub assets_path: Option<String>,
     pub warning_codes: Vec<String>,
+    pub markdown_token: String,
+    pub write_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -82,6 +97,96 @@ pub struct ClaimedPrintJob {
     pub id: String,
     pub title: String,
     pub created_unix_ms: u64,
+    pub source_token: String,
+}
+
+pub fn authorize_open_selection(
+    state: &AppState,
+    path: &Path,
+    writable: bool,
+) -> Result<OpenSelectionResult, CommandError> {
+    let name = selected_name(path)?;
+    let read_token = state.authorize_user_selection(path, SelectionAccess::Read)?;
+    let write_token = if writable {
+        Some(state.authorize_user_selection(path, SelectionAccess::Write)?)
+    } else {
+        None
+    };
+    Ok(OpenSelectionResult {
+        name,
+        read_token,
+        write_token,
+    })
+}
+
+pub fn authorize_save_selection(
+    state: &AppState,
+    path: &Path,
+) -> Result<SaveSelectionResult, CommandError> {
+    let name = selected_name(path)?;
+    let write_token = state.authorize_user_selection(path, SelectionAccess::Write)?;
+    Ok(SaveSelectionResult { name, write_token })
+}
+
+fn selected_name(path: &Path) -> Result<String, CommandError> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| CommandError::new("invalid_selection"))
+}
+
+fn sanitized_markdown_name(value: &str) -> String {
+    let mut result = value
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    while result.ends_with(['.', ' ']) {
+        result.pop();
+    }
+    if result.is_empty() {
+        result.push_str("Documento");
+    }
+    if !result.to_ascii_lowercase().ends_with(".md") {
+        result.push_str(".md");
+    }
+    result.truncate(123);
+    result
+}
+
+pub fn validate_external_url(value: &str) -> Result<Url, CommandError> {
+    let authority = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .filter(|authority| !authority.is_empty() && !authority.contains('@'))
+        .ok_or_else(|| CommandError::new("invalid_external_url"))?;
+    if authority.contains('\\') {
+        return Err(CommandError::new("invalid_external_url"));
+    }
+    let url = Url::parse(value).map_err(|_| CommandError::new("invalid_external_url"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(CommandError::new("invalid_external_url"));
+    }
+    Ok(url)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,8 +199,9 @@ pub struct IntegrationStatus {
 
 pub fn open_document(state: &AppState, token: &str) -> Result<OpenDocumentResult, CommandError> {
     let selection = state.selection(token, SelectionAccess::Read)?;
-    let mut file =
-        open_read_no_follow(&selection.path).map_err(|_| CommandError::new("open_failed"))?;
+    let mut file = selection
+        .open_read()
+        .map_err(|_| CommandError::new("open_failed"))?;
     let metadata = file
         .metadata()
         .map_err(|_| CommandError::new("open_failed"))?;
@@ -120,7 +226,11 @@ pub fn save_document(
 ) -> Result<SaveDocumentResult, CommandError> {
     let selection = state.take_selection(token, SelectionAccess::Write)?;
     selection.persist_content(content.as_bytes())?;
-    Ok(SaveDocumentResult { saved: true })
+    let write_token = state.renew_write_selection(&selection)?;
+    Ok(SaveDocumentResult {
+        saved: true,
+        write_token,
+    })
 }
 
 pub fn convert_document(
@@ -170,12 +280,16 @@ pub fn convert_document(
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let assets_path = output.publish_conversion(&staging)?;
+        let markdown_token = state.authorize_published_output(&output)?;
+        let write_token = state.renew_write_selection(&output)?;
         state.record_warnings(operation_id, warning_codes.clone())?;
         Ok(ConversionResult {
             operation_id: operation_id.to_owned(),
             markdown_path: output.path.to_string_lossy().into_owned(),
             assets_path: assets_path.map(|path| path.to_string_lossy().into_owned()),
             warning_codes,
+            markdown_token,
+            write_token,
         })
     })();
     let end_result = state.end_conversion(operation_id);
@@ -217,11 +331,24 @@ pub fn claim_print_job(state: &AppState, id: &str) -> Result<ClaimedPrintJob, Co
         Err(error) => return Err(error.into()),
     };
     state.dequeue_print_job(id)?;
+    let source_token = match state.authorize_user_selection(&job.input_pdf, SelectionAccess::Read) {
+        Ok(token) => token,
+        Err(error) => {
+            let _ = state.jobs().finish(id);
+            return Err(error.into());
+        }
+    };
     Ok(ClaimedPrintJob {
         id: job.id.to_string(),
         title: job.title,
         created_unix_ms: job.created_unix_ms,
+        source_token,
     })
+}
+
+pub fn finish_print_job(state: &AppState, id: &str) -> Result<(), CommandError> {
+    let id = PrintJobId::parse(id)?;
+    state.jobs().finish(id).map_err(Into::into)
 }
 
 pub fn integration_status(state: &AppState) -> Result<IntegrationStatus, CommandError> {
@@ -256,26 +383,59 @@ fn stable_warning_code(serialized: &str) -> &'static str {
     }
 }
 
-fn open_read_no_follow(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options
-            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
-    }
-    options.open(path)
-}
-
 mod ipc {
     use super::*;
+
+    #[tauri::command]
+    pub(super) async fn select_open_document(
+        state: State<'_, AppState>,
+    ) -> Result<Option<OpenSelectionResult>, CommandError> {
+        let Some(file) = rfd::AsyncFileDialog::new()
+            .add_filter("Markdown", &["md", "markdown"])
+            .pick_file()
+            .await
+        else {
+            return Ok(None);
+        };
+        authorize_open_selection(&state, file.path(), true).map(Some)
+    }
+
+    #[tauri::command]
+    pub(super) async fn select_conversion_source(
+        state: State<'_, AppState>,
+    ) -> Result<Option<OpenSelectionResult>, CommandError> {
+        let Some(file) = rfd::AsyncFileDialog::new()
+            .add_filter(
+                "Documentos compatibles",
+                &[
+                    "pdf", "html", "htm", "csv", "json", "xml", "zip", "epub", "docx", "pptx",
+                    "xlsx", "png", "jpg", "jpeg",
+                ],
+            )
+            .pick_file()
+            .await
+        else {
+            return Ok(None);
+        };
+        authorize_open_selection(&state, file.path(), false).map(Some)
+    }
+
+    #[tauri::command]
+    pub(super) async fn select_save_document(
+        state: State<'_, AppState>,
+        suggested_name: String,
+    ) -> Result<Option<SaveSelectionResult>, CommandError> {
+        let name = sanitized_markdown_name(&suggested_name);
+        let Some(file) = rfd::AsyncFileDialog::new()
+            .add_filter("Markdown", &["md"])
+            .set_file_name(name)
+            .save_file()
+            .await
+        else {
+            return Ok(None);
+        };
+        authorize_save_selection(&state, file.path()).map(Some)
+    }
 
     #[tauri::command]
     pub(super) fn open(
@@ -335,6 +495,20 @@ mod ipc {
     }
 
     #[tauri::command]
+    pub(super) fn finish_print_job(
+        state: State<'_, AppState>,
+        id: String,
+    ) -> Result<(), CommandError> {
+        super::finish_print_job(&state, &id)
+    }
+
+    #[tauri::command]
+    pub(super) fn open_external(url: String) -> Result<(), CommandError> {
+        let url = validate_external_url(&url)?;
+        open::that_detached(url.as_str()).map_err(|_| CommandError::new("external_open_failed"))
+    }
+
+    #[tauri::command]
     pub(super) fn integration_status(
         state: State<'_, AppState>,
     ) -> Result<IntegrationStatus, CommandError> {
@@ -345,12 +519,17 @@ mod ipc {
 pub fn invoke_handler<R: tauri::Runtime>()
 -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        ipc::select_open_document,
+        ipc::select_conversion_source,
+        ipc::select_save_document,
         ipc::open,
         ipc::save,
         ipc::convert,
         ipc::cancel,
         ipc::warnings,
         ipc::claim_print_job,
+        ipc::finish_print_job,
+        ipc::open_external,
         ipc::integration_status
     ]
 }
