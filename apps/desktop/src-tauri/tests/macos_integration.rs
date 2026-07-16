@@ -175,6 +175,42 @@ impl RetentionInterlock for SwapPdfServicesDirectoryAfterValidation {
     }
 }
 
+struct SwapTemporaryAfterValidation {
+    displaced: PathBuf,
+    swapped: AtomicBool,
+}
+
+struct MutateTemporaryAfterValidation {
+    mutated: AtomicBool,
+}
+
+impl RetentionInterlock for MutateTemporaryAfterValidation {
+    fn after_directories_opened(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn after_temporary_validated(&self, temporary: &Path) -> io::Result<()> {
+        if !self.mutated.swap(true, Ordering::SeqCst) {
+            fs::write(temporary, b"unrelated in-place temporary mutation")?;
+        }
+        Ok(())
+    }
+}
+
+impl RetentionInterlock for SwapTemporaryAfterValidation {
+    fn after_directories_opened(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn after_temporary_validated(&self, temporary: &Path) -> io::Result<()> {
+        if !self.swapped.swap(true, Ordering::SeqCst) {
+            fs::rename(temporary, &self.displaced)?;
+            fs::write(temporary, b"unrelated temporary replacement")?;
+        }
+        Ok(())
+    }
+}
+
 fn application(home: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let app = home.join(name);
     let executable = app.join("Contents/MacOS/mdviewer-desktop");
@@ -268,6 +304,37 @@ fn install_creates_the_exact_per_user_application_alias_and_reports_installed() 
 }
 
 #[test]
+fn install_never_publishes_a_temporary_swapped_after_validation() {
+    let home = TempDir::new().unwrap();
+    let app = application(home.path(), "MDViewer.app", b"current-signed-app");
+    let displaced = home.path().join("validated-install-temporary");
+    let manager = IntegrationManager::new_with_retention_interlock(
+        home.path(),
+        artifact(app.clone()),
+        FixtureAlias,
+        FixtureSignature,
+        SwapTemporaryAfterValidation {
+            displaced: displaced.clone(),
+            swapped: AtomicBool::new(false),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        manager.install().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+    assert_eq!(manager.status().unwrap(), IntegrationStatus::NotInstalled);
+    let retained = retained_workflow_items(&home);
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        fs::read(&retained[0]).unwrap(),
+        b"unrelated temporary replacement"
+    );
+    assert_eq!(FixtureAlias.resolve_alias(&displaced).unwrap(), app);
+}
+
+#[test]
 fn a_valid_alias_to_an_older_signed_app_is_outdated_and_repair_is_atomic() {
     let home = TempDir::new().unwrap();
     let old_app = application(home.path(), "MDViewer-old.app", b"old-signed-app");
@@ -284,6 +351,40 @@ fn a_valid_alias_to_an_older_signed_app_is_outdated_and_repair_is_atomic() {
         current_app
     );
     assert_eq!(retained_workflow_items(&home).len(), 1);
+}
+
+#[test]
+fn repair_restores_the_old_workflow_when_validated_temporary_is_mutated_in_place() {
+    let home = TempDir::new().unwrap();
+    let old_app = application(home.path(), "MDViewer-old.app", b"old-signed-app");
+    let current_app = application(home.path(), "MDViewer.app", b"current-signed-app");
+    manager(&home, old_app.clone()).install().unwrap();
+    let manager = IntegrationManager::new_with_retention_interlock(
+        home.path(),
+        artifact(current_app.clone()),
+        FixtureAlias,
+        FixtureSignature,
+        MutateTemporaryAfterValidation {
+            mutated: AtomicBool::new(false),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        manager.repair().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+    assert_eq!(manager.status().unwrap(), IntegrationStatus::Outdated);
+    assert_eq!(
+        FixtureAlias.resolve_alias(&manager.target()).unwrap(),
+        old_app
+    );
+    let retained = retained_workflow_items(&home);
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        fs::read(&retained[0]).unwrap(),
+        b"unrelated in-place temporary mutation"
+    );
 }
 
 #[test]

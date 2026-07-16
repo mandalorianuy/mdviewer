@@ -26,6 +26,11 @@ porque el contenido podría haber cambiado después de validarlo. Reparar public
 y desinstalar deja `PDF Services` sin el item. Si el almacenamiento de retiro fue interferido, la
 operación intenta restaurar el workflow sin sobrescribir y falla de forma segura.
 
+Antes de publicar, MDViewer recuerda la identidad de filesystem del alias temporal ya validado.
+Después del movimiento exclusivo vuelve a exigir esa misma identidad y repite la resolución del
+alias, firma y SHA-256. Si el temporal fue sustituido o modificado, retira el objeto alcanzado sin
+sobrescribir, restaura el workflow anterior durante una reparación y devuelve un error seguro.
+
 Los movimientos no vuelven a resolver esos paths durante la mutación: MDViewer abre desde el home
 cada directorio de la cadena con protección no-follow, usa nombres relativos a esos handles y
 comprueba su identidad antes y después del movimiento. Si `PDF Services` o el directorio de retiro

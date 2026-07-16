@@ -755,6 +755,10 @@ by pathname; retain uncertain objects. Open every source and destination directo
 chain relative to `HOME`, rename relative to verified directory handles, compare handle identity
 against the visible path before and after the move, and roll back through the same handles on any
 directory swap. Task 14 performs no automatic tombstone cleanup.
+Capture the validated temporary alias filesystem identity before publication. After the exclusive
+relative rename, require that same identity and rerun the complete owned-alias contract. On any
+swap or in-place mutation, retain the reached object without overwrite, restore the previously
+validated workflow during repair, and return a safe error rather than success.
 
 - [x] **Step 4: Connect Preferences → Integrations**
 

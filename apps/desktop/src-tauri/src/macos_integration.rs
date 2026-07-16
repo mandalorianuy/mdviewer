@@ -64,6 +64,10 @@ pub trait CodeSignatureVerifier {
 #[doc(hidden)]
 pub trait RetentionInterlock {
     fn after_directories_opened(&self) -> io::Result<()>;
+
+    fn after_temporary_validated(&self, _temporary: &Path) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[doc(hidden)]
@@ -426,25 +430,46 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
             File::open(&temporary)
                 .and_then(|file| file.sync_all())
                 .map_err(|_| IntegrationError::Io)?;
-            if self.status_at(&temporary)? != IntegrationStatus::Installed {
+            let inspected_temporary = self.inspect_target(&temporary)?;
+            if inspected_temporary.status != IntegrationStatus::Installed {
                 return Err(IntegrationError::InvalidArtifact);
             }
-            if let Some(expected) = replace {
+            let temporary_identity = inspected_temporary
+                .identity
+                .ok_or(IntegrationError::InvalidArtifact)?;
+            self.retention_interlock
+                .after_temporary_validated(&temporary)
+                .map_err(|_| IntegrationError::Io)?;
+            let previous = if let Some(expected) = replace {
                 let quarantine = self.quarantine_validated_target(expected)?;
                 let retained = self.retain_or_restore(quarantine)?;
-                if self.move_no_replace(&temporary, &self.target).is_err() {
-                    let _ = self.move_no_replace(&retained, &self.target);
-                    return Err(IntegrationError::UnsafeTarget);
-                }
+                Some((retained, expected))
             } else {
-                self.move_no_replace(&temporary, &self.target)
-                    .map_err(|error| {
-                        if error.kind() == io::ErrorKind::AlreadyExists {
-                            IntegrationError::TargetExists
-                        } else {
-                            IntegrationError::Io
-                        }
-                    })?;
+                None
+            };
+            if let Err(error) = self.move_no_replace(&temporary, &self.target) {
+                if let Some((retained, expected)) = previous.as_ref() {
+                    let _ = self.restore_owned_workflow(retained, *expected);
+                }
+                return Err(
+                    if replace.is_none() && error.kind() == io::ErrorKind::AlreadyExists {
+                        IntegrationError::TargetExists
+                    } else {
+                        IntegrationError::UnsafeTarget
+                    },
+                );
+            }
+            if !self.target_matches_identity_and_status(
+                &self.target,
+                temporary_identity,
+                |status| status == IntegrationStatus::Installed,
+            ) {
+                if self.retain_path(&self.target).is_ok()
+                    && let Some((retained, expected)) = previous.as_ref()
+                {
+                    let _ = self.restore_owned_workflow(retained, *expected);
+                }
+                return Err(IntegrationError::UnsafeTarget);
             }
             Ok(())
         })();
@@ -547,6 +572,44 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
             &destination_directory,
             file_name_io(destination)?,
         )
+    }
+
+    fn restore_owned_workflow(
+        &self,
+        retained: &Path,
+        expected: FileIdentity,
+    ) -> Result<(), IntegrationError> {
+        self.move_no_replace(retained, &self.target)
+            .map_err(|_| IntegrationError::UnsafeTarget)?;
+        if self.target_matches_identity_and_status(&self.target, expected, |status| {
+            matches!(
+                status,
+                IntegrationStatus::Installed | IntegrationStatus::Outdated
+            )
+        }) {
+            return Ok(());
+        }
+        let _ = self.retain_path(&self.target);
+        Err(IntegrationError::UnsafeTarget)
+    }
+
+    fn target_matches_identity_and_status(
+        &self,
+        target: &Path,
+        expected: FileIdentity,
+        accepts: impl FnOnce(IntegrationStatus) -> bool,
+    ) -> bool {
+        let Ok(inspected) = self.inspect_target(target) else {
+            return false;
+        };
+        if inspected.identity != Some(expected) || !accepts(inspected.status) {
+            return false;
+        }
+        fs::symlink_metadata(target)
+            .ok()
+            .as_ref()
+            .and_then(file_identity)
+            == Some(expected)
     }
 }
 
