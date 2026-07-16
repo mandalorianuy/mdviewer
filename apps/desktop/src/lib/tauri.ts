@@ -54,6 +54,15 @@ export interface IntegrationStatus {
   pendingPrintJobIds: string[];
 }
 
+export type MacosWorkflowStatus = "not_installed" | "installed" | "outdated" | "invalid";
+
+export interface MacosIntegrationBackend {
+  macosWorkflowStatus(): Promise<MacosWorkflowStatus>;
+  installMacosWorkflow(): Promise<MacosWorkflowStatus>;
+  repairMacosWorkflow(): Promise<MacosWorkflowStatus>;
+  uninstallMacosWorkflow(): Promise<MacosWorkflowStatus>;
+}
+
 export interface CloseRequestEvent {
   preventDefault(): void;
 }
@@ -70,7 +79,7 @@ export function isBackendErrorCode(reason: unknown, code: string): reason is Bac
     && reason.code === code;
 }
 
-export interface Backend {
+export interface Backend extends MacosIntegrationBackend {
   selectOpenDocument(): Promise<OpenSelection | null>;
   selectSaveDocument(suggestedName: string): Promise<SaveSelection | null>;
   selectConversionSource(): Promise<ConversionSource | null>;
@@ -190,6 +199,18 @@ export const tauriBackend: Backend = {
       networkAccess: value.network_access,
       pendingPrintJobIds: value.pending_print_job_ids,
     };
+  },
+  macosWorkflowStatus() {
+    return invoke("macos_workflow_status");
+  },
+  installMacosWorkflow() {
+    return invoke("install_macos_workflow");
+  },
+  repairMacosWorkflow() {
+    return invoke("repair_macos_workflow");
+  },
+  uninstallMacosWorkflow() {
+    return invoke("uninstall_macos_workflow");
   },
   async activateWindow() {
     const window = getCurrentWindow();

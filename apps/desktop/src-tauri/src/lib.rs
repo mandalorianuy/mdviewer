@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod deep_link;
 pub mod jobs;
+pub mod macos_integration;
 pub mod state;
 
 use tauri::{Emitter, Manager};

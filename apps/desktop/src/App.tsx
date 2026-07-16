@@ -12,6 +12,7 @@ import {
 import { EditorSurface } from "./features/editor/EditorSurface";
 import { MarkdownPreview } from "./features/preview/MarkdownPreview";
 import { ThemeSelect, type ThemePreference } from "./features/settings/ThemeSelect";
+import { IntegrationsPanel } from "./features/settings/IntegrationsPanel";
 import {
   isBackendErrorCode,
   tauriBackend,
@@ -34,9 +35,11 @@ function initialTheme(): ThemePreference {
 }
 
 export default function App({ backend = tauriBackend }: AppProps) {
+  const macosIntegrationsAvailable = /Mac/.test(navigator.platform || navigator.userAgent);
   const [currentDocument, setDocument] = useState<DocumentState>(untitledDocument);
   const [theme, setTheme] = useState<ThemePreference>(initialTheme);
   const [findOpen, setFindOpen] = useState(false);
+  const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [activeOperation, setActiveOperation] = useState<string>();
   const [cancellingOperation, setCancellingOperation] = useState<string>();
@@ -360,6 +363,7 @@ export default function App({ backend = tauriBackend }: AppProps) {
         <button type="button" className="quiet" onClick={() => void saveAs()} disabled={openBusy || saveBusy || workflowBusy}>Guardar como</button>
         <span className="toolbar-separator" />
         <button type="button" className="quiet" onClick={() => setFindOpen(true)}>Buscar</button>
+        {macosIntegrationsAvailable && <button type="button" className="quiet" onClick={() => setIntegrationsOpen(true)}>Integrations</button>}
         <button
           type="button"
           className="accent"
@@ -369,6 +373,7 @@ export default function App({ backend = tauriBackend }: AppProps) {
           Convertir archivo
         </button>
       </nav>
+      {integrationsOpen && <IntegrationsPanel backend={backend} onClose={() => setIntegrationsOpen(false)} />}
       <section className="document-bar" aria-label="Estado del documento">
         <strong>{currentDocument.name}</strong>
         <span className={dirty ? "dirty" : "saved"}>{dirty ? "Cambios sin guardar" : "Guardado"}</span>

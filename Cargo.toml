@@ -7,8 +7,8 @@ members = [
     "crates/mdconvert-formats",
     "crates/mdconvert-html",
     "crates/mdconvert-pdf",
+    "platform/macos/pdf-workflow",
 ]
-# Task 14 adds platform/macos/* when the PDF workflow crate exists.
 
 [workspace.package]
 version = "0.1.0"

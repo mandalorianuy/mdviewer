@@ -61,6 +61,17 @@ h1 { font-size: 18px; line-height: 1.1; margin: 0 0 3px; letter-spacing: -.02em;
 .toolbar { display: flex; gap: 5px; align-items: center; padding: 9px 18px; background: var(--surface); border-bottom: 1px solid var(--line); }
 .toolbar-separator { width: 1px; height: 23px; background: var(--line); margin: 0 5px; }
 .document-bar { display: flex; align-items: center; gap: 10px; padding: 8px 24px; background: var(--surface-muted); border-bottom: 1px solid var(--line); font-size: 13px; }
+.integrations-panel { padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.integrations-heading-row, .integration-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.integrations-heading-row h2 { margin: 0; font-size: 16px; }
+.integrations-heading-row p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.integration-row { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-muted); }
+.integration-row > div { display: flex; flex-direction: column; gap: 4px; }
+.integration-state { color: var(--muted); font-size: 12px; }
+.integration-confirmation { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.integration-confirmation p { margin: 5px 0 10px; color: var(--muted); font-size: 13px; }
+.integration-result, .integration-error { margin: 10px 0 0; font-size: 13px; }
+.integration-error { color: var(--danger); }
 .document-bar span { color: var(--muted); }
 .document-bar .dirty { color: var(--warning); }
 .workspace { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr); }

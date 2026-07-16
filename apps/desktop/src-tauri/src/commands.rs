@@ -7,6 +7,7 @@ use url::Url;
 
 use crate::{
     jobs::{JobError, PrintJobId},
+    macos_integration::{IntegrationError, IntegrationStatus as MacosWorkflowStatus},
     state::{AppState, SelectionAccess, StateError},
 };
 
@@ -52,6 +53,12 @@ impl From<StateError> for CommandError {
 
 impl From<JobError> for CommandError {
     fn from(error: JobError) -> Self {
+        Self::new(error.code())
+    }
+}
+
+impl From<IntegrationError> for CommandError {
+    fn from(error: IntegrationError) -> Self {
         Self::new(error.code())
     }
 }
@@ -386,6 +393,52 @@ pub fn integration_status(state: &AppState) -> Result<IntegrationStatus, Command
     })
 }
 
+#[cfg(target_os = "macos")]
+pub fn macos_workflow_status() -> Result<MacosWorkflowStatus, CommandError> {
+    Ok(crate::macos_integration::embedded_manager()?.status()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn macos_workflow_status() -> Result<MacosWorkflowStatus, CommandError> {
+    Ok(MacosWorkflowStatus::NotInstalled)
+}
+
+#[cfg(target_os = "macos")]
+pub fn install_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+    let manager = crate::macos_integration::embedded_manager()?;
+    manager.install()?;
+    Ok(manager.status()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn install_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+    Err(CommandError::new("unsupported_platform"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn repair_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+    let manager = crate::macos_integration::embedded_manager()?;
+    manager.repair()?;
+    Ok(manager.status()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn repair_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+    Err(CommandError::new("unsupported_platform"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn uninstall_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+    let manager = crate::macos_integration::embedded_manager()?;
+    manager.uninstall()?;
+    Ok(manager.status()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn uninstall_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+    Err(CommandError::new("unsupported_platform"))
+}
+
 fn stable_warning_code(serialized: &str) -> &'static str {
     match serialized {
         "AmbiguousReadingOrder" => "ambiguous_reading_order",
@@ -533,6 +586,26 @@ mod ipc {
     ) -> Result<IntegrationStatus, CommandError> {
         super::integration_status(&state)
     }
+
+    #[tauri::command]
+    pub(super) fn macos_workflow_status() -> Result<MacosWorkflowStatus, CommandError> {
+        super::macos_workflow_status()
+    }
+
+    #[tauri::command]
+    pub(super) fn install_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+        super::install_macos_workflow()
+    }
+
+    #[tauri::command]
+    pub(super) fn repair_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+        super::repair_macos_workflow()
+    }
+
+    #[tauri::command]
+    pub(super) fn uninstall_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
+        super::uninstall_macos_workflow()
+    }
 }
 
 pub fn invoke_handler<R: tauri::Runtime>()
@@ -549,6 +622,10 @@ pub fn invoke_handler<R: tauri::Runtime>()
         ipc::claim_print_job,
         ipc::finish_print_job,
         ipc::open_external,
-        ipc::integration_status
+        ipc::integration_status,
+        ipc::macos_workflow_status,
+        ipc::install_macos_workflow,
+        ipc::repair_macos_workflow,
+        ipc::uninstall_macos_workflow
     ]
 }
