@@ -1,120 +1,56 @@
-# MDViewer (v0.1)
+# MDViewer
 
-Visualizador de Markdown para macOS, rápido y liviano.
+MDViewer converts local documents to GitHub-Flavored Markdown and opens the result in an editor and
+preview. The product is moving from its preserved Swift baseline to a Tauri 2 desktop application
+with a portable Rust conversion core and CLI.
 
-La aplicación Swift actual se conserva, sin cambios semánticos, en
-`legacy/macos-swift/` como baseline buildable de la migración multiplataforma.
-La arquitectura y el inventario congelado están documentados en
-[`docs/architecture/swift-baseline.md`](docs/architecture/swift-baseline.md).
+The first public binary targets **macOS 13+ on Apple Silicon**. Core, CLI and desktop are continuously
+compiled on macOS, Windows and Linux; Windows and Linux binary releases come later.
 
-## Funciones v0.1
+## What v1 includes
 
-- Apertura de archivos `.md`.
-- Render Markdown tipo WYSIWYG (lectura con formato).
-- Selector de tipografía (familia) y tamaño.
-- Preferencia para abrir documentos en tabs o en ventanas separadas.
-- Opción dentro de la app para asociar archivos `.md` con MDViewer.
-- Exportación a PDF.
-- App bundle macOS con declaración de tipos `.md` para asociación.
-- Icono macOS propio (`AppIcon.icns`) generado automáticamente.
-- Icono dedicado para documentos Markdown en Finder.
+- “Guardar como Markdown con MDViewer” in the macOS print PDF menu.
+- Local PDF conversion through pinned PDFium, plus HTML, text, CSV, JSON, XML, ZIP, EPUB and OOXML.
+- Transactional Markdown/assets output, warnings and cancellation cleanup.
+- Viewer, editor, preview, preferences and CLI using the same conversion contracts.
+- No uploads, network conversion or YAML frontmatter by default.
 
-## Requisitos
+OCR is intentionally deferred to v1.1. Scanned or image-only PDFs report `ocr_required`; images keep
+metadata but do not have text recognized. Printing through PDF can also lose semantic structure and
+reading-order information, so fidelity depends on what the source application preserves.
 
-- macOS 13+
-- Xcode + toolchain con Swift 6.2
+## Develop
 
-## Ejecutar en desarrollo
+Requirements: Node.js 24, Rust 1.94 and the Tauri prerequisites for your platform.
 
 ```bash
-swift run --package-path legacy/macos-swift
+npm ci
+./scripts/verify-workspace.sh
 ```
 
-Para verificar el baseline completo:
+Apple Silicon PDF extraction tests use a verified cache outside Git:
 
 ```bash
-./scripts/verify-legacy-swift.sh
+./scripts/fetch-pdfium.sh
+PDFIUM_DYNAMIC_LIB_PATH="$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib" \
+  cargo test -p mdconvert-pdf
 ```
 
-## Proyecto Xcode
-
-Para generar el proyecto macOS listo para distribuir:
+Build a local macOS artifact without making signing or notarization claims:
 
 ```bash
-(cd legacy/macos-swift && xcodegen generate)
+./scripts/package-macos-arm64.sh --unsigned-smoke
+./scripts/verify-release.sh --unsigned-smoke
 ```
 
-Se crea:
+## Documentation
 
-- `legacy/macos-swift/MDViewer.xcodeproj`
+- [macOS print workflow](docs/user-guide/macos-print-workflow.md)
+- [macOS release and unsigned smoke](docs/release/macos.md)
+- [CLI contract](docs/reference/cli.md)
+- [cross-platform architecture](docs/superpowers/specs/2026-07-15-cross-platform-save-as-markdown-design.md)
+- [preserved Swift baseline](docs/architecture/swift-baseline.md)
+- [contributing](CONTRIBUTING.md)
+- [security](SECURITY.md)
 
-Build sin firma para validar el target:
-
-```bash
-xcodebuild -project legacy/macos-swift/MDViewer.xcodeproj -scheme MDViewer -configuration Release CODE_SIGNING_ALLOWED=NO build
-```
-
-## Empaquetar `.app`
-
-```bash
-./legacy/macos-swift/scripts/package-app.sh
-```
-
-Se genera:
-
-- `legacy/macos-swift/dist/MDViewer.app`
-- `legacy/macos-swift/macos/AppIcon.icns`
-- `legacy/macos-swift/macos/MarkdownDocument.icns`
-
-## Crear `.dmg`
-
-```bash
-./legacy/macos-swift/scripts/create-dmg.sh
-```
-
-Se genera:
-
-- `legacy/macos-swift/dist/MDViewer-0.1.0.dmg`
-
-El DMG incluye:
-
-- `MDViewer.app`
-- alias/symlink a `/Applications` para instalacion por drag and drop
-
-## Notarizar `.dmg`
-
-Para distribucion fuera de App Store necesitás un certificado `Developer ID Application`
-instalado en el keychain y luego podés ejecutar:
-
-```bash
-CODESIGN_IDENTITY="Developer ID Application: Tu Nombre (TEAMID)" ./legacy/macos-swift/scripts/notarize-dmg.sh
-```
-
-## Instalar en macOS
-
-```bash
-./legacy/macos-swift/scripts/install-app.sh
-```
-
-Opcionalmente podés instalar en otro destino:
-
-```bash
-./legacy/macos-swift/scripts/install-app.sh "$HOME/Applications"
-```
-
-## Asociación de archivos `.md`
-
-La app declara soporte de Markdown en su `Info.plist`.
-
-- Si tenés `duti`, el instalador intentará configurar `.md`/`.markdown` por defecto.
-- Sin `duti`, podés usar Finder: `Get Info` -> `Open with` -> `MDViewer` -> `Change All`.
-
-## App Store
-
-Archivos preparados para distribución:
-
-- `legacy/macos-swift/project.yml`
-- `legacy/macos-swift/macos/MDViewer.entitlements`
-- `legacy/macos-swift/macos/ExportOptions-AppStore.plist`
-- `legacy/macos-swift/scripts/archive-appstore.sh`
-- `legacy/macos-swift/scripts/appstoreconnect_api.py`
+MDViewer is licensed under the [MIT License](LICENSE).

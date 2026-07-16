@@ -16,6 +16,7 @@ fi
 ARCHIVE="$CACHE_ROOT/$RELEASE-$ASSET"
 INSTALL="$CACHE_ROOT/$RELEASE"
 LIBRARY="$INSTALL/lib/libpdfium.dylib"
+RECEIPT="$CACHE_ROOT/$RELEASE.receipt"
 LOCK="$CACHE_ROOT/.fetch.lock"
 OWNER_FILE="$LOCK/owner.pid"
 LOCK_HELD=0
@@ -216,7 +217,17 @@ if [ -z "$CANDIDATES" ] || [ "$(printf '%s\n' "$CANDIDATES" | wc -l | tr -d ' ')
 fi
 CANDIDATE=$CANDIDATES
 
+LIBRARY_SHA256=$(shasum -a 256 "$CANDIDATE" | awk '{print $1}')
+RECEIPT_TEMP="$TEMP/$RELEASE.receipt"
+{
+    echo "release=$RELEASE"
+    echo "asset=$ASSET"
+    echo "archive_sha256=$SHA256"
+    echo "library_sha256=$LIBRARY_SHA256"
+} > "$RECEIPT_TEMP"
+
 if [ -f "$LIBRARY" ] && cmp -s "$CANDIDATE" "$LIBRARY"; then
+    mv -f "$RECEIPT_TEMP" "$RECEIPT"
     echo "Reusing verified PDFium installation at $LIBRARY"
     exit 0
 fi
@@ -227,4 +238,5 @@ cp "$CANDIDATE" "$NEW_LIBRARY"
 chmod 755 "$NEW_LIBRARY"
 mv -f "$NEW_LIBRARY" "$LIBRARY"
 NEW_LIBRARY=""
+mv -f "$RECEIPT_TEMP" "$RECEIPT"
 echo "Installed verified PDFium at $LIBRARY"

@@ -1,0 +1,83 @@
+name: Release macOS Apple Silicon
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Signed and notarized arm64 DMG
+    runs-on: macos-15
+    env:
+      CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+          package-manager-cache: false
+      - name: Require Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - name: Activate pinned Rust toolchain
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain="$RUNNER_TEMP/mdviewer-signing.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain"
+      - name: Materialize notary API key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s' "$APPLE_API_PRIVATE_KEY" | base64 --decode > "$APPLE_API_KEY_PATH"
+      - name: Build and sign Apple Silicon package
+        run: ./scripts/package-macos-arm64.sh
+      - name: Notarize and staple app and DMG
+        run: ./scripts/notarize-macos.sh
+      - name: Verify release candidate
+        run: ./scripts/verify-release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MDViewer-macOS-arm64
+          path: |
+            dist/macos-arm64/*.dmg
+            dist/macos-arm64/package-receipt.json
+            dist/macos-arm64/notary-*.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove ephemeral credentials
+        if: always()
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          rm -f "$APPLE_API_KEY_PATH" "$RUNNER_TEMP/developer-id.p12"
+          security delete-keychain "$RUNNER_TEMP/mdviewer-signing.keychain-db" || true

@@ -4,10 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/MDViewer.app"
-AUTH_KEY_PATH="${AUTH_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_J3JJ2WXQ5S.p8}"
-AUTH_KEY_ID="${AUTH_KEY_ID:-J3JJ2WXQ5S}"
-AUTH_ISSUER_ID="${AUTH_ISSUER_ID:-c9f7eed4-57f2-4c22-8efa-8e2cf829a79e}"
+AUTH_KEY_PATH="${AUTH_KEY_PATH:-}"
+AUTH_KEY_ID="${AUTH_KEY_ID:-}"
+AUTH_ISSUER_ID="${AUTH_ISSUER_ID:-}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
+
+: "${AUTH_KEY_PATH:?Set AUTH_KEY_PATH to the App Store Connect private key path}"
+: "${AUTH_KEY_ID:?Set AUTH_KEY_ID to the App Store Connect key ID}"
+: "${AUTH_ISSUER_ID:?Set AUTH_ISSUER_ID to the App Store Connect issuer ID}"
 
 if [[ -z "$CODESIGN_IDENTITY" ]]; then
   echo "Seteá CODESIGN_IDENTITY con tu certificado Developer ID Application."

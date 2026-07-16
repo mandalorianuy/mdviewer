@@ -17,4 +17,7 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+*.p12
+AuthKey*.p8
+*.keychain-db
 /MDViewer 2026-03-13 15-23-48/

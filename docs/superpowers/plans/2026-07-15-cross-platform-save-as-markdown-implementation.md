@@ -808,15 +808,15 @@ git commit -m "feat(macos): install universal Save as Markdown workflow"
 - Modify: `apps/desktop/src-tauri/tauri.conf.json`, `README.md`, `.gitignore`
 - Modify: legacy release scripts containing machine-specific signing metadata
 
-- [ ] **Step 1: Add a safe local release preflight**
+- [x] **Step 1: Add a safe local release preflight**
 
 Reject non-Apple-Silicon output, unsigned app/workflow, missing PDFium checksum receipt, hardcoded App Store Connect identifiers, modified lockfiles and a dirty tree.
 
-- [ ] **Step 2: Configure portable CI**
+- [x] **Step 2: Configure portable CI**
 
 On macOS, Windows and Linux run Rust formatting, clippy, all pure unit tests (including layout PDF), frontend lint/typecheck/tests/build and Tauri smoke build. Run PDFium extraction and golden integration tests on macOS Apple Silicon with the asset and checksum pinned in Task 7; Windows and Linux compile `mdconvert-pdf` against dynamic loading but do not download an unpublished v1 runtime. Run `cargo audit` and npm audit with reviewed allowlists stored as data.
 
-- [ ] **Step 3: Configure `aarch64-apple-darwin` release only**
+- [x] **Step 3: Configure `aarch64-apple-darwin` release only**
 
 Build and sign app plus workflow, bundle pinned PDFium, create DMG, notarize, staple and verify:
 
@@ -828,11 +828,11 @@ xcrun stapler validate MDViewer.app
 
 Developer ID identity, notary key ID, issuer and private key come only from GitHub Secrets or explicit environment variables.
 
-- [ ] **Step 4: Finish public documentation**
+- [x] **Step 4: Finish public documentation**
 
 Document macOS 13+, Apple Silicon-only v1, local processing, no OCR until v1.1, fidelity limits, build commands and print-action installation. Link contribution, security and architecture docs.
 
-- [ ] **Step 5: Run release gates without publishing**
+- [x] **Step 5: Run release gates without publishing**
 
 ```bash
 ./scripts/verify-workspace.sh
@@ -843,7 +843,7 @@ Document macOS 13+, Apple Silicon-only v1, local processing, no OCR until v1.1, 
 
 Expected: workspace and audit pass; unsigned smoke proves architecture and contents while making no signature or notary claim.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add .github .gitignore README.md CONTRIBUTING.md SECURITY.md apps/desktop/src-tauri/tauri.conf.json docs/release scripts legacy/macos-swift/scripts

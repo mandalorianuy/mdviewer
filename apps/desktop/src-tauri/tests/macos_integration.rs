@@ -857,12 +857,31 @@ fn signed_application_uses_its_bundled_pdfium_without_environment_configuration(
         .expect("MDVIEWER_APPLICATION_BUNDLE points to the signed development app");
     let runtime = application.join("Contents/Resources/lib/libpdfium.dylib");
     assert!(runtime.is_file());
+    let application_signature = Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(&application)
+        .output()
+        .unwrap();
+    assert!(application_signature.status.success());
+    let signature_details = String::from_utf8(application_signature.stderr).unwrap();
+    let team = signature_details
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="))
+        .filter(|team| {
+            team.len() == 10
+                && team
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+        .expect("signed application has a valid TeamIdentifier");
+    let nested_requirement =
+        format!("=anchor apple generic and certificate leaf[subject.OU] = \"{team}\"");
     let signature = Command::new("/usr/bin/codesign")
         .args([
             "--verify",
             "--strict",
             "--test-requirement",
-            "=anchor apple generic and certificate leaf[subject.OU] = \"NXJ8VR67NC\"",
+            &nested_requirement,
         ])
         .arg(&runtime)
         .output()

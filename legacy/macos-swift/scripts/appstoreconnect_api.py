@@ -179,11 +179,11 @@ def cmd_create_bundle_id(args):
 
 def build_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--key-id", default=os.environ.get("ASC_KEY_ID", "J3JJ2WXQ5S"))
-    parser.add_argument("--issuer-id", default=os.environ.get("ASC_ISSUER_ID", "c9f7eed4-57f2-4c22-8efa-8e2cf829a79e"))
+    parser.add_argument("--key-id", default=os.environ.get("ASC_KEY_ID"))
+    parser.add_argument("--issuer-id", default=os.environ.get("ASC_ISSUER_ID"))
     parser.add_argument(
         "--private-key",
-        default=os.environ.get("ASC_PRIVATE_KEY", os.path.expanduser("~/.appstoreconnect/private_keys/AuthKey_J3JJ2WXQ5S.p8")),
+        default=os.environ.get("ASC_PRIVATE_KEY"),
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -229,6 +229,11 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    for option in ("key_id", "issuer_id", "private_key"):
+        if not getattr(args, option):
+            parser.error(
+                f"--{option.replace('_', '-')} or its ASC environment variable is required"
+            )
     return args.func(args)
 
 

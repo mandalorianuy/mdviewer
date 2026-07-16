@@ -1,5 +1,8 @@
 {
   "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    },
     "fileAssociations": [
       {
         "ext": ["pdf"],
