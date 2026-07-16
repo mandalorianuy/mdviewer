@@ -457,7 +457,10 @@ fn read_local_input_with_hook(
             EXIT_INPUT,
         )
     })?;
-    if before_snapshot != after_snapshot || actual != before.len() {
+    if before_snapshot != after_snapshot
+        || actual != before.len()
+        || !path_still_names_snapshot(&normalized, &before_snapshot)
+    {
         return Err(CliError::new(
             "input_changed",
             "input changed while it was being read",
@@ -595,6 +598,18 @@ fn input_snapshot(_file: &File, _metadata: &fs::Metadata) -> std::io::Result<Inp
         std::io::ErrorKind::Unsupported,
         "input snapshots are unsupported on this platform",
     ))
+}
+
+fn path_still_names_snapshot(path: &Path, expected: &InputSnapshot) -> bool {
+    let Ok(file) = open_input_no_follow(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    metadata.is_file()
+        && !is_reparse_or_symlink(&metadata)
+        && input_snapshot(&file, &metadata).is_ok_and(|actual| &actual == expected)
 }
 
 fn is_no_follow_error(_error: &std::io::Error) -> bool {
@@ -1194,7 +1209,6 @@ mod tests {
                 cancel_file: None,
             },
             || {
-                fs::write(&source, b"<!doctype html><p>mutated!</p>").unwrap();
                 let times = [
                     libc::timespec {
                         tv_sec: before.atime(),
@@ -1205,15 +1219,42 @@ mod tests {
                         tv_nsec: before.mtime_nsec(),
                     },
                 ];
-                let result =
-                    unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) };
-                assert_eq!(result, 0);
+                for attempt in 0..100 {
+                    fs::write(&source, b"<!doctype html><p>mutated!</p>").unwrap();
+                    let result = unsafe {
+                        libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0)
+                    };
+                    assert_eq!(result, 0);
+                    let changed = fs::metadata(&source).unwrap();
+                    if changed.ctime() != before.ctime()
+                        || changed.ctime_nsec() != before.ctime_nsec()
+                    {
+                        return;
+                    }
+                    assert!(attempt < 99, "filesystem ctime did not advance");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
             },
         );
 
         let error = result.unwrap_err();
         assert_eq!(error.code, "input_changed");
         assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebound_path_with_a_new_inode_does_not_match_the_open_snapshot() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let source = directory.path().join("source.html");
+        fs::write(&source, b"<!doctype html><p>original bytes</p>").unwrap();
+        let file = open_input_no_follow(&source).unwrap();
+        let snapshot = input_snapshot(&file, &file.metadata().unwrap()).unwrap();
+
+        fs::remove_file(&source).unwrap();
+        fs::write(&source, b"<!doctype html><p>replacement bytes</p>").unwrap();
+
+        assert!(!path_still_names_snapshot(&source, &snapshot));
     }
 
     #[cfg(unix)]
