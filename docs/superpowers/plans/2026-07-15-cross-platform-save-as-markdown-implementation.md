@@ -892,7 +892,7 @@ After attaching the acceptance evidence, run the strict gate:
 Expected: all approved v1 rows are proven or explicitly excluded. A pending or failed manual row
 must stop tagging and retirement.
 
-- [ ] **Step 4: Tag the last Swift baseline**
+- [x] **Step 4: Tag the last Swift baseline**
 
 ```bash
 git tag -a swift-baseline-final -m "Last buildable Swift MDViewer baseline"
@@ -902,7 +902,7 @@ git push onedev swift-baseline-final
 
 Expected: both remotes contain the annotated tag before Swift removal.
 
-- [ ] **Step 5: Remove Swift in a dedicated commit**
+- [x] **Step 5: Remove Swift in a dedicated commit**
 
 ```bash
 git rm -r legacy/macos-swift

@@ -1,8 +1,7 @@
 # MDViewer
 
 MDViewer converts local documents to GitHub-Flavored Markdown and opens the result in an editor and
-preview. The product is moving from its preserved Swift baseline to a Tauri 2 desktop application
-with a portable Rust conversion core and CLI.
+preview. The desktop product uses Tauri 2 with a portable Rust conversion core and CLI.
 
 The first public binary targets **macOS 13+ on Apple Silicon**. Core, CLI and desktop are continuously
 compiled on macOS, Windows and Linux; Windows and Linux binary releases come later.
@@ -19,8 +18,9 @@ OCR is intentionally deferred to v1.1. Scanned or image-only PDFs report `ocr_re
 metadata but do not have text recognized. Printing through PDF can also lose semantic structure and
 reading-order information, so fidelity depends on what the source application preserves.
 
-The Swift application remains preserved until the strict [v1 parity report](docs/release/v1-parity-report.md)
-has no required or manual row pending. YouTube import remains an explicit post-v1 exclusion rather
+The last buildable Swift application is archived by the annotated `swift-baseline-final` tag. It was
+removed from the active tree only after the strict [v1 parity report](docs/release/v1-parity-report.md)
+had no required or manual row pending. YouTube import remains an explicit post-v1 exclusion rather
 than evidence of local-conversion parity.
 
 ## Develop
@@ -54,7 +54,7 @@ Build a local macOS artifact without making signing or notarization claims:
 - [v1 parity and Swift retirement gate](docs/release/v1-parity-report.md)
 - [CLI contract](docs/reference/cli.md)
 - [cross-platform architecture](docs/superpowers/specs/2026-07-15-cross-platform-save-as-markdown-design.md)
-- [preserved Swift baseline](docs/architecture/swift-baseline.md)
+- [archived Swift baseline](docs/architecture/swift-baseline.md)
 - [contributing](CONTRIBUTING.md)
 - [security](SECURITY.md)
 

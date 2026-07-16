@@ -2,11 +2,12 @@
 
 ## Current status
 
-**STRICT PARITY PASSED — BASELINE TAG PENDING.** All seven real application rows pass with checked-in
-receipts and the strict parity command reports no pending behavior or manual row. The Swift
-implementation remains under `legacy/macos-swift` until the exact pre-removal commit is tagged and
-that annotated tag is verified on both remotes. This is parity evidence, not a notarized release
-claim.
+**STRICT PARITY PASSED — SWIFT RETIRED.** All seven real application rows pass with checked-in
+receipts and the strict parity command reports no pending behavior or manual row. The annotated
+`swift-baseline-final` tag resolves to pre-removal commit
+`8b6d73427693251e5cee7e786dc500013f862815` on both GitHub and OneDev. The active tree no longer
+contains `legacy/macos-swift`, and both workspace and strict parity gates pass after removal. This is
+parity evidence, not a notarized release claim.
 
 The machine authority is `tests/parity/manifest.json`. The strict command is
 `./scripts/verify-parity.sh`; it must reject any required behavior or available application row that
@@ -75,13 +76,12 @@ For each row:
 
 ## Retirement sequence
 
-Retirement remains fail closed:
+The fail-closed retirement sequence completed in order:
 
-1. Keep Swift present while running `verify-legacy-swift.sh`, `verify-workspace.sh` and
-   `verify-parity.sh --automated`.
-2. Complete every real application receipt and make strict `verify-parity.sh` pass.
-3. Only then create and push the annotated Swift baseline tag to both remotes.
-4. Only after both tags exist may a dedicated commit remove `legacy/macos-swift` and rerun strict
-   workspace/parity gates.
+1. Swift passed its frozen 90-test baseline while still present.
+2. Every real application receipt and strict `verify-parity.sh` passed.
+3. The annotated baseline tag was pushed and verified on both remotes.
+4. The active Swift tree and its obsolete verifier were removed together, then workspace and strict
+   parity gates passed again.
 5. Signing, notarization, Gatekeeper and release publication remain later credentialed gates; they
-   are not implied by parity preparation.
+   are not implied by parity retirement.

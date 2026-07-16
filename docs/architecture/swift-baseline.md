@@ -1,21 +1,23 @@
 # Swift migration baseline
 
-The buildable Swift 6.2 macOS application is frozen under
-`legacy/macos-swift/` while the cross-platform replacement is developed. The
-relocation is mechanical: Swift sources, tests, Xcode project, packaging assets,
-and release scripts retain their pre-migration behavior.
+The last buildable Swift 6.2 macOS application is archived by the annotated
+`swift-baseline-final` tag. That tag resolves to pre-removal commit
+`8b6d73427693251e5cee7e786dc500013f862815`, where `legacy/macos-swift/` still
+contains the mechanically relocated Swift sources, tests, Xcode project,
+packaging assets and release scripts.
 
 ## Verification
 
-From the repository root, run:
+Create an isolated worktree at the archived tag, then run:
 
 ```bash
-./scripts/verify-legacy-swift.sh
-swift build --package-path legacy/macos-swift
+git worktree add ../mdviewer-swift-baseline swift-baseline-final
+swift test --package-path ../mdviewer-swift-baseline/legacy/macos-swift
+swift build --package-path ../mdviewer-swift-baseline/legacy/macos-swift
 ```
 
-The frozen test baseline is 90 tests with 0 failures. The root-level verification
-script is the deterministic gate used throughout the migration.
+The frozen test baseline is 90 tests with 0 failures. It was rerun immediately
+before the baseline tag and retirement commit.
 
 ## Frozen feature inventory
 
@@ -36,8 +38,8 @@ script is the deterministic gate used throughout the migration.
 
 ## v1 exclusion
 
-Network-backed YouTube import is present only in this frozen Swift baseline. It
+Network-backed YouTube import is present only in the archived Swift baseline. It
 is explicitly excluded from the cross-platform v1 because the agreed v1
 conversion flow is local and does not require network access. The legacy
-converter remains unchanged as comparison evidence; its presence does not make
-YouTube part of the new v1 scope.
+converter remains unchanged at `swift-baseline-final`; its archived presence does
+not make YouTube part of the new v1 scope.
