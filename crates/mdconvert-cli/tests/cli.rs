@@ -5,6 +5,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(unix)]
+use std::ffi::OsString;
+
 use mdconvert_core::{ConversionRequest, Document};
 use mdconvert_formats::{
     CsvConverter, DocxConverter, EpubConverter, ImageConverter, JsonConverter, PptxConverter,
@@ -687,7 +690,7 @@ fn local_only_interface_rejects_urls() {
 fn rejects_network_device_and_foreign_drive_syntax_for_every_path_argument() {
     let temp = TestDir::new();
     let valid_input = fixture("html/semantic.html");
-    let mut hostile = vec![
+    let hostile = vec![
         r"\\server\share\document.pdf",
         "//server/share/document.pdf",
         r"\\?\C:\document.pdf",
@@ -695,13 +698,31 @@ fn rejects_network_device_and_foreign_drive_syntax_for_every_path_argument() {
         r"\??\C:\document.pdf",
         r"C:document.pdf",
         "smb://server/share/document.pdf",
+        "NUL",
+        "CON.md",
+        "folder/con .md",
+        "folder/AUX.txt",
+        "nested/PRN... ",
+        "CLOCK$",
+        "COM1.log",
+        "COM¹.txt",
+        "LPT9",
+        "LPT².md",
+        "normal/file:stream",
+        r"C:\dir\file:stream",
+        r"\?\GLOBALROOT\Device\HarddiskVolume1\document.pdf",
+        r"\Device\HarddiskVolume1\document.pdf",
     ];
     #[cfg(unix)]
-    hostile.extend([
-        r"C:\document.pdf",
-        "/Network/Servers/share/document.pdf",
-        "/net/server/document.pdf",
-    ]);
+    let hostile = {
+        let mut hostile = hostile;
+        hostile.extend([
+            r"C:\document.pdf",
+            "/Network/Servers/share/document.pdf",
+            "/net/server/document.pdf",
+        ]);
+        hostile
+    };
 
     for (index, path) in hostile.iter().enumerate() {
         let input_result = command()
@@ -739,6 +760,50 @@ fn rejects_network_device_and_foreign_drive_syntax_for_every_path_argument() {
             .output()
             .unwrap();
         assert_failed_json(&cancel_result, "unsafe_path", 2);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_path_arguments_fail_before_lookup_or_publication() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = TestDir::new();
+    let valid_input = fixture("html/semantic.html");
+    let hostile = temp
+        .path()
+        .join(OsString::from_vec(b"not-unicode-\xff.md".to_vec()));
+
+    let cases = [
+        (hostile.as_os_str(), "input"),
+        (hostile.as_os_str(), "output"),
+        (hostile.as_os_str(), "assets"),
+        (hostile.as_os_str(), "cancel"),
+    ];
+    for (index, (path, kind)) in cases.into_iter().enumerate() {
+        let output_path = temp.path().join(format!("unicode-{index}.md"));
+        let mut process = command();
+        process.arg("convert");
+        if kind == "input" {
+            process.arg(path);
+        } else {
+            process.arg(&valid_input);
+        }
+        process.arg("--output");
+        if kind == "output" {
+            process.arg(path);
+        } else {
+            process.arg(&output_path);
+        }
+        if kind == "assets" {
+            process.arg("--assets").arg(path);
+        }
+        if kind == "cancel" {
+            process.arg("--cancel-file").arg(path);
+        }
+        let output = process.arg("--json").output().unwrap();
+        assert_failed_json(&output, "unsafe_path", 2);
+        assert!(!output_path.exists());
     }
 }
 
@@ -850,6 +915,109 @@ fn parser_backed_html_detection_accepts_fragments_custom_elements_and_comments()
         .output()
         .unwrap();
     assert_failed_json(&output, "format_conflict", 3);
+}
+
+#[test]
+fn strong_and_structured_detection_precede_html_signals_deterministically() {
+    let temp = TestDir::new();
+    for (index, (content, expected)) in [
+        (r#"{"markup":"<span>inside JSON</span>"}"#, "json"),
+        ("name,markup\nAlice,<b>inside CSV</b>\n", "csv"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = temp.path().join(format!("extensionless-{index}"));
+        let output_path = temp.path().join(format!("extensionless-{index}.md"));
+        fs::write(&input, content).unwrap();
+        let output = command()
+            .args(["convert"])
+            .arg(&input)
+            .args(["--output"])
+            .arg(&output_path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            json_value(&output.stdout)["metadata"]["source_format"],
+            expected
+        );
+    }
+
+    for (index, (fixture_path, extension)) in [
+        ("pdf/digital-basic.pdf", "json"),
+        ("formats/metadata.png", "csv"),
+        ("formats/bounded.zip", "xml"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = temp.path().join(format!("strong-{index}.{extension}"));
+        fs::copy(fixture(fixture_path), &input).unwrap();
+        let output_path = temp.path().join(format!("strong-{index}.md"));
+        let output = command()
+            .args(["convert"])
+            .arg(&input)
+            .args(["--output"])
+            .arg(&output_path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_failed_json(&output, "format_conflict", 3);
+        assert!(!output_path.exists());
+    }
+
+    let empty_zip = temp.path().join("empty-zip.json");
+    let mut empty_zip_bytes = b"PK\x05\x06".to_vec();
+    empty_zip_bytes.extend_from_slice(&[0; 18]);
+    fs::write(&empty_zip, empty_zip_bytes).unwrap();
+    let empty_zip_output = temp.path().join("empty-zip.md");
+    let output = command()
+        .args(["convert"])
+        .arg(&empty_zip)
+        .args(["--output"])
+        .arg(&empty_zip_output)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&output, "format_conflict", 3);
+    assert!(!empty_zip_output.exists());
+}
+
+#[test]
+fn hardlink_output_and_assets_aliases_are_rejected_as_source_aliases() {
+    let temp = TestDir::new();
+    let input = temp.path().join("source.html");
+    fs::write(&input, "<!doctype html><p>source</p>").unwrap();
+
+    for (index, alias_assets) in [false, true].into_iter().enumerate() {
+        let output_path = temp.path().join(format!("hardlink-{index}.md"));
+        let alias = if alias_assets {
+            output_path.with_extension("assets")
+        } else {
+            output_path.clone()
+        };
+        fs::hard_link(&input, &alias).unwrap();
+        let output = command()
+            .args(["convert"])
+            .arg(&input)
+            .args(["--output"])
+            .arg(&output_path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_failed_json(&output, "source_output_alias", 2);
+        assert_eq!(
+            fs::read_to_string(&input).unwrap(),
+            "<!doctype html><p>source</p>"
+        );
+        fs::remove_file(alias).unwrap();
+    }
 }
 
 #[test]

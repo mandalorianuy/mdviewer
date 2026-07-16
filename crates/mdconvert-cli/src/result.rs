@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use mdconvert_core::{ConversionWarning, DocumentMetadata};
 use serde::Serialize;
 
@@ -22,8 +20,8 @@ pub struct ErrorObject {
 pub struct ResultEnvelope {
     pub schema_version: &'static str,
     pub status: Status,
-    pub markdown_path: Option<PathBuf>,
-    pub assets_path: Option<PathBuf>,
+    pub markdown_path: Option<String>,
+    pub assets_path: Option<String>,
     pub metadata: ResultMetadata,
     pub warnings: Vec<ConversionWarning>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,8 +59,8 @@ impl From<DocumentMetadata> for ResultMetadata {
 
 impl ResultEnvelope {
     pub fn succeeded(
-        markdown_path: PathBuf,
-        assets_path: Option<PathBuf>,
+        markdown_path: String,
+        assets_path: Option<String>,
         metadata: DocumentMetadata,
         warnings: Vec<ConversionWarning>,
     ) -> Self {

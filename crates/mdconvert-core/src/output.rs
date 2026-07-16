@@ -1084,11 +1084,11 @@ fn sync_directory_raw(path: &Path) -> io::Result<()> {
         use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
 
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        return OpenOptions::new()
+        OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)
-            .and_then(|directory| directory.sync_all());
+            .and_then(|directory| directory.sync_all())
     }
 
     #[cfg(not(windows))]

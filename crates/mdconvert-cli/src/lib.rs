@@ -66,7 +66,7 @@ where
                     return EXIT_OUTPUT;
                 }
             } else if let Some(path) = envelope.markdown_path.as_deref() {
-                let _ = writeln!(stdout, "Converted to {}", path.display());
+                let _ = writeln!(stdout, "Converted to {path}");
                 for warning in &envelope.warnings {
                     let _ = writeln!(stderr, "warning[{}]", warning_code(&warning.code));
                 }
@@ -208,6 +208,13 @@ fn standalone_json_mode(arguments: &[OsString]) -> bool {
 }
 
 fn execute(options: Options) -> Result<ResultEnvelope, CliError> {
+    execute_with_input_hook(options, || {})
+}
+
+fn execute_with_input_hook(
+    options: Options,
+    after_open: impl FnOnce(),
+) -> Result<ResultEnvelope, CliError> {
     validate_path_syntax(&options.input)?;
     validate_path_syntax(&options.output)?;
     if let Some(path) = options.assets.as_deref() {
@@ -218,11 +225,25 @@ fn execute(options: Options) -> Result<ResultEnvelope, CliError> {
     }
     let cancellation = FileCancellation(options.cancel_file);
     cancellation.check()?;
-    let opened = read_local_input(&options.input, ConversionLimits::default().max_input_bytes)?;
-    let input = opened.path;
-    let bytes = opened.bytes;
-    let (output, derived_assets) =
-        validate_output(&options.output, options.assets.as_deref(), &input)?;
+    let opened = read_local_input_with_hook(
+        &options.input,
+        ConversionLimits::default().max_input_bytes,
+        after_open,
+    )?;
+    let OpenedInput {
+        file: input_handle,
+        path: input,
+        bytes,
+        snapshot: input_snapshot,
+    } = opened;
+    let (output, derived_assets) = validate_output(
+        &options.output,
+        options.assets.as_deref(),
+        &input,
+        &input_snapshot,
+    )?;
+    let output_result_path = validated_path_string(&output)?;
+    let assets_result_path = validated_path_string(&derived_assets)?;
     cancellation.check()?;
     let format = detect_local_format(&input, &bytes)?;
     cancellation.check()?;
@@ -230,6 +251,7 @@ fn execute(options: Options) -> Result<ResultEnvelope, CliError> {
     let request = ConversionRequest::new(&input)
         .map_err(|_| CliError::new("invalid_input", "input path is invalid", EXIT_INPUT))?;
     let document = convert(format, bytes, &request).map_err(map_conversion_error)?;
+    drop(input_handle);
     cancellation.check()?;
     if !document.assets.is_empty() && derived_assets.exists() {
         return Err(CliError::new(
@@ -251,17 +273,15 @@ fn execute(options: Options) -> Result<ResultEnvelope, CliError> {
     .map_err(map_output_error)?;
 
     Ok(ResultEnvelope::succeeded(
-        written.markdown_path,
-        written.assets_dir,
+        output_result_path,
+        written.assets_dir.is_some().then_some(assets_result_path),
         metadata,
         written.warnings,
     ))
 }
 
 fn validate_path_syntax(path: &Path) -> Result<(), CliError> {
-    let Some(value) = path.to_str() else {
-        return Ok(());
-    };
+    let value = path.to_str().ok_or_else(unsafe_path_error)?;
     let slash = value.replace('\\', "/");
     let lower = slash.to_ascii_lowercase();
     let drive_prefixed = lower.as_bytes().get(1) == Some(&b':')
@@ -275,39 +295,102 @@ fn validate_path_syntax(path: &Path) -> Result<(), CliError> {
             .get(2)
             .is_none_or(|separator| *separator != b'/');
     let foreign_drive = drive_prefixed && !cfg!(windows);
-    let scheme = lower.find("://").is_some_and(|separator| {
-        separator > 0
-            && lower[..separator]
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    let invalid_colon = slash.char_indices().any(|(index, character)| {
+        character == ':' && !(cfg!(windows) && drive_prefixed && index == 1)
     });
     let platform_network_prefix = cfg!(unix)
-        && (lower.starts_with("/network/servers/")
+        && (matches!(lower.as_str(), "/network/servers" | "/net" | "/afs")
+            || lower.starts_with("/network/servers/")
             || lower.starts_with("/net/")
             || lower.starts_with("/afs/"));
+    let native_device_prefix = lower.starts_with("/device/")
+        || lower.starts_with("/global??/")
+        || lower.starts_with("/dosdevices/");
+    let reserved_component = slash.split('/').any(is_windows_reserved_component);
     let unsafe_syntax = lower.starts_with("//")
         || lower.starts_with("/??/")
         || platform_network_prefix
+        || native_device_prefix
         || drive_relative
         || foreign_drive
-        || scheme;
+        || invalid_colon
+        || reserved_component;
     if unsafe_syntax {
-        return Err(CliError::new(
-            "unsafe_path",
-            "network, device, or foreign drive path syntax is not supported",
-            EXIT_USAGE,
-        ));
+        return Err(unsafe_path_error());
     }
     Ok(())
 }
 
-struct OpenedInput {
-    path: PathBuf,
-    bytes: Vec<u8>,
+fn is_windows_reserved_component(component: &str) -> bool {
+    let component = component.trim_end_matches([' ', '.']);
+    if component.is_empty()
+        || (component.len() == 2
+            && component.as_bytes()[0].is_ascii_alphabetic()
+            && component.as_bytes()[1] == b':')
+    {
+        return false;
+    }
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches([' ', '.']);
+    let upper = stem.to_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "CLOCK$"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+            | "COM¹"
+            | "COM²"
+            | "COM³"
+            | "LPT¹"
+            | "LPT²"
+            | "LPT³"
+            | "GLOBALROOT"
+    )
 }
 
-fn read_local_input(path: &Path, maximum: u64) -> Result<OpenedInput, CliError> {
-    read_local_input_with_hook(path, maximum, || {})
+fn unsafe_path_error() -> CliError {
+    CliError::new(
+        "unsafe_path",
+        "path is not Unicode local filesystem syntax",
+        EXIT_USAGE,
+    )
+}
+
+fn validated_path_string(path: &Path) -> Result<String, CliError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(unsafe_path_error)
+}
+
+#[derive(Debug)]
+struct OpenedInput {
+    file: File,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    snapshot: InputSnapshot,
 }
 
 fn read_local_input_with_hook(
@@ -330,6 +413,7 @@ fn read_local_input_with_hook(
         }
     })?;
     let normalized = parent.join(name);
+    validated_path_string(&normalized)?;
     let mut file = open_input_no_follow(&normalized).map_err(|error| {
         if is_no_follow_error(&error) {
             CliError::new(
@@ -371,6 +455,13 @@ fn read_local_input_with_hook(
             EXIT_CONVERSION,
         ));
     }
+    let before_snapshot = input_snapshot(&file, &before).map_err(|_| {
+        CliError::new(
+            "input_unreadable",
+            "input snapshot could not be captured",
+            EXIT_INPUT,
+        )
+    })?;
 
     after_open();
     let capacity = usize::try_from(before.len()).unwrap_or(usize::MAX);
@@ -401,11 +492,14 @@ fn read_local_input_with_hook(
             EXIT_INPUT,
         )
     })?;
-    if !same_file_identity(&before, &after)
-        || actual != before.len()
-        || after.len() != before.len()
-        || after.modified().ok() != before.modified().ok()
-    {
+    let after_snapshot = input_snapshot(&file, &after).map_err(|_| {
+        CliError::new(
+            "input_unreadable",
+            "input snapshot could not be verified",
+            EXIT_INPUT,
+        )
+    })?;
+    if before_snapshot != after_snapshot || actual != before.len() {
         return Err(CliError::new(
             "input_changed",
             "input changed while it was being read",
@@ -413,8 +507,10 @@ fn read_local_input_with_hook(
         ));
     }
     Ok(OpenedInput {
+        file,
         path: normalized,
         bytes,
+        snapshot: before_snapshot,
     })
 }
 
@@ -430,35 +526,158 @@ fn open_input_no_follow(path: &Path) -> std::io::Result<File> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        options
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ);
     }
     options.open(path)
 }
 
-fn is_no_follow_error(error: &std::io::Error) -> bool {
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputSnapshot {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+#[cfg(unix)]
+fn input_snapshot(_file: &File, metadata: &fs::Metadata) -> std::io::Result<InputSnapshot> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(InputSnapshot {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        length: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputSnapshot {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+    change_time: i64,
+    last_write_time: i64,
+    length: u64,
+}
+
+#[cfg(windows)]
+fn input_snapshot(file: &File, metadata: &fs::Metadata) -> std::io::Result<InputSnapshot> {
+    let state = windows_file_state(file)?;
+    Ok(InputSnapshot {
+        volume_serial_number: state.volume_serial_number,
+        file_id: state.file_id,
+        change_time: state.change_time,
+        last_write_time: state.last_write_time,
+        length: metadata.len(),
+    })
+}
+
+#[cfg(windows)]
+struct WindowsFileState {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+    change_time: i64,
+    last_write_time: i64,
+}
+
+#[cfg(windows)]
+fn windows_file_state(file: &File) -> std::io::Result<WindowsFileState> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FILE_ID_INFO, FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx,
+    };
+
+    let handle = file.as_raw_handle();
+    let mut id = FILE_ID_INFO::default();
+    let mut basic = FILE_BASIC_INFO::default();
+    let id_ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&raw mut id).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    let basic_ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            (&raw mut basic).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if id_ok == 0 || basic_ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(WindowsFileState {
+        volume_serial_number: id.VolumeSerialNumber,
+        file_id: id.FileId.Identifier,
+        change_time: basic.ChangeTime,
+        last_write_time: basic.LastWriteTime,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputSnapshot;
+
+#[cfg(not(any(unix, windows)))]
+fn input_snapshot(_file: &File, _metadata: &fs::Metadata) -> std::io::Result<InputSnapshot> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "input snapshots are unsupported on this platform",
+    ))
+}
+
+fn is_no_follow_error(_error: &std::io::Error) -> bool {
     #[cfg(unix)]
-    if error.raw_os_error() == Some(libc::ELOOP) {
+    if _error.raw_os_error() == Some(libc::ELOOP) {
         return true;
     }
     false
 }
 
 #[cfg(unix)]
-fn same_file_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+fn path_aliases_input(snapshot: &InputSnapshot, candidate: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    before.dev() == after.dev() && before.ino() == after.ino()
+    fs::metadata(candidate)
+        .is_ok_and(|metadata| snapshot.device == metadata.dev() && snapshot.inode == metadata.ino())
 }
 
 #[cfg(windows)]
-fn same_file_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    before.volume_serial_number() == after.volume_serial_number()
-        && before.file_index() == after.file_index()
+fn path_aliases_input(snapshot: &InputSnapshot, candidate: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+
+    let mut options = OpenOptions::new();
+    let Ok(file) = options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(candidate)
+    else {
+        return false;
+    };
+    windows_file_state(&file).is_ok_and(|state| {
+        snapshot.volume_serial_number == state.volume_serial_number
+            && snapshot.file_id == state.file_id
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
-fn same_file_identity(_before: &fs::Metadata, _after: &fs::Metadata) -> bool {
-    true
+fn path_aliases_input(_snapshot: &InputSnapshot, candidate: &Path) -> bool {
+    candidate.exists()
 }
 
 #[cfg(windows)]
@@ -478,6 +697,7 @@ fn validate_output(
     requested: &Path,
     requested_assets: Option<&Path>,
     input: &Path,
+    input_snapshot: &InputSnapshot,
 ) -> Result<(PathBuf, PathBuf), CliError> {
     if requested.extension().and_then(OsStr::to_str) != Some("md") {
         return Err(CliError::new(
@@ -518,12 +738,23 @@ fn validate_output(
     }
     let output = parent.join(name);
     let derived_assets = output.with_extension("assets");
+    validated_path_string(&output)?;
+    validated_path_string(&derived_assets)?;
     if output == input || input.starts_with(&derived_assets) {
         return Err(CliError::new(
             "source_output_alias",
             "output and assets must not alias or contain the input",
             EXIT_USAGE,
         ));
+    }
+    for candidate in [&output, &derived_assets] {
+        if path_aliases_input(input_snapshot, candidate) {
+            return Err(CliError::new(
+                "source_output_alias",
+                "output and assets must not alias or contain the input",
+                EXIT_USAGE,
+            ));
+        }
     }
     if fs::symlink_metadata(&output).is_ok() {
         return Err(CliError::new(
@@ -583,69 +814,126 @@ fn extension_format(path: &Path) -> Option<LocalFormat> {
 
 fn detect_local_format(path: &Path, bytes: &[u8]) -> Result<LocalFormat, CliError> {
     let extension = extension_format(path);
+    if let Some(strong) = strong_binary_format(bytes) {
+        return match (strong, extension) {
+            (StrongFormat::Pdf, Some(LocalFormat::Pdf)) => Ok(LocalFormat::Pdf),
+            (StrongFormat::Png, Some(LocalFormat::Png)) => Ok(LocalFormat::Png),
+            (StrongFormat::Jpeg, Some(LocalFormat::Jpeg)) => Ok(LocalFormat::Jpeg),
+            (StrongFormat::Zip, Some(format @ LocalFormat::Zip))
+            | (StrongFormat::Zip, Some(format @ LocalFormat::Epub))
+            | (StrongFormat::Zip, Some(format @ LocalFormat::Docx))
+            | (StrongFormat::Zip, Some(format @ LocalFormat::Pptx))
+            | (StrongFormat::Zip, Some(format @ LocalFormat::Xlsx)) => Ok(format),
+            (StrongFormat::Pdf, None) => Ok(LocalFormat::Pdf),
+            (StrongFormat::Png, None) => Ok(LocalFormat::Png),
+            (StrongFormat::Jpeg, None) => Ok(LocalFormat::Jpeg),
+            (StrongFormat::Zip, None) => Err(CliError::new(
+                "ambiguous_format",
+                "ZIP-container input requires a .zip, .epub, .docx, .pptx, or .xlsx extension",
+                EXIT_INPUT,
+            )),
+            _ => Err(format_conflict()),
+        };
+    }
+
     if let Some(format @ (LocalFormat::Csv | LocalFormat::Json | LocalFormat::Xml)) = extension {
         return detect_format(path, bytes)
             .map(structured_local_format)
             .map_err(map_detection_error)
             .and_then(|actual| {
-                if actual == format {
-                    Ok(format)
-                } else {
-                    Err(format_conflict())
-                }
+                (actual == format)
+                    .then_some(format)
+                    .ok_or_else(format_conflict)
             });
     }
 
-    let pdf = bytes.starts_with(b"%PDF-");
-    let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
-    let jpeg = bytes.starts_with(&[0xff, 0xd8]);
-    let zip = bytes.starts_with(b"PK\x03\x04");
-    let html = if pdf || png || jpeg || zip {
-        false
-    } else {
-        detect_html(
+    if extension == Some(LocalFormat::Html) {
+        return detect_html(
             bytes,
             mdconvert_core::ConversionLimits::default().max_input_bytes,
         )
-        .unwrap_or(false)
-    };
-    if let Some(format) = extension {
-        let matches = match format {
-            LocalFormat::Pdf => pdf,
-            LocalFormat::Png => png,
-            LocalFormat::Jpeg => jpeg,
-            LocalFormat::Html => html,
-            LocalFormat::Zip
-            | LocalFormat::Epub
-            | LocalFormat::Docx
-            | LocalFormat::Pptx
-            | LocalFormat::Xlsx => zip,
-            LocalFormat::Csv | LocalFormat::Json | LocalFormat::Xml => unreachable!(),
-        };
-        return matches.then_some(format).ok_or_else(format_conflict);
+        .map_err(map_html_detection_error)?
+        .then_some(LocalFormat::Html)
+        .ok_or_else(format_conflict);
     }
-    if pdf {
-        return Ok(LocalFormat::Pdf);
-    }
-    if png {
-        return Ok(LocalFormat::Png);
-    }
-    if jpeg {
-        return Ok(LocalFormat::Jpeg);
-    }
-    if zip {
-        return Err(CliError::new(
-            "ambiguous_format",
-            "ZIP-container input requires a .zip, .epub, .docx, .pptx, or .xlsx extension",
-            EXIT_INPUT,
-        ));
-    }
-    if html {
-        return Ok(LocalFormat::Html);
-    }
+
     match detect_format(Path::new(""), bytes) {
-        Ok(format) => Ok(structured_local_format(format)),
-        Err(error) => Err(map_detection_error(error)),
+        Ok(format) => {
+            let format = structured_local_format(format);
+            return if extension.is_none() {
+                Ok(format)
+            } else {
+                Err(format_conflict())
+            };
+        }
+        Err(DetectionError::LimitExceeded {
+            limit,
+            actual,
+            maximum,
+        }) => {
+            return Err(map_detection_error(DetectionError::LimitExceeded {
+                limit,
+                actual,
+                maximum,
+            }));
+        }
+        Err(error @ (DetectionError::Ambiguous { .. } | DetectionError::Conflict { .. }))
+            if extension.is_none() =>
+        {
+            return Err(map_detection_error(error));
+        }
+        Err(_) => {}
+    }
+
+    let html = detect_html(
+        bytes,
+        mdconvert_core::ConversionLimits::default().max_input_bytes,
+    )
+    .map_err(map_html_detection_error)?;
+    match (extension, html) {
+        (Some(LocalFormat::Html), true) | (None, true) => Ok(LocalFormat::Html),
+        (Some(_), _) => Err(format_conflict()),
+        (None, false) => Err(map_detection_error(DetectionError::Unsupported)),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrongFormat {
+    Pdf,
+    Png,
+    Jpeg,
+    Zip,
+}
+
+fn strong_binary_format(bytes: &[u8]) -> Option<StrongFormat> {
+    if bytes.starts_with(b"%PDF-") {
+        Some(StrongFormat::Pdf)
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(StrongFormat::Png)
+    } else if bytes.starts_with(&[0xff, 0xd8]) {
+        Some(StrongFormat::Jpeg)
+    } else if bytes.starts_with(b"PK\x03\x04")
+        || bytes.starts_with(b"PK\x05\x06")
+        || bytes.starts_with(b"PK\x07\x08")
+    {
+        Some(StrongFormat::Zip)
+    } else {
+        None
+    }
+}
+
+fn map_html_detection_error(error: ConversionError) -> CliError {
+    match error {
+        ConversionError::LimitExceeded { .. } => CliError::new(
+            "limit_exceeded",
+            "input exceeds a detection limit",
+            EXIT_CONVERSION,
+        ),
+        _ => CliError::new(
+            "unknown_format",
+            "input format could not be determined safely",
+            EXIT_INPUT,
+        ),
     }
 }
 
@@ -787,7 +1075,7 @@ mod tests {
 
     #[test]
     fn pure_path_syntax_validator_rejects_network_devices_and_foreign_drives() {
-        let mut paths = vec![
+        let paths = vec![
             r"\\server\share\file",
             "//server/share/file",
             r"\\?\C:\file",
@@ -797,12 +1085,16 @@ mod tests {
             "smb://server/share/file",
         ];
         #[cfg(unix)]
-        paths.extend([
-            r"C:\file",
-            "/Network/Servers/share/file",
-            "/net/server/file",
-            "/afs/example/file",
-        ]);
+        let paths = {
+            let mut paths = paths;
+            paths.extend([
+                r"C:\file",
+                "/Network/Servers/share/file",
+                "/net/server/file",
+                "/afs/example/file",
+            ]);
+            paths
+        };
         for path in paths {
             let error = validate_path_syntax(Path::new(path)).unwrap_err();
             assert_eq!(error.code, "unsafe_path", "path {path:?}");
@@ -833,40 +1125,79 @@ mod tests {
     }
 
     #[test]
-    fn metadata_identity_distinguishes_distinct_open_files() {
+    fn handle_snapshots_distinguish_distinct_open_files() {
         let directory = tempfile::TempDir::new().unwrap();
         let first = directory.path().join("first");
         let second = directory.path().join("second");
         fs::write(&first, b"same length").unwrap();
         fs::write(&second, b"same length").unwrap();
 
-        assert!(!same_file_identity(
-            &fs::metadata(first).unwrap(),
-            &fs::metadata(second).unwrap()
-        ));
+        let first_file = File::open(&first).unwrap();
+        let second_file = File::open(&second).unwrap();
+        let first = input_snapshot(&first_file, &first_file.metadata().unwrap()).unwrap();
+        let second = input_snapshot(&second_file, &second_file.metadata().unwrap()).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_inode_same_length_mutation_with_restored_mtime_is_rejected() {
+        use std::ffi::CString;
+        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let source = directory.path().join("source.html");
+        fs::write(&source, b"<!doctype html><p>original</p>").unwrap();
+        let before = fs::metadata(&source).unwrap();
+        let path = CString::new(source.as_os_str().as_bytes()).unwrap();
+        let output = directory.path().join("output.md");
+
+        let result = execute_with_input_hook(
+            Options {
+                input: source.clone(),
+                output: output.clone(),
+                assets: None,
+                cancel_file: None,
+            },
+            || {
+                fs::write(&source, b"<!doctype html><p>mutated!</p>").unwrap();
+                let times = [
+                    libc::timespec {
+                        tv_sec: before.atime(),
+                        tv_nsec: before.atime_nsec(),
+                    },
+                    libc::timespec {
+                        tv_sec: before.mtime(),
+                        tv_nsec: before.mtime_nsec(),
+                    },
+                ];
+                let result =
+                    unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) };
+                assert_eq!(result, 0);
+            },
+        );
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "input_changed");
+        assert!(!output.exists());
     }
 
     #[test]
-    fn opened_input_bytes_are_stable_when_the_path_is_replaced_after_open() {
+    fn path_replacement_after_open_is_rejected_as_input_changed() {
         let directory = tempfile::TempDir::new().unwrap();
         let source = directory.path().join("source.html");
         fs::write(&source, b"<!doctype html><p>original bytes</p>").unwrap();
 
-        let opened = read_local_input_with_hook(
+        let result = read_local_input_with_hook(
             &source,
             ConversionLimits::default().max_input_bytes,
             || {
                 fs::remove_file(&source).unwrap();
                 fs::write(&source, b"<!doctype html><p>replacement bytes</p>").unwrap();
             },
-        )
-        .unwrap();
-
-        assert!(
-            String::from_utf8(opened.bytes)
-                .unwrap()
-                .contains("original bytes")
         );
+
+        assert_eq!(result.unwrap_err().code, "input_changed");
         assert!(
             fs::read_to_string(source)
                 .unwrap()
