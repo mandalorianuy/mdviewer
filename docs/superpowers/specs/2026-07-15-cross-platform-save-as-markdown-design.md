@@ -223,6 +223,12 @@ Los tombstones son pequeños y no tienen limpieza automática; cualquier políti
 de cleanup debe volver a verificar el objeto y usar movimientos exclusivos, nunca borrado
 por un nombre compartido.
 
+Toda mutación del lifecycle abre la cadena de directorios desde `HOME` con no-follow y
+opera con nombres relativos a esos handles. La identidad de cada directorio abierto se
+compara con la cadena visible antes y después del rename; un cambio provoca rollback
+NOREPLACE por los mismos handles o preservación in situ y error seguro. Esto cubre tanto
+`PDF Services` como el almacenamiento de tombstones y evita redirección por symlink.
+
 ### 6.2 Recepción del trabajo
 
 1. El usuario elige **Archivo → Imprimir → PDF → Guardar como Markdown con

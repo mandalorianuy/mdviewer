@@ -26,6 +26,12 @@ porque el contenido podría haber cambiado después de validarlo. Reparar public
 y desinstalar deja `PDF Services` sin el item. Si el almacenamiento de retiro fue interferido, la
 operación intenta restaurar el workflow sin sobrescribir y falla de forma segura.
 
+Los movimientos no vuelven a resolver esos paths durante la mutación: MDViewer abre desde el home
+cada directorio de la cadena con protección no-follow, usa nombres relativos a esos handles y
+comprueba su identidad antes y después del movimiento. Si `PDF Services` o el directorio de retiro
+cambian concurrentemente, revierte por los mismos handles cuando es posible y nunca redirige bytes
+a la ruta sustituta.
+
 ## Uso
 
 1. Abrí un documento en una aplicación macOS, por ejemplo TextEdit.

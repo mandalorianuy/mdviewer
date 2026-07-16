@@ -751,7 +751,10 @@ move the observed target exclusively to a UUID quarantine, revalidate its filesy
 owned-alias checks there, then move it exclusively into the retained tombstone directory under
 `~/Library/Application Support/com.mdviewer.desktop/Retired PDF Services`. Publish or restore only
 with no-overwrite operations. Never unlink the quarantine, tombstone or an abandoned UUID temporary
-by pathname; retain uncertain objects. Task 14 performs no automatic tombstone cleanup.
+by pathname; retain uncertain objects. Open every source and destination directory as a no-follow
+chain relative to `HOME`, rename relative to verified directory handles, compare handle identity
+against the visible path before and after the move, and roll back through the same handles on any
+directory swap. Task 14 performs no automatic tombstone cleanup.
 
 - [x] **Step 4: Connect Preferences → Integrations**
 

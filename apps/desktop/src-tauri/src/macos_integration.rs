@@ -1,15 +1,12 @@
 use std::{
+    ffi::OsStr,
     fs::{self, File},
     io,
     path::{Component, Path, PathBuf},
 };
 
-#[cfg(target_os = "windows")]
-use std::os::windows::ffi::OsStrExt as WindowsOsStrExt;
 #[cfg(target_os = "macos")]
 use std::process::Command;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
-use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -62,6 +59,21 @@ pub trait ApplicationAlias {
 
 pub trait CodeSignatureVerifier {
     fn verify(&self, path: &Path, identity: &str, team: &str) -> io::Result<bool>;
+}
+
+#[doc(hidden)]
+pub trait RetentionInterlock {
+    fn after_directories_opened(&self) -> io::Result<()>;
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct NoopRetentionInterlock;
+
+impl RetentionInterlock for NoopRetentionInterlock {
+    fn after_directories_opened(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -212,13 +224,14 @@ impl ApplicationAlias for NativeApplicationAlias {
     }
 }
 
-pub struct IntegrationManager<A, V> {
+pub struct IntegrationManager<A, V, H = NoopRetentionInterlock> {
     home: PathBuf,
     target: PathBuf,
     retained: PathBuf,
     artifact: ApplicationArtifact,
     alias: A,
     verifier: V,
+    retention_interlock: H,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,12 +247,35 @@ struct TargetInspection {
     identity: Option<FileIdentity>,
 }
 
-impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
+impl<A: ApplicationAlias, V: CodeSignatureVerifier>
+    IntegrationManager<A, V, NoopRetentionInterlock>
+{
     pub fn new(
         home: impl AsRef<Path>,
         artifact: ApplicationArtifact,
         alias: A,
         verifier: V,
+    ) -> Result<Self, IntegrationError> {
+        IntegrationManager::new_with_retention_interlock(
+            home,
+            artifact,
+            alias,
+            verifier,
+            NoopRetentionInterlock,
+        )
+    }
+}
+
+impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
+    IntegrationManager<A, V, H>
+{
+    #[doc(hidden)]
+    pub fn new_with_retention_interlock(
+        home: impl AsRef<Path>,
+        artifact: ApplicationArtifact,
+        alias: A,
+        verifier: V,
+        retention_interlock: H,
     ) -> Result<Self, IntegrationError> {
         let home = home.as_ref();
         if !home.is_absolute() {
@@ -253,6 +289,7 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             artifact,
             alias,
             verifier,
+            retention_interlock,
         })
     }
 
@@ -296,7 +333,7 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             inspected.identity.ok_or(IntegrationError::UnsafeTarget)?,
         )?;
         self.retain_or_restore(quarantine)?;
-        sync_parent(&self.target)
+        Ok(())
     }
 
     fn status_at(&self, target: &Path) -> Result<IntegrationStatus, IntegrationError> {
@@ -380,7 +417,7 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             return Err(IntegrationError::InvalidArtifact);
         }
         let parent = self.target.parent().ok_or(IntegrationError::UnsafeTarget)?;
-        ensure_safe_parent(parent)?;
+        ensure_safe_descendant_directories(&self.home, parent)?;
         let temporary = parent.join(format!(".{WORKFLOW_NAME}.install-{}", Uuid::new_v4()));
         let result = (|| {
             self.alias
@@ -395,20 +432,21 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             if let Some(expected) = replace {
                 let quarantine = self.quarantine_validated_target(expected)?;
                 let retained = self.retain_or_restore(quarantine)?;
-                if move_no_replace(&temporary, &self.target).is_err() {
-                    let _ = move_no_replace(&retained, &self.target);
+                if self.move_no_replace(&temporary, &self.target).is_err() {
+                    let _ = self.move_no_replace(&retained, &self.target);
                     return Err(IntegrationError::UnsafeTarget);
                 }
             } else {
-                move_no_replace(&temporary, &self.target).map_err(|error| {
-                    if error.kind() == io::ErrorKind::AlreadyExists {
-                        IntegrationError::TargetExists
-                    } else {
-                        IntegrationError::Io
-                    }
-                })?;
+                self.move_no_replace(&temporary, &self.target)
+                    .map_err(|error| {
+                        if error.kind() == io::ErrorKind::AlreadyExists {
+                            IntegrationError::TargetExists
+                        } else {
+                            IntegrationError::Io
+                        }
+                    })?;
             }
-            sync_parent(&self.target)
+            Ok(())
         })();
         if result.is_err() {
             let _ = self.retain_path(&temporary);
@@ -422,7 +460,8 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
     ) -> Result<PathBuf, IntegrationError> {
         let parent = self.target.parent().ok_or(IntegrationError::UnsafeTarget)?;
         let quarantine = parent.join(format!(".{WORKFLOW_NAME}.quarantine-{}", Uuid::new_v4()));
-        move_no_replace(&self.target, &quarantine).map_err(|_| IntegrationError::UnsafeTarget)?;
+        self.move_no_replace(&self.target, &quarantine)
+            .map_err(|_| IntegrationError::UnsafeTarget)?;
 
         let moved = fs::symlink_metadata(&quarantine).ok();
         let identity_matches = moved
@@ -441,7 +480,7 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
                 .and_then(file_identity)
                 .is_some_and(|identity| identity == expected);
         if !identity_still_matches {
-            let _ = move_no_replace(&quarantine, &self.target);
+            let _ = self.move_no_replace(&quarantine, &self.target);
             return Err(IntegrationError::UnsafeTarget);
         }
         Ok(quarantine)
@@ -451,7 +490,7 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
         match self.retain_path(&quarantine) {
             Ok(retained) => Ok(retained),
             Err(error) => {
-                let _ = move_no_replace(&quarantine, &self.target);
+                let _ = self.move_no_replace(&quarantine, &self.target);
                 Err(error)
             }
         }
@@ -469,10 +508,45 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
         let retained = self
             .retained
             .join(format!("{WORKFLOW_NAME}-{}.retained", Uuid::new_v4()));
-        move_no_replace(source, &retained).map_err(|_| IntegrationError::UnsafeTarget)?;
-        sync_parent(source)?;
-        sync_parent(&retained)?;
+        let source_directory = VerifiedDirectory::open_descendant(
+            &self.home,
+            source.parent().ok_or(IntegrationError::UnsafeTarget)?,
+        )
+        .map_err(|_| IntegrationError::UnsafeTarget)?;
+        let retained_directory = VerifiedDirectory::open_descendant(&self.home, &self.retained)
+            .map_err(|_| IntegrationError::UnsafeTarget)?;
+        self.retention_interlock
+            .after_directories_opened()
+            .map_err(|_| IntegrationError::Io)?;
+        move_between_verified_directories_no_replace(
+            &source_directory,
+            file_name(source)?,
+            &retained_directory,
+            file_name(&retained)?,
+        )
+        .map_err(|_| IntegrationError::UnsafeTarget)?;
         Ok(retained)
+    }
+
+    fn move_no_replace(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        let source_directory = VerifiedDirectory::open_descendant(
+            &self.home,
+            source
+                .parent()
+                .ok_or_else(|| io::Error::other("source has no parent"))?,
+        )?;
+        let destination_directory = VerifiedDirectory::open_descendant(
+            &self.home,
+            destination
+                .parent()
+                .ok_or_else(|| io::Error::other("destination has no parent"))?,
+        )?;
+        move_between_verified_directories_no_replace(
+            &source_directory,
+            file_name_io(source)?,
+            &destination_directory,
+            file_name_io(destination)?,
+        )
     }
 }
 
@@ -491,19 +565,248 @@ fn file_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectoryIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume: u64,
+    #[cfg(windows)]
+    file_id: [u8; 16],
+}
+
+struct VerifiedDirectory {
+    home: PathBuf,
+    path: PathBuf,
+    file: File,
+    identity: DirectoryIdentity,
+}
+
+impl VerifiedDirectory {
+    fn open_descendant(home: &Path, path: &Path) -> io::Result<Self> {
+        let file = open_directory_chain(home, path)?;
+        let identity = directory_identity(&file)?;
+        Ok(Self {
+            home: home.to_path_buf(),
+            path: path.to_path_buf(),
+            file,
+            identity,
+        })
+    }
+
+    fn path_still_matches(&self) -> io::Result<bool> {
+        let current = open_directory_chain(&self.home, &self.path)?;
+        Ok(directory_identity(&current)? == self.identity)
+    }
+}
+
+fn move_between_verified_directories_no_replace(
+    source: &VerifiedDirectory,
+    source_name: &OsStr,
+    destination: &VerifiedDirectory,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    if !source.path_still_matches()? || !destination.path_still_matches()? {
+        return Err(io::Error::other("directory path changed before move"));
+    }
+    move_relative_no_replace(source, source_name, destination, destination_name)?;
+    let durable = source
+        .file
+        .sync_all()
+        .and_then(|_| destination.file.sync_all())
+        .is_ok();
+    if durable
+        && source.path_still_matches().unwrap_or(false)
+        && destination.path_still_matches().unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let _ = move_relative_no_replace(destination, destination_name, source, source_name);
+    let _ = source.file.sync_all();
+    let _ = destination.file.sync_all();
+    Err(io::Error::other("directory path changed during move"))
+}
+
+fn open_directory_chain(home: &Path, path: &Path) -> io::Result<File> {
+    let relative = path
+        .strip_prefix(home)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path is outside home"))?;
+    let mut directory = open_directory_no_follow(home)?;
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid directory component",
+            ));
+        };
+        directory = open_relative_directory_no_follow(&directory, component)?;
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn open_directory_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn open_relative_directory_no_follow(parent: &File, name: &OsStr) -> io::Result<File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid directory name"))?;
+    // SAFETY: parent is a live directory fd and name is a valid C string.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: openat returned a new owned descriptor.
+        Ok(unsafe { File::from_raw_fd(descriptor) })
+    }
+}
+
+#[cfg(windows)]
+fn open_directory_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+
+    let directory = fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)?;
+    validate_windows_directory(&directory)?;
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn open_relative_directory_no_follow(parent: &File, name: &OsStr) -> io::Result<File> {
+    use windows_sys::{
+        Wdk::Storage::FileSystem::FILE_OPEN,
+        Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE, SYNCHRONIZE},
+    };
+
+    let directory = crate::state::windows_nt_open_relative(
+        parent,
+        name,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE,
+        FILE_OPEN,
+        Some(true),
+    )?;
+    validate_windows_directory(&directory)?;
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn validate_windows_directory(directory: &File) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reparse directory rejected",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_directory_no_follow(_path: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "verified directories are unsupported on this platform",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_relative_directory_no_follow(_parent: &File, _name: &OsStr) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "verified directories are unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn directory_identity(directory: &File) -> io::Result<DirectoryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = directory.metadata()?;
+    Ok(DirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn directory_identity(directory: &File) -> io::Result<DirectoryIdentity> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+    };
+
+    let mut identity = FILE_ID_INFO::default();
+    // SAFETY: identity is a correctly sized writable FILE_ID_INFO buffer.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            directory.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut identity).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(DirectoryIdentity {
+        volume: identity.VolumeSerialNumber,
+        file_id: identity.FileId.Identifier,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn directory_identity(_directory: &File) -> io::Result<DirectoryIdentity> {
+    Ok(DirectoryIdentity {})
+}
+
 #[cfg(target_os = "macos")]
-fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid source path"))?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid destination path"))?;
-    // SAFETY: both C strings are alive for the call and contain no interior NUL bytes.
+fn move_relative_no_replace(
+    source: &VerifiedDirectory,
+    source_name: &OsStr,
+    destination: &VerifiedDirectory,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+
+    let source_name = std::ffi::CString::new(source_name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid source name"))?;
+    let destination_name = std::ffi::CString::new(destination_name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid destination name"))?;
+    // SAFETY: both directory fds and C strings are live for the call.
     let result = unsafe {
         libc::renameatx_np(
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
+            source.file.as_raw_fd(),
+            source_name.as_ptr(),
+            destination.file.as_raw_fd(),
+            destination_name.as_ptr(),
             libc::RENAME_EXCL,
         )
     };
@@ -515,18 +818,25 @@ fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid source path"))?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid destination path"))?;
-    // SAFETY: both C strings are alive for the call and contain no interior NUL bytes.
+fn move_relative_no_replace(
+    source: &VerifiedDirectory,
+    source_name: &OsStr,
+    destination: &VerifiedDirectory,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+
+    let source_name = std::ffi::CString::new(source_name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid source name"))?;
+    let destination_name = std::ffi::CString::new(destination_name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid destination name"))?;
+    // SAFETY: both directory fds and C strings are live for the call.
     let result = unsafe {
         libc::renameat2(
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
+            source.file.as_raw_fd(),
+            source_name.as_ptr(),
+            destination.file.as_raw_fd(),
+            destination_name.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
     };
@@ -537,24 +847,15 @@ fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    // SAFETY: both UTF-16 strings are NUL-terminated and alive for the call. Flags are zero, so
-    // MoveFileExW refuses an existing destination instead of replacing it.
-    let result = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+#[cfg(windows)]
+fn move_relative_no_replace(
+    source: &VerifiedDirectory,
+    source_name: &OsStr,
+    destination: &VerifiedDirectory,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    let source_file = crate::state::windows_open_relative_for_mutation(&source.file, source_name)?;
+    crate::state::windows_rename_open_handle(&source_file, &destination.file, destination_name)
 }
 
 #[cfg(not(any(
@@ -563,13 +864,29 @@ fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
     target_os = "android",
     target_os = "windows"
 )))]
-fn move_no_replace(_source: &Path, _destination: &Path) -> io::Result<()> {
+fn move_relative_no_replace(
+    _source: &VerifiedDirectory,
+    _source_name: &OsStr,
+    _destination: &VerifiedDirectory,
+    _destination_name: &OsStr,
+) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "exclusive rename is not implemented on this platform",
+        "exclusive relative rename is unsupported on this platform",
     ))
 }
 
+fn file_name(path: &Path) -> Result<&OsStr, IntegrationError> {
+    file_name_io(path).map_err(|_| IntegrationError::UnsafeTarget)
+}
+
+fn file_name_io(path: &Path) -> io::Result<&OsStr> {
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))
+}
+
+#[cfg(unix)]
 fn ensure_safe_descendant_directories(
     ancestor: &Path,
     directory: &Path,
@@ -577,73 +894,90 @@ fn ensure_safe_descendant_directories(
     let relative = directory
         .strip_prefix(ancestor)
         .map_err(|_| IntegrationError::UnsafeTarget)?;
-    ensure_safe_directory(ancestor)?;
-    let mut current = ancestor.to_path_buf();
+    let mut current = open_directory_no_follow(ancestor).map_err(|_| IntegrationError::Io)?;
     for component in relative.components() {
         let Component::Normal(component) = component else {
             return Err(IntegrationError::UnsafeTarget);
         };
-        current.push(component);
-        ensure_safe_directory(&current)?;
+        match open_relative_directory_no_follow(&current, component) {
+            Ok(next) => current = next,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_relative_directory(&current, component)?;
+                current.sync_all().map_err(|_| IntegrationError::Io)?;
+                current = open_relative_directory_no_follow(&current, component)
+                    .map_err(|_| IntegrationError::UnsafeTarget)?;
+            }
+            Err(_) => return Err(IntegrationError::UnsafeTarget),
+        }
     }
     Ok(())
 }
 
-fn ensure_safe_directory(directory: &Path) -> Result<(), IntegrationError> {
-    match fs::symlink_metadata(directory) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-                return Err(IntegrationError::UnsafeTarget);
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            match builder.create(directory) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(_) => return Err(IntegrationError::Io),
-            }
-            let metadata = fs::symlink_metadata(directory).map_err(|_| IntegrationError::Io)?;
-            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-                return Err(IntegrationError::UnsafeTarget);
-            }
-            sync_parent(directory)?;
-        }
-        Err(_) => return Err(IntegrationError::Io),
-    }
-    Ok(())
-}
+#[cfg(unix)]
+fn create_relative_directory(parent: &File, name: &OsStr) -> Result<(), IntegrationError> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
 
-fn ensure_safe_parent(parent: &Path) -> Result<(), IntegrationError> {
-    let library = parent.parent().ok_or(IntegrationError::UnsafeTarget)?;
-    if library.exists() {
-        let metadata = fs::symlink_metadata(library).map_err(|_| IntegrationError::Io)?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            return Err(IntegrationError::UnsafeTarget);
-        }
+    let name =
+        std::ffi::CString::new(name.as_bytes()).map_err(|_| IntegrationError::UnsafeTarget)?;
+    // SAFETY: parent is a live directory fd and name is a valid C string.
+    let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+    if result == 0 {
+        Ok(())
     } else {
-        fs::create_dir_all(library).map_err(|_| IntegrationError::Io)?;
-    }
-    if parent.exists() {
-        let metadata = fs::symlink_metadata(parent).map_err(|_| IntegrationError::Io)?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            return Err(IntegrationError::UnsafeTarget);
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            Ok(())
+        } else {
+            Err(IntegrationError::Io)
         }
-    } else {
-        fs::create_dir(parent).map_err(|_| IntegrationError::Io)?;
+    }
+}
+
+#[cfg(windows)]
+fn ensure_safe_descendant_directories(
+    ancestor: &Path,
+    directory: &Path,
+) -> Result<(), IntegrationError> {
+    use windows_sys::{
+        Wdk::Storage::FileSystem::FILE_OPEN_IF,
+        Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE, SYNCHRONIZE},
+    };
+
+    let relative = directory
+        .strip_prefix(ancestor)
+        .map_err(|_| IntegrationError::UnsafeTarget)?;
+    let mut current = open_directory_no_follow(ancestor).map_err(|_| IntegrationError::Io)?;
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(IntegrationError::UnsafeTarget);
+        };
+        match open_relative_directory_no_follow(&current, component) {
+            Ok(next) => current = next,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let next = crate::state::windows_nt_open_relative(
+                    &current,
+                    component,
+                    FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE,
+                    FILE_OPEN_IF,
+                    Some(true),
+                )
+                .map_err(|_| IntegrationError::Io)?;
+                validate_windows_directory(&next).map_err(|_| IntegrationError::UnsafeTarget)?;
+                current.sync_all().map_err(|_| IntegrationError::Io)?;
+                current = next;
+            }
+            Err(_) => return Err(IntegrationError::UnsafeTarget),
+        }
     }
     Ok(())
 }
 
-fn sync_parent(path: &Path) -> Result<(), IntegrationError> {
-    File::open(path.parent().ok_or(IntegrationError::UnsafeTarget)?)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| IntegrationError::Io)
+#[cfg(not(any(unix, windows)))]
+fn ensure_safe_descendant_directories(
+    _ancestor: &Path,
+    _directory: &Path,
+) -> Result<(), IntegrationError> {
+    Err(IntegrationError::UnsafeTarget)
 }
 
 #[must_use]

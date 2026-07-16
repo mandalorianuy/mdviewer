@@ -6,7 +6,7 @@ use std::{
 
 use mdviewer_desktop_lib::macos_integration::{
     ApplicationAlias, ApplicationArtifact, CodeSignatureVerifier, IntegrationError,
-    IntegrationManager, IntegrationStatus, WORKFLOW_NAME, sha256_hex,
+    IntegrationManager, IntegrationStatus, RetentionInterlock, WORKFLOW_NAME, sha256_hex,
 };
 use tempfile::TempDir;
 
@@ -130,6 +130,48 @@ impl ApplicationAlias for MutateQuarantineAfterAliasResolution {
             fs::write(alias, b"unrelated in-place replacement")?;
         }
         Ok(resolved)
+    }
+}
+
+#[cfg(unix)]
+struct SwapRetentionDirectoryAfterValidation {
+    retained: PathBuf,
+    displaced: PathBuf,
+    outside: PathBuf,
+    swapped: AtomicBool,
+}
+
+#[cfg(unix)]
+impl RetentionInterlock for SwapRetentionDirectoryAfterValidation {
+    fn after_directories_opened(&self) -> io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        if !self.swapped.swap(true, Ordering::SeqCst) {
+            fs::rename(&self.retained, &self.displaced)?;
+            symlink(&self.outside, &self.retained)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+struct SwapPdfServicesDirectoryAfterValidation {
+    pdf_services: PathBuf,
+    displaced: PathBuf,
+    outside: PathBuf,
+    swapped: AtomicBool,
+}
+
+#[cfg(unix)]
+impl RetentionInterlock for SwapPdfServicesDirectoryAfterValidation {
+    fn after_directories_opened(&self) -> io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        if !self.swapped.swap(true, Ordering::SeqCst) {
+            fs::rename(&self.pdf_services, &self.displaced)?;
+            symlink(&self.outside, &self.pdf_services)?;
+        }
+        Ok(())
     }
 }
 
@@ -432,6 +474,105 @@ fn interfered_retention_directory_is_preserved_and_restores_the_workflow() {
     assert_eq!(fs::read(outside.join("keep")).unwrap(), b"unrelated");
     assert!(
         fs::symlink_metadata(retained)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn retention_directory_swapped_after_validation_cannot_redirect_the_tombstone() {
+    let home = TempDir::new().unwrap();
+    let app = application(home.path(), "MDViewer.app", b"current-signed-app");
+    let installed = manager(&home, app.clone());
+    installed.install().unwrap();
+    let retained = home
+        .path()
+        .join("Library/Application Support/com.mdviewer.desktop/Retired PDF Services");
+    fs::create_dir_all(&retained).unwrap();
+    let displaced = home.path().join("validated-retention-directory");
+    let outside = home.path().join("unrelated-retention-directory");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep"), b"unrelated").unwrap();
+    let manager = IntegrationManager::new_with_retention_interlock(
+        home.path(),
+        artifact(app.clone()),
+        FixtureAlias,
+        FixtureSignature,
+        SwapRetentionDirectoryAfterValidation {
+            retained: retained.clone(),
+            displaced: displaced.clone(),
+            outside: outside.clone(),
+            swapped: AtomicBool::new(false),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        manager.uninstall().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+    assert_eq!(manager.status().unwrap(), IntegrationStatus::Installed);
+    assert_eq!(FixtureAlias.resolve_alias(&manager.target()).unwrap(), app);
+    assert_eq!(fs::read(outside.join("keep")).unwrap(), b"unrelated");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&displaced).unwrap().count(), 0);
+    assert!(
+        fs::symlink_metadata(retained)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pdf_services_directory_swapped_after_validation_cannot_redirect_restore() {
+    let home = TempDir::new().unwrap();
+    let app = application(home.path(), "MDViewer.app", b"current-signed-app");
+    let installed = manager(&home, app.clone());
+    installed.install().unwrap();
+    let pdf_services = home.path().join("Library/PDF Services");
+    let displaced = home.path().join("validated-pdf-services-directory");
+    let outside = home.path().join("unrelated-pdf-services-directory");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep"), b"unrelated").unwrap();
+    let manager = IntegrationManager::new_with_retention_interlock(
+        home.path(),
+        artifact(app.clone()),
+        FixtureAlias,
+        FixtureSignature,
+        SwapPdfServicesDirectoryAfterValidation {
+            pdf_services: pdf_services.clone(),
+            displaced: displaced.clone(),
+            outside: outside.clone(),
+            swapped: AtomicBool::new(false),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        manager.uninstall().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+    assert_eq!(fs::read(outside.join("keep")).unwrap(), b"unrelated");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    let preserved: Vec<_> = fs::read_dir(&displaced)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(preserved.len(), 1);
+    assert!(
+        preserved[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(".quarantine-")
+    );
+    assert_eq!(FixtureAlias.resolve_alias(&preserved[0]).unwrap(), app);
+    assert!(
+        fs::symlink_metadata(pdf_services)
             .unwrap()
             .file_type()
             .is_symlink()
