@@ -272,14 +272,6 @@ fn jpeg_validates_frame_components_scan_parameters_and_multiscan_state() {
         multiscan_jpeg_with_redefined_dri(true),
     ));
 
-    let mut dri_inside_entropy = jpeg(1, 1);
-    let eoi = dri_inside_entropy
-        .windows(2)
-        .position(|window| window == [0xff, 0xd9])
-        .unwrap();
-    dri_inside_entropy.splice(eoi..eoi, [0xff, 0xdd, 0, 4, 0, 1, 0]);
-    cases.push(("dri-inside-entropy", dri_inside_entropy));
-
     for (name, bytes) in cases {
         let path = temp.path().join(format!("{name}.jpg"));
         fs::write(&path, bytes).unwrap();
@@ -310,6 +302,65 @@ fn jpeg_validates_frame_components_scan_parameters_and_multiscan_state() {
     let valid_redefined = temp.path().join("dri-redefined-between-scans.jpg");
     fs::write(&valid_redefined, multiscan_jpeg_with_redefined_dri(false)).unwrap();
     assert!(ImageConverter.convert(&request(valid_redefined)).is_ok());
+}
+
+#[test]
+fn jpeg_dri_must_be_followed_by_a_frame_or_scan_header() {
+    let temp = TempDir::new().unwrap();
+
+    let mut before_eoi = jpeg(1, 1);
+    let eoi = before_eoi
+        .windows(2)
+        .position(|window| window == [0xff, 0xd9])
+        .unwrap();
+    before_eoi.splice(eoi..eoi, [0xff, 0xdd, 0, 4, 0, 1]);
+    let invalid_final = temp.path().join("dri-before-eoi.jpg");
+    fs::write(&invalid_final, before_eoi).unwrap();
+    assert!(matches!(
+        ImageConverter.convert(&request(invalid_final)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let mut comment_before_eoi = jpeg(1, 1);
+    let eoi = comment_before_eoi
+        .windows(2)
+        .position(|window| window == [0xff, 0xd9])
+        .unwrap();
+    comment_before_eoi.splice(eoi..eoi, [0xff, 0xdd, 0, 4, 0, 1, 0xff, 0xfe, 0, 3, b'x']);
+    let invalid_terminal = temp.path().join("dri-comment-before-eoi.jpg");
+    fs::write(&invalid_terminal, comment_before_eoi).unwrap();
+    assert!(matches!(
+        ImageConverter.convert(&request(invalid_terminal)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let mut before_frame = jpeg(1, 1);
+    let frame = before_frame
+        .windows(2)
+        .position(|window| window == [0xff, 0xc0])
+        .unwrap();
+    before_frame.splice(frame..frame, [0xff, 0xdd, 0, 4, 0, 0]);
+    let valid_frame = temp.path().join("dri-before-frame.jpg");
+    fs::write(&valid_frame, before_frame).unwrap();
+    assert!(ImageConverter.convert(&request(valid_frame)).is_ok());
+
+    let mut tables_before_scan = jpeg(1, 1);
+    let scan = tables_before_scan
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .unwrap();
+    tables_before_scan.splice(scan..scan, [0xff, 0xdd, 0, 4, 0, 0, 0xff, 0xfe, 0, 3, b'x']);
+    let valid_scan = temp.path().join("dri-tables-before-scan.jpg");
+    fs::write(&valid_scan, tables_before_scan).unwrap();
+    assert!(ImageConverter.convert(&request(valid_scan)).is_ok());
+
+    let progressive = [
+        0xff, 0xd8, 0xff, 0xc2, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0, 0xff, 0xdd, 0, 4, 0, 0, 0xff,
+        0xda, 0, 8, 1, 1, 0, 0, 0, 0, 0, 0xff, 0xd9,
+    ];
+    let valid_progressive = temp.path().join("dri-before-progressive-scan.jpg");
+    fs::write(&valid_progressive, progressive).unwrap();
+    assert!(ImageConverter.convert(&request(valid_progressive)).is_ok());
 }
 
 #[test]

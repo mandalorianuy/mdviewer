@@ -503,6 +503,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
     let mut sequential_components = std::collections::HashSet::new();
     let mut progressive_coefficients = std::collections::HashMap::new();
     let mut restart_interval = 0u16;
+    let mut dri_requires_frame_or_scan = false;
     while cursor < bytes.len() {
         if bytes.get(cursor) != Some(&0xff) {
             return Err(corrupt_error("JPEG marker is missing its 0xFF prefix"));
@@ -515,6 +516,11 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
             .ok_or_else(|| corrupt_error("truncated JPEG marker"))?;
         cursor += 1;
         if marker == 0xd9 {
+            if dri_requires_frame_or_scan {
+                return Err(corrupt_error(
+                    "JPEG DRI must be followed by a frame or scan header",
+                ));
+            }
             ended = cursor == bytes.len() && scans > 0;
             break;
         }
@@ -594,6 +600,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
                     "sequential JPEG component appears in multiple scans",
                 ));
             }
+            dri_requires_frame_or_scan = false;
             cursor = data_end;
             let mut entropy_bytes = 0u64;
             let mut expected_restart = 0u8;
@@ -659,6 +666,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
                 return Err(corrupt_error("invalid JPEG DRI segment"));
             }
             restart_interval = u16::from_be_bytes([data[0], data[1]]);
+            dri_requires_frame_or_scan = true;
         } else if matches!(marker, 0xc0 | 0xc2) {
             if frame.is_some() {
                 return Err(corrupt_error(
@@ -699,6 +707,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
                 progressive: marker == 0xc2,
                 components,
             });
+            dri_requires_frame_or_scan = false;
         } else if matches!(marker, 0xc1 | 0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
             return Err(ConversionError::UnsupportedFormat {
                 format: format!("JPEG coding marker 0x{marker:02x}"),

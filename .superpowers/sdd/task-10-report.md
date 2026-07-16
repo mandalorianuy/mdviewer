@@ -59,8 +59,9 @@ Markdown strings.
   `png.interlace_profile=non_interlaced_only`. JPEG validates frame components,
   scan selectors/parameters, stuffing, DRI structure, per-scan restart-marker
   sequence, legal DRI redefinition between scans, and Ri=0 restart disabling,
-  plus multiscan state, entropy, and terminal EOI. Technical-only metadata does
-  not suppress `OcrDeferred`; Task 10 never invokes or requires OCR.
+  plus DRI marker placement that must resolve to a following SOF/SOS header,
+  multiscan state, entropy, and terminal EOI. Technical-only metadata does not
+  suppress `OcrDeferred`; Task 10 never invokes or requires OCR.
 
 The HTML crate gained a bounded `convert_bytes` entry point so EPUB and ZIP can
 reuse its semantic conversion without writing package members to disk.
@@ -159,6 +160,16 @@ GREEN. Valid PLTE-before-tRNS, DRI=0 without RST, DRI changes between scans,
 FILTERXML, string literals, and `'A|B'!A1` remain accepted; RST after disable,
 true DDE, and case/whitespace variants of WEBSERVICE, RTD, and IMAGE fail closed.
 
+Fifth-review RED replaced the prior ineffective DRI-placement regression with
+the exact malformed boundary: a valid JPEG with only `FF DD 00 04 00 01`
+inserted after final entropy immediately before EOI. That input was accepted
+before the production change. The parser now keeps explicit pending DRI
+placement state across tables/miscellaneous segments and clears it only at a
+legal SOF/SOS header; EOI or other terminal flow with unresolved DRI is corrupt.
+Focused GREEN boundaries cover DRI-before-SOF, DRI-through-COM-before-SOS,
+DRI-between-scans, Ri=0, and progressive/multiscan compatibility, while both
+DRI-before-EOI and DRI-through-COM-before-EOI are rejected.
+
 Final focused ZIP GREEN:
 
 ```text
@@ -170,7 +181,7 @@ Result: 1 passed, 0 failed.
 
 ## Final validation
 
-- `cargo test -p mdconvert-formats`: 80 passed, 0 failed (41 container, 12 image,
+- `cargo test -p mdconvert-formats`: 81 passed, 0 failed (41 container, 13 image,
   27 structured-format tests).
 - `cargo test -p mdconvert-core`: 63 passed, 0 failed.
 - `cargo test -p mdconvert-html`: 18 passed, 0 failed.
@@ -178,7 +189,7 @@ Result: 1 passed, 0 failed.
 - `cargo fmt --all -- --check`: passed.
 - Network dependency gate above: passed.
 - `PDFIUM_DYNAMIC_LIB_PATH="$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib" ./scripts/verify-workspace.sh`:
-  passed, including 222 Rust tests, doc tests, TypeScript checking, 3 frontend
+  passed, including 223 Rust tests, doc tests, TypeScript checking, 3 frontend
   tests, and the production frontend build.
 - `./scripts/verify-legacy-swift.sh`: 90 executed, 0 failures.
 - `git diff --check`: passed.
