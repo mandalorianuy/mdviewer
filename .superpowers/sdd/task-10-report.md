@@ -25,7 +25,10 @@ Markdown strings.
   package, validates XHTML as strict XML, and passes direct bounded asset
   references to the HTML byte converter without data-URL round trips. Image
   sources accept only manifest-authenticated normalized package paths; authored
-  schemes and the private internal reference namespace fail closed.
+  schemes and the private internal reference namespace fail closed. HTML
+  element and attribute names are ASCII-case-canonicalized before sanitizer
+  policy checks, so authored uppercase aliases cannot bypass private-reference
+  rejection.
 - DOCX: reads relationships, metadata, styles with `basedOn` inheritance,
   bounded iterative `basedOn` inheritance, numbering, headings, every
   successive nested-list run, paragraphs, bold/italic runs, tables, safe local
@@ -39,15 +42,21 @@ Markdown strings.
   cached displayed values. A1 references, row/cell ordering, dimensions, sparse
   allocation, and external-data parts/relationships fail closed. Formula
   contents are never evaluated; external-workbook and DDE references in cell
-  formulas or defined names are rejected before emission. The complete
-  materialized table rectangle is checked against the cell budget.
+  formulas or defined names are rejected before emission. The quote-aware
+  formula tokenizer handles doubled apostrophes in quoted sheet names, ignores
+  string literals, and rejects external-data functions despite casing or
+  whitespace variations. The complete materialized table rectangle is checked
+  against the cell budget.
 - PNG/JPEG: preserves original local image assets, dimensions, and bounded
   document-semantic metadata without raster rendering. Width, height, and pixel
   count are checked before allocation. PNG validates chunk order, CRCs, bounded
-  image-data expansion, and exact stream boundaries. JPEG validates frame
-  components, scan selectors/parameters, stuffing/restarts, multiscan state,
-  entropy, and terminal EOI. Technical-only metadata does not suppress
-  `OcrDeferred`; Task 10 never invokes or requires OCR.
+  image-data expansion, exact stream boundaries, scanline filter bytes, and
+  color-type-specific PLTE/tRNS rules. Adam7 returns typed `UnsupportedInput`;
+  successful PNG metadata reports
+  `png.interlace_profile=non_interlaced_only`. JPEG validates frame components,
+  scan selectors/parameters, stuffing, DRI structure, restart-marker sequence,
+  multiscan state, entropy, and terminal EOI. Technical-only metadata does not
+  suppress `OcrDeferred`; Task 10 never invokes or requires OCR.
 
 The HTML crate gained a bounded `convert_bytes` entry point so EPUB and ZIP can
 reuse its semantic conversion without writing package members to disk.
@@ -72,8 +81,11 @@ and external images fail closed. Relationship `TargetMode` is a closed enum,
 and missing/unsafe hyperlinks preserve text with deduplicated scoped warnings.
 External links are never fetched. XLSX external links, connections, queries,
 external formulas, and any external relationship fail closed. OOXML Strict
-namespace/relationship families return typed `unsupported_input`; successful
-OOXML metadata reports `ooxml_profile=transitional_only`.
+namespace/relationship families are detected from parsed, authenticated content
+types, root relationships, and main-part expanded names and return typed
+`unsupported_input`; raw package substrings and ordinary document text do not
+produce false Strict classifications. Successful OOXML metadata reports
+`ooxml_profile=transitional_only`.
 
 The production dependency graph passes:
 
@@ -120,6 +132,18 @@ acceptance, and a signatureless ZIP descriptor whose CRC equals the optional
 signature magic. Each test failed for the reported behavior before its focused
 production change and is now GREEN.
 
+Third-review RED cases reproduced six remaining gaps before their production
+changes: (1) uppercase EPUB element/attribute aliases bypassing private asset
+reference checks; (2) invalid PNG scanline filters and incomplete PLTE/tRNS
+validation; (3) Adam7 being classified as corrupt instead of the explicit
+non-interlaced-only `UnsupportedInput` profile; (4) JPEG restart markers being
+accepted without a valid DRI segment or in the wrong sequence; (5) raw OOXML
+Strict substring scanning both missing escaped namespace URIs and rejecting
+ordinary Transitional document/binary content; and (6) XLSX external formulas
+bypassing checks through quoted workbook names with escaped apostrophes or
+function casing/whitespace. All six focused regressions are now GREEN, including
+an embedded OOXML PNG with an invalid filter byte.
+
 Final focused ZIP GREEN:
 
 ```text
@@ -131,7 +155,7 @@ Result: 1 passed, 0 failed.
 
 ## Final validation
 
-- `cargo test -p mdconvert-formats`: 78 passed, 0 failed (41 container, 10 image,
+- `cargo test -p mdconvert-formats`: 79 passed, 0 failed (41 container, 11 image,
   27 structured-format tests).
 - `cargo test -p mdconvert-core`: 63 passed, 0 failed.
 - `cargo test -p mdconvert-html`: 18 passed, 0 failed.
@@ -139,7 +163,7 @@ Result: 1 passed, 0 failed.
 - `cargo fmt --all -- --check`: passed.
 - Network dependency gate above: passed.
 - `PDFIUM_DYNAMIC_LIB_PATH="$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib" ./scripts/verify-workspace.sh`:
-  passed, including 220 Rust tests, doc tests, TypeScript checking, 3 frontend
+  passed, including 221 Rust tests, doc tests, TypeScript checking, 3 frontend
   tests, and the production frontend build.
 - `./scripts/verify-legacy-swift.sh`: 90 executed, 0 failures.
 - `git diff --check`: passed.
@@ -184,5 +208,7 @@ Shared-emitter goldens:
   recalculated.
 - Image v1 supports structurally validated PNG/JPEG plus bounded embedded
   metadata only; GIF/BMP/WebP/SVG are rejected and there is no pixel OCR or
-  general EXIF rendering pipeline.
+  general EXIF rendering pipeline. PNG validation is explicitly
+  non-interlaced-only; Adam7 returns typed `unsupported_input` and is not
+  claimed as validated.
 - The unavailable advisory scanner is the only validation gap recorded above.
