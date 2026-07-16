@@ -13,6 +13,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     ConversionWarning, Document, EmitError, GfmOptions, emit_gfm_with_asset_prefix,
+    is_windows_reserved_component,
     manifest::{AssetManifest, MANIFEST_FILE_NAME, SCHEMA_VERSION, sha256_hex},
 };
 
@@ -816,7 +817,7 @@ fn is_safe_basename(name: &str) -> bool {
         || name.ends_with(['.', ' '])
         || name.chars().any(|character| character.is_ascii_control())
         || canonical_file_name(name) == MANIFEST_FILE_NAME
-        || is_windows_reserved_name(name)
+        || is_windows_reserved_component(name)
     {
         return false;
     }
@@ -826,41 +827,6 @@ fn is_safe_basename(name: &str) -> bool {
 
 fn canonical_file_name(name: &str) -> String {
     name.nfkc().flat_map(char::to_lowercase).collect()
-}
-
-fn is_windows_reserved_name(name: &str) -> bool {
-    let basename = canonical_file_name(name)
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .to_owned();
-    matches!(
-        basename.as_str(),
-        "con"
-            | "prn"
-            | "aux"
-            | "nul"
-            | "com1"
-            | "com2"
-            | "com3"
-            | "com4"
-            | "com5"
-            | "com6"
-            | "com7"
-            | "com8"
-            | "com9"
-            | "lpt1"
-            | "lpt2"
-            | "lpt3"
-            | "lpt4"
-            | "lpt5"
-            | "lpt6"
-            | "lpt7"
-            | "lpt8"
-            | "lpt9"
-            | "conin$"
-            | "conout$"
-    )
 }
 
 fn inspect_existing_outputs(paths: &PublicationPaths) -> Result<ExistingOutputs, OutputError> {

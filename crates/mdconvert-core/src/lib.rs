@@ -4,6 +4,7 @@ pub mod gfm;
 mod manifest;
 pub mod model;
 pub mod output;
+mod path_policy;
 
 pub use converter::Converter;
 pub use error::{ConversionError, EmitError, ModelError};
@@ -15,3 +16,4 @@ pub use model::{
 pub use output::{
     Cancellation, NeverCancel, OutputError, OutputTarget, OverwritePolicy, WriteResult, publish,
 };
+pub use path_policy::is_windows_reserved_component;

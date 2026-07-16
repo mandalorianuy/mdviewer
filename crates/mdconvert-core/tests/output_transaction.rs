@@ -392,6 +392,8 @@ fn rejects_unsafe_or_duplicate_asset_file_names() {
         "lpt9",
         "CONIN$.txt",
         "conout$.png",
+        "CoNiN$ .txt",
+        "cOnOuT$.log... ",
     ] {
         let error = publish(
             &document_with_asset(unsafe_name, b"asset"),

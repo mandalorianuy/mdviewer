@@ -15,11 +15,13 @@ source/output alias, output assets directory that contains the source, unsafe pa
 input. It never overwrites an existing output.
 
 Every path argument must be Unicode/JSON-representable and is syntax-checked before any filesystem
-lookup. UNC, network, device/verbatim/globalroot, drive-relative, foreign-drive, and NTFS alternate
-data stream syntax are rejected as `unsafe_path`; platform network-mount prefixes are rejected too.
-Windows DOS device aliases such as `CON`, `NUL`, `AUX`, `COM1`, and `LPT1` are rejected
-case-insensitively in every component, including extension and trailing-dot/space variants. Option
-values cannot be another `--flag`, and duplicate, missing, or unknown options are
+lookup. UNC, network, device/verbatim/globalroot, drive-relative, foreign-drive, and explicit
+`scheme://` syntax are rejected as `unsafe_path`; platform network-mount prefixes are rejected too.
+On Windows, NTFS alternate data stream colons are also rejected. On Unix, a colon is a valid local
+filename character, so paths such as `report:2026.json` and `report:2026.md` remain supported.
+Windows DOS device aliases such as `CON`, `NUL`, `CONIN$`, `CONOUT$`, `COM1`, and `LPT1` are
+rejected case-insensitively in every component, including extension and trailing-dot/space
+variants. Option values cannot be another `--flag`, and duplicate, missing, or unknown options are
 `invalid_arguments`. JSON diagnostics are enabled only by a standalone `--json`, never by text
 consumed as another option's value.
 
@@ -29,7 +31,10 @@ buffer while the source handle remains open. Unix snapshots include device, inod
 and ctime; Windows holds a sharing mode that denies write/delete and snapshots handle identity,
 length, last-write time, and change time. Any change or path replacement fails as `input_changed`;
 the CLI never reopens the source for a format-specific converter. Existing output/assets hardlinks
-to the source fail as `source_output_alias` before the normal no-clobber check.
+to the source fail as `source_output_alias` before the normal no-clobber check. Existing derived
+assets directories are canonicalized and compared to canonical input ancestors by filesystem
+identity, preserving the same taxonomy for case- or Unicode-equivalent spellings on filesystems
+that treat them as aliases without conflating distinct directories on case-sensitive filesystems.
 
 The local v1 registry contains PDF, HTML, CSV, JSON, XML, ZIP, EPUB, DOCX, PPTX, XLSX, PNG, and
 JPEG. Dispatch is deterministic: strong PDF/PNG/JPEG/ZIP signatures are checked first; structured

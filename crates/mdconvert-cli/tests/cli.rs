@@ -704,12 +704,14 @@ fn rejects_network_device_and_foreign_drive_syntax_for_every_path_argument() {
         "folder/AUX.txt",
         "nested/PRN... ",
         "CLOCK$",
+        "CONIN$",
+        "conout$.md",
+        "nested/CoNiN$.txt... ",
+        "nested/cOnOuT$ .log",
         "COM1.log",
         "COM¹.txt",
         "LPT9",
         "LPT².md",
-        "normal/file:stream",
-        r"C:\dir\file:stream",
         r"\?\GLOBALROOT\Device\HarddiskVolume1\document.pdf",
         r"\Device\HarddiskVolume1\document.pdf",
     ];
@@ -721,6 +723,12 @@ fn rejects_network_device_and_foreign_drive_syntax_for_every_path_argument() {
             "/Network/Servers/share/document.pdf",
             "/net/server/document.pdf",
         ]);
+        hostile
+    };
+    #[cfg(windows)]
+    let hostile = {
+        let mut hostile = hostile;
+        hostile.extend(["normal/file:stream", r"C:\dir\file:stream"]);
         hostile
     };
 
@@ -761,6 +769,42 @@ fn rejects_network_device_and_foreign_drive_syntax_for_every_path_argument() {
             .unwrap();
         assert_failed_json(&cancel_result, "unsafe_path", 2);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn local_colon_paths_are_valid_on_unix() {
+    let temp = TestDir::new();
+    let input = temp.path().join("report:2026.json");
+    let output_path = temp.path().join("report:2026.md");
+    let assets = temp.path().join("report:2026.assets");
+    let cancellation = temp.path().join("cancel:marker");
+    fs::write(&input, r#"{"year":2026,"markup":"<span>local</span>"}"#).unwrap();
+
+    let output = command()
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output_path)
+        .args(["--assets"])
+        .arg(&assets)
+        .args(["--cancel-file"])
+        .arg(&cancellation)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        json_value(&output.stdout)["metadata"]["source_format"],
+        "json"
+    );
+    assert!(output_path.is_file());
+    assert!(!assets.exists());
 }
 
 #[cfg(unix)]
@@ -1017,6 +1061,43 @@ fn hardlink_output_and_assets_aliases_are_rejected_as_source_aliases() {
             "<!doctype html><p>source</p>"
         );
         fs::remove_file(alias).unwrap();
+    }
+}
+
+#[test]
+fn existing_equivalent_assets_spelling_uses_source_alias_taxonomy_when_supported() {
+    let temp = TestDir::new();
+    for (index, (actual_name, requested_name)) in [
+        ("Alias.assets", "alias.assets"),
+        ("Café.assets", "Cafe\u{301}.assets"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let actual_assets = temp.path().join(actual_name);
+        fs::create_dir(&actual_assets).unwrap();
+        let input = actual_assets.join(format!("source-{index}.html"));
+        fs::write(&input, "<!doctype html><p>source</p>").unwrap();
+        let requested_assets = temp.path().join(requested_name);
+        if fs::canonicalize(&requested_assets).is_err() {
+            fs::remove_file(&input).unwrap();
+            fs::remove_dir(&actual_assets).unwrap();
+            continue;
+        }
+        let output_path = requested_assets.with_extension("md");
+        let output = command()
+            .args(["convert"])
+            .arg(&input)
+            .args(["--output"])
+            .arg(&output_path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_failed_json(&output, "source_output_alias", 2);
+        assert_eq!(
+            fs::read_to_string(&input).unwrap(),
+            "<!doctype html><p>source</p>"
+        );
     }
 }
 

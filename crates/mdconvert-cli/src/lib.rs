@@ -9,7 +9,7 @@ use std::{
 
 use mdconvert_core::{
     Cancellation, ConversionError, ConversionLimits, ConversionRequest, OutputError, OutputTarget,
-    OverwritePolicy, WarningCode, publish,
+    OverwritePolicy, WarningCode, is_windows_reserved_component, publish,
 };
 use mdconvert_formats::{
     DetectionError, DocxConverter, EpubConverter, ImageConverter, JsonConverter, LocalFormat,
@@ -19,6 +19,7 @@ use mdconvert_formats::{
 use mdconvert_html::{HtmlConverter, detect_html};
 use mdconvert_pdf::PdfConverter;
 use result::ResultEnvelope;
+use unicode_normalization::UnicodeNormalization;
 
 pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
@@ -295,8 +296,15 @@ fn validate_path_syntax(path: &Path) -> Result<(), CliError> {
             .get(2)
             .is_none_or(|separator| *separator != b'/');
     let foreign_drive = drive_prefixed && !cfg!(windows);
-    let invalid_colon = slash.char_indices().any(|(index, character)| {
-        character == ':' && !(cfg!(windows) && drive_prefixed && index == 1)
+    let invalid_colon = cfg!(windows)
+        && slash
+            .char_indices()
+            .any(|(index, character)| character == ':' && !(drive_prefixed && index == 1));
+    let explicit_scheme = lower.find("://").is_some_and(|separator| {
+        separator > 0
+            && lower[..separator]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
     });
     let platform_network_prefix = cfg!(unix)
         && (matches!(lower.as_str(), "/network/servers" | "/net" | "/afs")
@@ -314,6 +322,7 @@ fn validate_path_syntax(path: &Path) -> Result<(), CliError> {
         || drive_relative
         || foreign_drive
         || invalid_colon
+        || explicit_scheme
         || reserved_component;
     if unsafe_syntax {
         return Err(unsafe_path_error());
@@ -321,60 +330,10 @@ fn validate_path_syntax(path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-fn is_windows_reserved_component(component: &str) -> bool {
-    let component = component.trim_end_matches([' ', '.']);
-    if component.is_empty()
-        || (component.len() == 2
-            && component.as_bytes()[0].is_ascii_alphabetic()
-            && component.as_bytes()[1] == b':')
-    {
-        return false;
-    }
-    let stem = component
-        .split('.')
-        .next()
-        .unwrap_or(component)
-        .trim_end_matches([' ', '.']);
-    let upper = stem.to_uppercase();
-    matches!(
-        upper.as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "CLOCK$"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-            | "COM¹"
-            | "COM²"
-            | "COM³"
-            | "LPT¹"
-            | "LPT²"
-            | "LPT³"
-            | "GLOBALROOT"
-    )
-}
-
 fn unsafe_path_error() -> CliError {
     CliError::new(
         "unsafe_path",
-        "path is not Unicode local filesystem syntax",
+        "path uses unsafe local path syntax",
         EXIT_USAGE,
     )
 }
@@ -656,23 +615,54 @@ fn path_aliases_input(snapshot: &InputSnapshot, candidate: &Path) -> bool {
 
 #[cfg(windows)]
 fn path_aliases_input(snapshot: &InputSnapshot, candidate: &Path) -> bool {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
-    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
-    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
-
-    let mut options = OpenOptions::new();
-    let Ok(file) = options
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .open(candidate)
-    else {
+    let Ok(file) = windows_open_for_identity(candidate) else {
         return false;
     };
     windows_file_state(&file).is_ok_and(|state| {
         snapshot.volume_serial_number == state.volume_serial_number
             && snapshot.file_id == state.file_id
     })
+}
+
+#[cfg(unix)]
+fn same_existing_path_identity(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_existing_path_identity(left: &Path, right: &Path) -> bool {
+    let (Ok(left), Ok(right)) = (
+        windows_open_for_identity(left).and_then(|file| windows_file_state(&file)),
+        windows_open_for_identity(right).and_then(|file| windows_file_state(&file)),
+    ) else {
+        return false;
+    };
+    left.volume_serial_number == right.volume_serial_number && left.file_id == right.file_id
+}
+
+#[cfg(windows)]
+fn windows_open_for_identity(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_existing_path_identity(_left: &Path, _right: &Path) -> bool {
+    false
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -740,7 +730,7 @@ fn validate_output(
     let derived_assets = output.with_extension("assets");
     validated_path_string(&output)?;
     validated_path_string(&derived_assets)?;
-    if output == input || input.starts_with(&derived_assets) {
+    if output == input || input_is_within_assets(input, &derived_assets) {
         return Err(CliError::new(
             "source_output_alias",
             "output and assets must not alias or contain the input",
@@ -781,6 +771,61 @@ fn validate_output(
         }
     }
     Ok((output, derived_assets))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentComparison {
+    Exact,
+    CaseAndNormalizationInsensitive,
+}
+
+fn input_is_within_assets(input: &Path, derived_assets: &Path) -> bool {
+    if let Ok(canonical_assets) = fs::canonicalize(derived_assets) {
+        if path_starts_with_components(input, &canonical_assets, ComponentComparison::Exact) {
+            return true;
+        }
+        return input
+            .ancestors()
+            .any(|ancestor| same_existing_path_identity(ancestor, &canonical_assets));
+    }
+
+    let comparison = if cfg!(windows) {
+        ComponentComparison::CaseAndNormalizationInsensitive
+    } else {
+        ComponentComparison::Exact
+    };
+    path_starts_with_components(input, derived_assets, comparison)
+}
+
+fn path_starts_with_components(
+    input: &Path,
+    container: &Path,
+    comparison: ComponentComparison,
+) -> bool {
+    let mut input_components = input.components();
+    container.components().all(|container_component| {
+        input_components.next().is_some_and(|input_component| {
+            components_equal(
+                input_component.as_os_str(),
+                container_component.as_os_str(),
+                comparison,
+            )
+        })
+    })
+}
+
+fn components_equal(left: &OsStr, right: &OsStr, comparison: ComponentComparison) -> bool {
+    match comparison {
+        ComponentComparison::Exact => left == right,
+        ComponentComparison::CaseAndNormalizationInsensitive => {
+            let (Some(left), Some(right)) = (left.to_str(), right.to_str()) else {
+                return false;
+            };
+            let left: String = left.nfkc().flat_map(char::to_lowercase).collect();
+            let right: String = right.nfkc().flat_map(char::to_lowercase).collect();
+            left == right
+        }
+    }
 }
 
 fn normalize_future_path(path: &Path) -> Result<PathBuf, CliError> {
@@ -1095,6 +1140,12 @@ mod tests {
             ]);
             paths
         };
+        #[cfg(windows)]
+        let paths = {
+            let mut paths = paths;
+            paths.extend(["normal/file:stream", r"C:\dir\file:stream"]);
+            paths
+        };
         for path in paths {
             let error = validate_path_syntax(Path::new(path)).unwrap_err();
             assert_eq!(error.code, "unsafe_path", "path {path:?}");
@@ -1111,6 +1162,37 @@ mod tests {
         }
         #[cfg(windows)]
         assert!(validate_path_syntax(Path::new(r"C:\local\document.pdf")).is_ok());
+        #[cfg(unix)]
+        assert!(validate_path_syntax(Path::new("reports/report:2026.json")).is_ok());
+    }
+
+    #[test]
+    fn containment_component_comparison_is_explicit_about_filesystem_semantics() {
+        let input = Path::new("/work/Alias.assets/source.html");
+        let case_variant = Path::new("/work/alias.assets");
+        assert!(!path_starts_with_components(
+            input,
+            case_variant,
+            ComponentComparison::Exact
+        ));
+        assert!(path_starts_with_components(
+            input,
+            case_variant,
+            ComponentComparison::CaseAndNormalizationInsensitive
+        ));
+
+        let decomposed = Path::new("/work/Cafe\u{301}.assets/source.html");
+        let composed = Path::new("/work/Café.assets");
+        assert!(!path_starts_with_components(
+            decomposed,
+            composed,
+            ComponentComparison::Exact
+        ));
+        assert!(path_starts_with_components(
+            decomposed,
+            composed,
+            ComponentComparison::CaseAndNormalizationInsensitive
+        ));
     }
 
     #[test]
