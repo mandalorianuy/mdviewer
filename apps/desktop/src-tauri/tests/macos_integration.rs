@@ -184,6 +184,28 @@ struct MutateTemporaryAfterValidation {
     mutated: AtomicBool,
 }
 
+struct MutatePublishedAliasDuringResolution {
+    application: PathBuf,
+    mutated: AtomicBool,
+}
+
+impl ApplicationAlias for MutatePublishedAliasDuringResolution {
+    fn create_alias(&self, application: &Path, destination: &Path) -> io::Result<()> {
+        FixtureAlias.create_alias(application, destination)
+    }
+
+    fn resolve_alias(&self, alias: &Path) -> io::Result<PathBuf> {
+        let resolved = FixtureAlias.resolve_alias(alias)?;
+        if alias.file_name().is_some_and(|name| name == WORKFLOW_NAME)
+            && resolved == self.application
+            && !self.mutated.swap(true, Ordering::SeqCst)
+        {
+            fs::write(alias, b"unrelated in-place published mutation")?;
+        }
+        Ok(resolved)
+    }
+}
+
 impl RetentionInterlock for MutateTemporaryAfterValidation {
     fn after_directories_opened(&self) -> io::Result<()> {
         Ok(())
@@ -335,6 +357,34 @@ fn install_never_publishes_a_temporary_swapped_after_validation() {
 }
 
 #[test]
+fn install_rejects_an_in_place_mutation_during_post_publish_alias_resolution() {
+    let home = TempDir::new().unwrap();
+    let app = application(home.path(), "MDViewer.app", b"current-signed-app");
+    let manager = IntegrationManager::new(
+        home.path(),
+        artifact(app.clone()),
+        MutatePublishedAliasDuringResolution {
+            application: app,
+            mutated: AtomicBool::new(false),
+        },
+        FixtureSignature,
+    )
+    .unwrap();
+
+    assert_eq!(
+        manager.install().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+    assert_eq!(manager.status().unwrap(), IntegrationStatus::NotInstalled);
+    let retained = retained_workflow_items(&home);
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        fs::read(&retained[0]).unwrap(),
+        b"unrelated in-place published mutation"
+    );
+}
+
+#[test]
 fn a_valid_alias_to_an_older_signed_app_is_outdated_and_repair_is_atomic() {
     let home = TempDir::new().unwrap();
     let old_app = application(home.path(), "MDViewer-old.app", b"old-signed-app");
@@ -384,6 +434,40 @@ fn repair_restores_the_old_workflow_when_validated_temporary_is_mutated_in_place
     assert_eq!(
         fs::read(&retained[0]).unwrap(),
         b"unrelated in-place temporary mutation"
+    );
+}
+
+#[test]
+fn repair_restores_the_old_workflow_after_post_publish_alias_mutation() {
+    let home = TempDir::new().unwrap();
+    let old_app = application(home.path(), "MDViewer-old.app", b"old-signed-app");
+    let current_app = application(home.path(), "MDViewer.app", b"current-signed-app");
+    manager(&home, old_app.clone()).install().unwrap();
+    let manager = IntegrationManager::new(
+        home.path(),
+        artifact(current_app.clone()),
+        MutatePublishedAliasDuringResolution {
+            application: current_app,
+            mutated: AtomicBool::new(false),
+        },
+        FixtureSignature,
+    )
+    .unwrap();
+
+    assert_eq!(
+        manager.repair().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+    assert_eq!(manager.status().unwrap(), IntegrationStatus::Outdated);
+    assert_eq!(
+        FixtureAlias.resolve_alias(&manager.target()).unwrap(),
+        old_app
+    );
+    let retained = retained_workflow_items(&home);
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        fs::read(&retained[0]).unwrap(),
+        b"unrelated in-place published mutation"
     );
 }
 
@@ -440,7 +524,7 @@ fn uninstall_preserves_a_target_swapped_after_validation() {
 }
 
 #[test]
-fn uninstall_retains_an_in_place_mutation_after_final_alias_revalidation() {
+fn uninstall_rejects_and_restores_an_in_place_mutation_during_alias_revalidation() {
     let home = TempDir::new().unwrap();
     let app = application(home.path(), "MDViewer.app", b"current-signed-app");
     let installed = manager(&home, app.clone());
@@ -453,19 +537,21 @@ fn uninstall_retains_an_in_place_mutation_after_final_alias_revalidation() {
     )
     .unwrap();
 
-    manager.uninstall().unwrap();
-
-    assert_eq!(manager.status().unwrap(), IntegrationStatus::NotInstalled);
-    let retained = retained_workflow_items(&home);
-    assert_eq!(retained.len(), 1);
     assert_eq!(
-        fs::read(&retained[0]).unwrap(),
+        manager.uninstall().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+
+    assert_eq!(manager.status().unwrap(), IntegrationStatus::Invalid);
+    assert_eq!(
+        fs::read(manager.target()).unwrap(),
         b"unrelated in-place replacement"
     );
+    assert!(retained_workflow_items(&home).is_empty());
 }
 
 #[test]
-fn repair_retains_an_in_place_mutation_after_final_alias_revalidation() {
+fn repair_rejects_and_restores_an_in_place_mutation_during_alias_revalidation() {
     let home = TempDir::new().unwrap();
     let old_app = application(home.path(), "MDViewer-old.app", b"old-signed-app");
     let current_app = application(home.path(), "MDViewer.app", b"current-signed-app");
@@ -478,18 +564,21 @@ fn repair_retains_an_in_place_mutation_after_final_alias_revalidation() {
     )
     .unwrap();
 
-    manager.repair().unwrap();
-
-    assert_eq!(manager.status().unwrap(), IntegrationStatus::Installed);
     assert_eq!(
-        FixtureAlias.resolve_alias(&manager.target()).unwrap(),
-        current_app
+        manager.repair().unwrap_err(),
+        IntegrationError::UnsafeTarget
     );
+
+    assert_eq!(
+        fs::read(manager.target()).unwrap(),
+        b"unrelated in-place replacement"
+    );
+    assert_eq!(manager.status().unwrap(), IntegrationStatus::Invalid);
     let retained = retained_workflow_items(&home);
     assert_eq!(retained.len(), 1);
     assert_eq!(
-        fs::read(&retained[0]).unwrap(),
-        b"unrelated in-place replacement"
+        FixtureAlias.resolve_alias(&retained[0]).unwrap(),
+        current_app
     );
 }
 

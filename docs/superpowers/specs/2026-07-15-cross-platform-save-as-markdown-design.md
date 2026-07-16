@@ -223,10 +223,14 @@ Los tombstones son pequeños y no tienen limpieza automática; cualquier políti
 de cleanup debe volver a verificar el objeto y usar movimientos exclusivos, nunca borrado
 por un nombre compartido.
 
-La publicación captura device/inode del temporal después de verificar el contrato completo. Tras
-el rename exclusivo vuelve a exigir esa identidad y repite resolución de alias, firma y checksum.
-Una sustitución o mutación concurrente se retira sin sobrescribir; Repair restaura el alias anterior
-validado y la operación nunca informa éxito.
+La publicación captura una identidad estable del temporal después de verificar el contrato
+completo: device/inode en Unix o volume serial/file ID por handle en Windows, además del tamaño y
+SHA-256 exacto del alias. El change-time no forma parte de esa comparación porque un rename puede
+cambiarlo. Cada inspección sí exige dos observaciones idénticas, antes y después de resolver el
+alias y validar firma/checksum, incluyendo change-time, tamaño y hash. Windows abre el entry con
+`OPEN_REPARSE_POINT` y rechaza reparse points. Una sustitución o mutación concurrente, aun en el
+mismo file ID, se retira sin sobrescribir; Repair restaura el alias anterior validado y la operación
+nunca informa éxito.
 
 Toda mutación del lifecycle abre la cadena de directorios desde `HOME` con no-follow y
 opera con nombres relativos a esos handles. La identidad de cada directorio abierto se

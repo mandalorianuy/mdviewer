@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     fs::{self, File},
-    io,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -239,16 +239,59 @@ pub struct IntegrationManager<A, V, H = NoopRetentionInterlock> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileIdentity {
+struct FileKey {
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(windows)]
+    volume: u64,
+    #[cfg(windows)]
+    file_id: [u8; 16],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    key: FileKey,
+    len: u64,
+    sha256: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileObservation {
+    identity: FileIdentity,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    #[cfg(windows)]
+    change_time: i64,
+    #[cfg(windows)]
+    last_write_time: i64,
+    #[cfg(not(any(unix, windows)))]
+    modified: Option<std::time::SystemTime>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSnapshotMetadata {
+    key: FileKey,
+    len: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    #[cfg(windows)]
+    change_time: i64,
+    #[cfg(windows)]
+    last_write_time: i64,
+    #[cfg(not(any(unix, windows)))]
+    modified: Option<std::time::SystemTime>,
 }
 
 struct TargetInspection {
     status: IntegrationStatus,
     identity: Option<FileIdentity>,
+    observation: Option<FileObservation>,
 }
 
 impl<A: ApplicationAlias, V: CodeSignatureVerifier>
@@ -351,6 +394,7 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
                 return Ok(TargetInspection {
                     status: IntegrationStatus::NotInstalled,
                     identity: None,
+                    observation: None,
                 });
             }
             Err(_) => return Err(IntegrationError::Io),
@@ -359,15 +403,26 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
             return Ok(TargetInspection {
                 status: IntegrationStatus::Invalid,
                 identity: None,
+                observation: None,
             });
         }
-        let identity = file_identity(&metadata);
+        let before = match observe_regular_file(target) {
+            Ok(observation) => observation,
+            Err(_) => {
+                return Ok(TargetInspection {
+                    status: IntegrationStatus::Invalid,
+                    identity: None,
+                    observation: None,
+                });
+            }
+        };
         let application = match self.alias.resolve_alias(target) {
             Ok(application) if application.is_absolute() => application,
             Ok(_) | Err(_) => {
                 return Ok(TargetInspection {
                     status: IntegrationStatus::Invalid,
-                    identity,
+                    identity: Some(before.identity),
+                    observation: Some(before),
                 });
             }
         };
@@ -382,7 +437,8 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
         {
             return Ok(TargetInspection {
                 status: IntegrationStatus::Invalid,
-                identity,
+                identity: Some(before.identity),
+                observation: Some(before),
             });
         }
         let executable = self.artifact.executable_path(&application);
@@ -391,16 +447,38 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
             Err(_) => {
                 return Ok(TargetInspection {
                     status: IntegrationStatus::Invalid,
-                    identity,
+                    identity: Some(before.identity),
+                    observation: Some(before),
                 });
             }
         };
+        let after = match observe_regular_file(target) {
+            Ok(observation) => observation,
+            Err(_) => {
+                return Ok(TargetInspection {
+                    status: IntegrationStatus::Invalid,
+                    identity: Some(before.identity),
+                    observation: Some(before),
+                });
+            }
+        };
+        if before != after {
+            return Ok(TargetInspection {
+                status: IntegrationStatus::Invalid,
+                identity: Some(after.identity),
+                observation: Some(after),
+            });
+        }
         let status = if sha256_hex(&bytes) == self.artifact.sha256 {
             IntegrationStatus::Installed
         } else {
             IntegrationStatus::Outdated
         };
-        Ok(TargetInspection { status, identity })
+        Ok(TargetInspection {
+            status,
+            identity: Some(after.identity),
+            observation: Some(after),
+        })
     }
 
     fn publish(&self, replace: Option<FileIdentity>) -> Result<(), IntegrationError> {
@@ -488,23 +566,18 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
         self.move_no_replace(&self.target, &quarantine)
             .map_err(|_| IntegrationError::UnsafeTarget)?;
 
-        let moved = fs::symlink_metadata(&quarantine).ok();
-        let identity_matches = moved
-            .as_ref()
-            .and_then(file_identity)
-            .is_some_and(|identity| identity == expected);
-        let status_matches = identity_matches
-            && matches!(
-                self.status_at(&quarantine),
-                Ok(IntegrationStatus::Installed | IntegrationStatus::Outdated)
-            );
-        let identity_still_matches = status_matches
-            && fs::symlink_metadata(&quarantine)
-                .ok()
-                .as_ref()
-                .and_then(file_identity)
-                .is_some_and(|identity| identity == expected);
-        if !identity_still_matches {
+        let inspected = self.inspect_target(&quarantine);
+        let inspection_matches = inspected.as_ref().is_ok_and(|inspected| {
+            inspected.identity == Some(expected)
+                && matches!(
+                    inspected.status,
+                    IntegrationStatus::Installed | IntegrationStatus::Outdated
+                )
+        });
+        let observation_still_matches = inspection_matches
+            && inspected.as_ref().ok().and_then(|value| value.observation)
+                == observe_regular_file(&quarantine).ok();
+        if !observation_still_matches {
             let _ = self.move_no_replace(&quarantine, &self.target);
             return Err(IntegrationError::UnsafeTarget);
         }
@@ -605,27 +678,130 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier, H: RetentionInterlock>
         if inspected.identity != Some(expected) || !accepts(inspected.status) {
             return false;
         }
-        fs::symlink_metadata(target)
-            .ok()
-            .as_ref()
-            .and_then(file_identity)
-            == Some(expected)
+        inspected.observation == observe_regular_file(target).ok()
     }
 }
 
-#[cfg(unix)]
-fn file_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-
-    Some(FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
+fn observe_regular_file(path: &Path) -> io::Result<FileObservation> {
+    let mut file = open_regular_file_no_follow(path)?;
+    let before = file_snapshot_metadata(&file)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let after = file_snapshot_metadata(&file)?;
+    if before != after || after.len != bytes.len() as u64 {
+        return Err(io::Error::other("file changed while it was observed"));
+    }
+    let identity = FileIdentity {
+        key: after.key,
+        len: after.len,
+        sha256: Sha256::digest(&bytes).into(),
+    };
+    Ok(FileObservation {
+        identity,
+        #[cfg(unix)]
+        changed_seconds: after.changed_seconds,
+        #[cfg(unix)]
+        changed_nanoseconds: after.changed_nanoseconds,
+        #[cfg(windows)]
+        change_time: after.change_time,
+        #[cfg(windows)]
+        last_write_time: after.last_write_time,
+        #[cfg(not(any(unix, windows)))]
+        modified: after.modified,
     })
 }
 
-#[cfg(not(unix))]
-fn file_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
-    None
+#[cfg(unix)]
+fn open_regular_file_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workflow entry is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workflow entry is not a regular non-reparse file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_no_follow(path: &Path) -> io::Result<File> {
+    let file = File::open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workflow entry is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn file_snapshot_metadata(file: &File) -> io::Result<FileSnapshotMetadata> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(FileSnapshotMetadata {
+        key: FileKey {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+        len: metadata.len(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(windows)]
+fn file_snapshot_metadata(file: &File) -> io::Result<FileSnapshotMetadata> {
+    let metadata = file.metadata()?;
+    let state = crate::state::windows_file_state(file)?;
+    Ok(FileSnapshotMetadata {
+        key: FileKey {
+            volume: state.volume_serial_number,
+            file_id: state.file_id,
+        },
+        len: metadata.len(),
+        change_time: state.change_time,
+        last_write_time: state.last_write_time,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_snapshot_metadata(file: &File) -> io::Result<FileSnapshotMetadata> {
+    let metadata = file.metadata()?;
+    Ok(FileSnapshotMetadata {
+        key: FileKey {},
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

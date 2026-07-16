@@ -2219,16 +2219,16 @@ fn platform_file_identity(_file: &File, metadata: &fs::Metadata) -> io::Result<F
 }
 
 #[cfg(windows)]
-struct WindowsFileState {
-    volume_serial_number: u64,
-    file_id: [u8; 16],
-    change_time: i64,
-    last_write_time: i64,
-    links: u32,
+pub(crate) struct WindowsFileState {
+    pub(crate) volume_serial_number: u64,
+    pub(crate) file_id: [u8; 16],
+    pub(crate) change_time: i64,
+    pub(crate) last_write_time: i64,
+    pub(crate) links: u32,
 }
 
 #[cfg(windows)]
-fn windows_file_state(file: &File) -> io::Result<WindowsFileState> {
+pub(crate) fn windows_file_state(file: &File) -> io::Result<WindowsFileState> {
     use std::{mem::size_of, os::windows::io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FILE_ID_INFO, FileBasicInfo, FileIdInfo,
