@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../src/App";
 import {
-  applySaveCompletion,
   markdownName,
+  transitionDocument,
   type DocumentState,
   type SaveCompletion,
 } from "../src/features/documents/document";
@@ -164,20 +164,26 @@ describe("viewer and editor behavior", () => {
       };
 
       for (const completion of completions) {
-        const replacementFirst = applySaveCompletion(documentB, completion);
-        const saveFirst = documentB;
-        expect(replacementFirst).toBe(documentB);
+        const saveTransition = { type: "save-completed" as const, completion };
+        const replacementTransition = {
+          type: "replace" as const,
+          replacement: documentB,
+        };
+        const replacementFirst = transitionDocument(
+          transitionDocument(documentA, replacementTransition),
+          saveTransition,
+        );
+        const saveFirst = transitionDocument(
+          transitionDocument(documentA, saveTransition),
+          replacementTransition,
+        );
+        expect(replacementFirst).toEqual(documentB);
         expect(saveFirst).toEqual(documentB);
         expect(replacementFirst).toMatchObject({
           name: documentB.name,
           content: documentB.content,
           savedContent: documentB.savedContent,
           writeToken: documentB.writeToken,
-        });
-        expect(applySaveCompletion(documentA, completion)).toMatchObject({
-          name: completion.name ?? "a.md",
-          savedContent: "A submitted",
-          writeToken: completion.writeToken,
         });
       }
     }

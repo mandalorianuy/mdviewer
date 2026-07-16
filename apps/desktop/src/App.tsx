@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { warningMessage } from "./features/conversion/warnings";
 import {
-  applySaveCompletion,
   confirmReplacement,
   markdownName,
+  transitionDocument,
   untitledDocument,
   type DocumentSnapshot,
   type DocumentState,
@@ -12,7 +12,12 @@ import {
 import { EditorSurface } from "./features/editor/EditorSurface";
 import { MarkdownPreview } from "./features/preview/MarkdownPreview";
 import { ThemeSelect, type ThemePreference } from "./features/settings/ThemeSelect";
-import { tauriBackend, type Backend, type ConversionResult } from "./lib/tauri";
+import {
+  isBackendErrorCode,
+  tauriBackend,
+  type Backend,
+  type ConversionResult,
+} from "./lib/tauri";
 import "./styles/app.css";
 
 interface AppProps {
@@ -41,7 +46,7 @@ export default function App({ backend = tauriBackend }: AppProps) {
   const [workflowBusy, setWorkflowBusy] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string>();
-  const [jobCleanupError, setJobCleanupError] = useState<string>();
+  const [jobCleanupErrors, setJobCleanupErrors] = useState<Record<string, string>>({});
   const dirty = currentDocument.content !== currentDocument.savedContent;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -98,7 +103,12 @@ export default function App({ backend = tauriBackend }: AppProps) {
     return () => { alive = false; unlisten(); };
   }, [backend]);
 
-  const replaceDocument = useCallback((name: string, content: string, writeToken?: string) => {
+  const replaceDocument = useCallback((
+    name: string,
+    content: string,
+    writeToken?: string,
+    transitionType: "replace" | "conversion-completed" = "replace",
+  ) => {
     const replacement = {
       generation: documentGeneration.current,
       name,
@@ -107,8 +117,11 @@ export default function App({ backend = tauriBackend }: AppProps) {
       writeToken,
     };
     documentGeneration.current += 1;
-    documentRef.current = replacement;
-    setDocument(replacement);
+    const transition = transitionType === "conversion-completed"
+      ? { type: "conversion-completed" as const, accepted: true as const, replacement }
+      : { type: "replace" as const, replacement };
+    documentRef.current = transitionDocument(documentRef.current, transition);
+    setDocument((current) => transitionDocument(current, transition));
   }, []);
 
   const openFromToken = useCallback(async (token: string, name: string, writeToken?: string) => {
@@ -148,11 +161,14 @@ export default function App({ backend = tauriBackend }: AppProps) {
     if (!selection) return false;
     const submittedContent = submittedDocument.content;
     const saved = await backend.saveDocument(selection.writeToken, submittedContent);
-    setDocument((current) => applySaveCompletion(current, {
-      generation: submittedDocument.generation,
-      name: selection.name,
-      savedContent: submittedContent,
-      writeToken: saved.writeToken,
+    setDocument((current) => transitionDocument(current, {
+      type: "save-completed",
+      completion: {
+        generation: submittedDocument.generation,
+        name: selection.name,
+        savedContent: submittedContent,
+        writeToken: saved.writeToken,
+      },
     }));
     return true;
   }, [backend]);
@@ -167,10 +183,13 @@ export default function App({ backend = tauriBackend }: AppProps) {
     if (!submittedDocument.writeToken) return saveAsUnlocked();
     const submittedContent = submittedDocument.content;
     const saved = await backend.saveDocument(submittedDocument.writeToken, submittedContent);
-    setDocument((current) => applySaveCompletion(current, {
-      generation: submittedDocument.generation,
-      savedContent: submittedContent,
-      writeToken: saved.writeToken,
+    setDocument((current) => transitionDocument(current, {
+      type: "save-completed",
+      completion: {
+        generation: submittedDocument.generation,
+        savedContent: submittedContent,
+        writeToken: saved.writeToken,
+      },
     }));
     return true;
   }), [backend, saveAsUnlocked, withSaveLock]);
@@ -189,24 +208,24 @@ export default function App({ backend = tauriBackend }: AppProps) {
     try {
       const result = await backend.convertDocument({ operationId: id, sourceToken, outputToken });
       const opened = await backend.openDocument(result.markdownToken);
-      if (!confirmReplacement(
+      const accepted = confirmReplacement(
         documentRef.current,
         replacementSnapshot,
         dirtyRef.current,
         (message) => window.confirm(message),
-      )) {
+      );
+      if (!accepted) {
+        setDocument((current) => transitionDocument(current, {
+          type: "conversion-completed",
+          accepted: false,
+        }));
         return false;
       }
       setWarnings(result.warningCodes);
-      replaceDocument(outputName, opened.content, result.writeToken);
+      replaceDocument(outputName, opened.content, result.writeToken, "conversion-completed");
       return true;
     } catch (reason) {
-      if (
-        typeof reason === "object"
-        && reason !== null
-        && "code" in reason
-        && reason.code === "cancelled"
-      ) {
+      if (isBackendErrorCode(reason, "cancelled")) {
         setConversionNotice("Conversión cancelada.");
         setError(undefined);
       } else {
@@ -231,6 +250,15 @@ export default function App({ backend = tauriBackend }: AppProps) {
     if (!output) return;
     await convert(source.readToken, output.writeToken, output.name, replacementSnapshot);
   }, [backend, convert]);
+
+  const clearJobCleanupError = useCallback((id: string) => {
+    setJobCleanupErrors((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+  }, []);
 
   const handlePrintJob = useCallback(async (id: string, finishOnly: boolean) => {
     let claimedId: string | undefined;
@@ -261,13 +289,20 @@ export default function App({ backend = tauriBackend }: AppProps) {
     if (!claimedId) return "retryable" as const;
     try {
       await backend.finishPrintJob(claimedId);
-      setJobCleanupError(undefined);
+      clearJobCleanupError(id);
       return "terminal" as const;
-    } catch {
-      setJobCleanupError("No se pudo finalizar el trabajo de impresión. Volvé a intentarlo.");
+    } catch (reason) {
+      if (finishOnly && isBackendErrorCode(reason, "job_not_found")) {
+        clearJobCleanupError(id);
+        return "terminal" as const;
+      }
+      setJobCleanupErrors((current) => ({
+        ...current,
+        [id]: "No se pudo finalizar el trabajo de impresión. Volvé a intentarlo.",
+      }));
       return "finish-pending" as const;
     }
-  }, [backend, convert]);
+  }, [backend, clearJobCleanupError, convert]);
 
   const queuePrintJob = useCallback((id: string) => {
     if (terminalJobs.current.has(id) || inFlightJobs.current.has(id)) return;
@@ -355,7 +390,19 @@ export default function App({ backend = tauriBackend }: AppProps) {
       )}
       {conversionNotice && <div className="conversion-notice" role="status">{conversionNotice}</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
-      {jobCleanupError && <div className="error-banner" role="alert">{jobCleanupError}</div>}
+      {Object.entries(jobCleanupErrors).map(([id, message]) => (
+        <div className="error-banner" role="alert" key={id}>
+          <span>{message} Trabajo: {id}.</span>
+          <button
+            type="button"
+            className="quiet"
+            aria-label={`Reintentar finalización de ${id}`}
+            onClick={() => queuePrintJob(id)}
+          >
+            Reintentar
+          </button>
+        </div>
+      ))}
       {warnings.length > 0 && <aside className="warning-list" aria-label="Advertencias"><strong>Conversión completada con observaciones</strong><ul>{warnings.map((code, index) => <li key={`${code}-${index}`}>{warningMessage(code)}</li>)}</ul></aside>}
       <div className="workspace">
         <EditorSurface content={currentDocument.content} findOpen={findOpen} findQuery={findQuery} onChange={(content) => setDocument((current) => ({ ...current, content }))} onFindChange={setFindQuery} onFindClose={() => setFindOpen(false)} />

@@ -3,7 +3,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../src/App";
-import { confirmReplacement, type DocumentState } from "../src/features/documents/document";
+import {
+  confirmReplacement,
+  transitionDocument,
+  type DocumentState,
+} from "../src/features/documents/document";
 import type { Backend } from "../src/lib/tauri";
 
 function deferred<T>() {
@@ -139,7 +143,9 @@ describe("conversion behavior", () => {
       const confirm = vi.fn().mockReturnValue(accept);
 
       const shouldReplace = confirmReplacement(currentB, snapshot, false, confirm);
-      const result = shouldReplace ? convertedDocument : currentB;
+      const result = transitionDocument(currentB, shouldReplace
+        ? { type: "conversion-completed", accepted: true, replacement: convertedDocument }
+        : { type: "conversion-completed", accepted: false });
 
       expect(confirm).toHaveBeenCalledWith(
         "El documento cambió mientras se convertía. ¿Reemplazarlo con la conversión?",
@@ -234,11 +240,88 @@ describe("conversion behavior", () => {
       "No se pudo finalizar el trabajo de impresión. Volvé a intentarlo.",
     );
 
-    api.emitPrintJob("job-id");
+    fireEvent.click(screen.getByRole("button", { name: "Reintentar finalización de job-id" }));
     await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledTimes(2));
     expect(api.claimPrintJob).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(screen.queryByText(
-      "No se pudo finalizar el trabajo de impresión. Volvé a intentarlo.",
-    )).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("button", {
+      name: "Reintentar finalización de job-id",
+    })).toBeNull());
+  });
+
+  it("keeps cleanup failures actionable per job when another job finishes", async () => {
+    const api = backend();
+    api.selectSaveDocument.mockResolvedValue(null);
+    let jobAAttempts = 0;
+    api.finishPrintJob.mockImplementation(async (id) => {
+      if (id === "job-a" && jobAAttempts++ === 0) throw { code: "job_io", message: "sync failed" };
+    });
+    render(<App backend={api} />);
+    await waitFor(() => expect(api.onPrintJobRequested).toHaveBeenCalled());
+
+    api.emitPrintJob("job-a");
+    expect(await screen.findByRole("button", {
+      name: "Reintentar finalización de job-a",
+    })).toBeInTheDocument();
+
+    api.emitPrintJob("job-b");
+    await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledWith("job-b"));
+    expect(screen.getByRole("button", {
+      name: "Reintentar finalización de job-a",
+    })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reintentar finalización de job-a" }));
+    await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledTimes(3));
+    expect(api.claimPrintJob).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.queryByRole("button", {
+      name: "Reintentar finalización de job-a",
+    })).toBeNull());
+  });
+
+  it("treats typed job_not_found as terminal only on a known finish retry", async () => {
+    const api = backend();
+    api.selectSaveDocument.mockResolvedValue(null);
+    api.finishPrintJob
+      .mockRejectedValueOnce({ code: "job_io", message: "parent sync failed after delete" })
+      .mockRejectedValueOnce({ code: "job_not_found", message: "print job was not found" });
+    render(<App backend={api} />);
+    await waitFor(() => expect(api.onPrintJobRequested).toHaveBeenCalled());
+
+    api.emitPrintJob("job-id");
+    const retry = await screen.findByRole("button", {
+      name: "Reintentar finalización de job-id",
+    });
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledTimes(2));
+    expect(api.claimPrintJob).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("button", {
+      name: "Reintentar finalización de job-id",
+    })).toBeNull());
+
+    api.emitPrintJob("job-id");
+    await act(() => Promise.resolve());
+    expect(api.finishPrintJob).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces job_not_found from the initial finish instead of treating it as terminal", async () => {
+    const api = backend();
+    api.selectSaveDocument.mockResolvedValue(null);
+    api.finishPrintJob
+      .mockRejectedValueOnce({ code: "job_not_found", message: "print job was not found" })
+      .mockResolvedValueOnce(undefined);
+    render(<App backend={api} />);
+    await waitFor(() => expect(api.onPrintJobRequested).toHaveBeenCalled());
+
+    api.emitPrintJob("job-id");
+    const retry = await screen.findByRole("button", {
+      name: "Reintentar finalización de job-id",
+    });
+    expect(api.claimPrintJob).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(retry);
+    await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("button", {
+      name: "Reintentar finalización de job-id",
+    })).toBeNull());
   });
 });

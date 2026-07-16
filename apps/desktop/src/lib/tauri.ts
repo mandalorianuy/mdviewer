@@ -58,6 +58,18 @@ export interface CloseRequestEvent {
   preventDefault(): void;
 }
 
+export interface BackendError {
+  code: string;
+  message?: string;
+}
+
+export function isBackendErrorCode(reason: unknown, code: string): reason is BackendError {
+  return typeof reason === "object"
+    && reason !== null
+    && "code" in reason
+    && reason.code === code;
+}
+
 export interface Backend {
   selectOpenDocument(): Promise<OpenSelection | null>;
   selectSaveDocument(suggestedName: string): Promise<SaveSelection | null>;

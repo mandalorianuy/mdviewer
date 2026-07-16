@@ -25,6 +25,12 @@ export interface SaveCompletion {
   name?: string;
 }
 
+export type DocumentTransition =
+  | { type: "save-completed"; completion: SaveCompletion }
+  | { type: "replace"; replacement: DocumentState }
+  | { type: "conversion-completed"; accepted: false }
+  | { type: "conversion-completed"; accepted: true; replacement: DocumentState };
+
 export function applySaveCompletion(
   current: DocumentState,
   completion: SaveCompletion,
@@ -36,6 +42,20 @@ export function applySaveCompletion(
     savedContent: completion.savedContent,
     writeToken: completion.writeToken,
   };
+}
+
+export function transitionDocument(
+  current: DocumentState,
+  transition: DocumentTransition,
+): DocumentState {
+  switch (transition.type) {
+    case "save-completed":
+      return applySaveCompletion(current, transition.completion);
+    case "replace":
+      return transition.replacement;
+    case "conversion-completed":
+      return transition.accepted ? transition.replacement : current;
+  }
 }
 
 export function replacementPrompt(
