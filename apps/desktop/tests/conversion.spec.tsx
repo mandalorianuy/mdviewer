@@ -183,9 +183,34 @@ describe("conversion behavior", () => {
 
     await waitFor(() => expect(api.activateWindow).toHaveBeenCalledTimes(1));
     expect(api.claimPrintJob).toHaveBeenCalledWith("job-id");
+    expect(api.selectOpenDocument).not.toHaveBeenCalled();
     expect(api.selectSaveDocument).toHaveBeenCalledWith("Quarterly Report.md");
     await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledWith("job-id"));
     expect(api.openDocument).toHaveBeenCalledWith("markdown-token");
+  });
+
+  it("recovers a cold-start print job that arrives before the frontend listener is ready", async () => {
+    const api = backend();
+    const listenerReady = deferred<void>();
+    const persistedJobs: string[] = [];
+    api.onPrintJobRequested.mockImplementation(async (handler) => {
+      await listenerReady.promise;
+      return () => { void handler; };
+    });
+    api.integrationStatus.mockImplementation(async () => ({
+      pendingPrintJobIds: [...persistedJobs],
+    }));
+    render(<App backend={api} />);
+
+    await waitFor(() => expect(api.onPrintJobRequested).toHaveBeenCalledTimes(1));
+    await act(() => Promise.resolve());
+    persistedJobs.push("cold-start-job");
+    listenerReady.resolve();
+
+    await waitFor(() => expect(api.claimPrintJob).toHaveBeenCalledWith("cold-start-job"));
+    expect(api.integrationStatus).toHaveBeenCalledTimes(1);
+    expect(api.selectOpenDocument).not.toHaveBeenCalled();
+    expect(api.selectSaveDocument).toHaveBeenCalledWith("Report cold-start-job.md");
   });
 
   it("serializes pending claimed jobs and disables manual conversion while a dialog is pending", async () => {

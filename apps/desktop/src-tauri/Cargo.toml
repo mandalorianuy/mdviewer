@@ -10,12 +10,12 @@ name = "mdviewer_desktop_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
-sha2 = "=0.10.9"
 tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
 mdconvert-cli = { path = "../../../crates/mdconvert-cli" }
 mdconvert-core = { path = "../../../crates/mdconvert-core" }
+mdconvert-pdf = { path = "../../../crates/mdconvert-pdf" }
 open = "=5.3.2"
 rfd = "=0.15.4"
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -31,6 +31,16 @@ uuid = { version = "=1.22.0", features = ["serde", "v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSData",
+    "NSError",
+    "NSString",
+    "NSURL",
+] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [

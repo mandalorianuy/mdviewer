@@ -326,12 +326,24 @@ export default function App({ backend = tauriBackend }: AppProps) {
   useEffect(() => {
     let alive = true;
     let unlisten: () => void = () => undefined;
-    void backend.onPrintJobRequested(queuePrintJob)
-      .then((remove) => { if (alive) unlisten = remove; else remove(); })
-      .catch(() => undefined);
-    void backend.integrationStatus()
-      .then((status) => status.pendingPrintJobIds.forEach(queuePrintJob))
-      .catch(() => undefined);
+    void (async () => {
+      try {
+        const remove = await backend.onPrintJobRequested(queuePrintJob);
+        if (!alive) {
+          remove();
+          return;
+        }
+        unlisten = remove;
+      } catch {
+        // The durable status query below is still useful if event registration fails.
+      }
+      try {
+        const status = await backend.integrationStatus();
+        if (alive) status.pendingPrintJobIds.forEach(queuePrintJob);
+      } catch {
+        // Startup remains usable when integration discovery is unavailable.
+      }
+    })();
     return () => { alive = false; unlisten(); };
   }, [backend, queuePrintJob]);
 

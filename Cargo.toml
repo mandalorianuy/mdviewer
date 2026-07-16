@@ -7,7 +7,6 @@ members = [
     "crates/mdconvert-formats",
     "crates/mdconvert-html",
     "crates/mdconvert-pdf",
-    "platform/macos/pdf-workflow",
 ]
 
 [workspace.package]

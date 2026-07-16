@@ -1,17 +1,19 @@
 use std::{fs, path::PathBuf};
 
 use mdviewer_desktop_lib::{
+    PendingOpenedPrintFiles,
     commands::{
         authorize_open_selection, authorize_save_selection, cancel_conversion, claim_print_job,
         convert_document, finish_print_job, integration_status, invoke_handler, open_document,
         sanitized_markdown_name, save_document, validate_external_url, warning_codes,
     },
     deep_link::parse_print_deep_link,
-    forward_print_deep_link,
+    flush_pending_opened_print_files, forward_opened_print_files, forward_print_deep_link,
     jobs::PrintJobStore,
+    route_opened_print_files,
     state::{AppState, SelectionAccess},
 };
-use tauri::Listener;
+use tauri::{Listener, Manager};
 
 fn temp_dir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -148,6 +150,108 @@ fn mock_runtime_dispatches_ipc_deep_links_events_and_window_lifecycle() {
     assert_eq!(
         lifecycle,
         ["ready", "close-requested", "exit-requested", "exit"]
+    );
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn native_opened_pdf_events_stage_before_emitting_only_opaque_job_ids() {
+    let temp = temp_dir("native-opened-pdfs");
+    let app_state = state(&temp);
+    let first = temp.join("first.pdf");
+    let second = temp.join("second.pdf");
+    let invalid = temp.join("not-a-pdf.txt");
+    fs::write(&first, b"%PDF-1.7\nfirst\n%%EOF\n").unwrap();
+    fs::write(&second, b"%PDF-1.7\nsecond\n%%EOF\n").unwrap();
+    fs::write(&invalid, b"not a PDF").unwrap();
+
+    let app = tauri::test::mock_builder()
+        .manage(app_state)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    app.listen("print-job-requested", move |event| {
+        event_tx.send(event.payload().to_owned()).unwrap();
+    });
+    let urls = [
+        tauri::Url::from_file_path(&first).unwrap(),
+        tauri::Url::from_file_path(&invalid).unwrap(),
+        "https://example.invalid/private.pdf".parse().unwrap(),
+        tauri::Url::from_file_path(&second).unwrap(),
+        tauri::Url::from_file_path(temp.join("missing.pdf")).unwrap(),
+    ];
+
+    let report = forward_opened_print_files(app.handle(), &urls);
+
+    assert_eq!(report.staged_ids.len(), 2);
+    assert_eq!(report.rejected, 3);
+    assert_eq!(
+        report.rejection_codes,
+        vec!["invalid_pdf", "non_file_url", "unauthorized_source"]
+    );
+    let payloads = event_rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(payloads.len(), 2);
+    for (payload, id) in payloads.iter().zip(&report.staged_ids) {
+        assert_eq!(
+            serde_json::from_str::<String>(payload).unwrap(),
+            id.to_string()
+        );
+        assert!(!payload.contains(temp.to_string_lossy().as_ref()));
+    }
+    fs::remove_file(first).unwrap();
+    fs::remove_file(second).unwrap();
+    let state = app.state::<AppState>();
+    assert_eq!(
+        integration_status(&state).unwrap().pending_print_job_ids,
+        report
+            .staged_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+    for id in &report.staged_ids {
+        let claimed = claim_print_job(&state, &id.to_string()).unwrap();
+        assert!(
+            open_document(&state, &claimed.source_token)
+                .unwrap()
+                .content
+                .starts_with("%PDF-")
+        );
+        finish_print_job(&state, &id.to_string()).unwrap();
+    }
+    assert!(
+        integration_status(&state)
+            .unwrap()
+            .pending_print_job_ids
+            .is_empty()
+    );
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn cold_start_opened_pdf_is_buffered_until_app_state_is_managed() {
+    let temp = temp_dir("cold-start-native-opened-pdf");
+    let source = temp.join("cold-start.pdf");
+    fs::write(&source, b"%PDF-1.7\ncold start\n%%EOF\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let pending = PendingOpenedPrintFiles::default();
+    let url = tauri::Url::from_file_path(&source).unwrap();
+
+    assert!(route_opened_print_files(app.handle(), &pending, &[url]).is_none());
+    assert!(app.manage(state(&temp)));
+
+    let report = flush_pending_opened_print_files(app.handle(), &pending);
+
+    assert_eq!(report.staged_ids.len(), 1);
+    assert_eq!(report.rejected, 0);
+    let app_state = app.state::<AppState>();
+    assert_eq!(
+        integration_status(&app_state)
+            .unwrap()
+            .pending_print_job_ids,
+        vec![report.staged_ids[0].to_string()]
     );
     fs::remove_dir_all(temp).unwrap();
 }

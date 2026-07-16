@@ -149,6 +149,11 @@ modificar la UI ni la política de escritura.
 PDFium fijado por versión y checksum. No usa PDFKit, de modo que el mismo motor
 puede ejecutarse posteriormente en Windows y Linux.
 
+En la distribución macOS, ese runtime verificado se incluye dentro del bundle
+firmado y la aplicación configura su ruta canónica antes de iniciar conversiones.
+La variable `PDFIUM_DYNAMIC_LIB_PATH` queda reservada para CLI y desarrollo; el
+producto instalado no depende del entorno del proceso.
+
 El extractor obtiene:
 
 - caracteres, palabras, fuentes, tamaños y bounding boxes;
@@ -204,23 +209,26 @@ La pantalla **Preferencias → Integraciones** muestra el estado de la acción y
 ofrece **Instalar**, **Reparar** y **Desinstalar**. La instalación es por usuario
 y no requiere privilegios administrativos.
 
-MDViewer instala una herramienta firmada denominada
-`Guardar como Markdown con MDViewer` en `~/Library/PDF Services/`. El instalador
-verifica versión, firma y checksum. Después de una actualización, MDViewer
-ofrece reparar automáticamente una herramienta desactualizada.
+MDViewer instala un alias nativo denominado `Guardar como Markdown con MDViewer`
+en `~/Library/PDF Services/`, apuntando al bundle firmado de MDViewer. El instalador
+resuelve el alias sin UI y verifica bundle ID, Team ID, firma y checksum del
+ejecutable. Después de una actualización, MDViewer ofrece reparar atómicamente un
+alias que apunte a una versión firmada anterior. Un elemento ajeno o no verificable
+se preserva.
 
 ### 6.2 Recepción del trabajo
 
 1. El usuario elige **Archivo → Imprimir → PDF → Guardar como Markdown con
    MDViewer…** en cualquier aplicación compatible.
-2. macOS ejecuta la herramienta con el PDF temporal y las opciones CUPS.
-3. La herramienta crea un UUID y copia atómicamente el PDF a
-   `~/Library/Application Support/MDViewer/PrintJobs/<uuid>/input.pdf`.
-4. El directorio y el archivo se crean con permisos exclusivos para el usuario.
-5. La herramienta abre `mdviewer://print/<uuid>` y finaliza sólo después de
-   confirmar que el job quedó persistido.
-6. MDViewer valida que el identificador sea un UUID y que la ruta canónica se
-   encuentre dentro de `PrintJobs`.
+2. macOS entrega el PDF temporal directamente al bundle de MDViewer mediante el
+   evento nativo de apertura de aplicación.
+3. El proceso de MDViewer valida el archivo, crea un UUID y copia atómicamente el
+   PDF a su `PrintJobStore` privado antes de devolver el evento.
+4. El directorio y el archivo se crean con permisos exclusivos para el usuario y
+   se sincronizan antes de publicar el job.
+5. MDViewer conserva el UUID en una cola durable para el arranque en frío y emite
+   al WebView solamente ese token opaco cuando está listo.
+6. El WebView reclama el UUID por IPC; la ruta canónica nunca cruza esa frontera.
 7. MDViewer se activa y muestra el diálogo **Guardar como…** con un nombre
    derivado del título del trabajo.
 
@@ -303,7 +311,8 @@ inicio.
 - Procesamiento completamente local.
 - Sin telemetría ni solicitudes de red en el camino de conversión.
 - Preview HTML sanitizado y con navegación externa bloqueada por defecto.
-- Esquema `mdviewer://` limitado a identificadores y acciones conocidas.
+- Esquema `mdviewer://` limitado a identificadores y acciones conocidas; la
+  integración de impresión nativa no depende de ese esquema.
 - Canonicalización de todas las rutas antes de leer o escribir.
 - Prevención de path traversal en nombres de documentos y assets.
 - Límites configurados para tamaño de entrada, cantidad de páginas y recursos,

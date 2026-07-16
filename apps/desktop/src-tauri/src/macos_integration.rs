@@ -1,7 +1,7 @@
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
-    path::{Path, PathBuf},
+    fs::{self, File},
+    io,
+    path::{Component, Path, PathBuf},
 };
 
 #[cfg(target_os = "macos")]
@@ -13,13 +13,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const WORKFLOW_NAME: &str = "Guardar como Markdown con MDViewer";
-pub const WORKFLOW_MARKER: &str = "com.mdviewer.pdf-workflow/v1";
-#[cfg(target_os = "macos")]
-const WORKFLOW_SIGNATURE_IDENTITY: &str = "com.mdviewer.pdf-workflow";
-#[cfg(target_os = "macos")]
-const EMBEDDED_WORKFLOW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mdviewer-pdf-workflow"));
-#[cfg(target_os = "macos")]
-include!(concat!(env!("OUT_DIR"), "/workflow_metadata.rs"));
+pub const DESKTOP_BUNDLE_IDENTIFIER: &str = "com.mdviewer.desktop";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,7 +26,7 @@ pub enum IntegrationStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum IntegrationError {
-    #[error("the workflow artifact is invalid")]
+    #[error("the application artifact is invalid")]
     InvalidArtifact,
     #[error("a workflow already exists")]
     TargetExists,
@@ -48,63 +42,98 @@ impl IntegrationError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
-            Self::InvalidArtifact => "invalid_workflow_artifact",
+            Self::InvalidArtifact => "invalid_application_artifact",
             Self::TargetExists => "workflow_target_exists",
             Self::UnsafeTarget => "unsafe_workflow_target",
-            Self::InvalidSignature => "invalid_workflow_signature",
+            Self::InvalidSignature => "invalid_application_signature",
             Self::Io => "workflow_io",
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct WorkflowArtifact {
-    bytes: Vec<u8>,
-    version: String,
-    sha256: String,
-    signature_identity: String,
+pub trait ApplicationAlias {
+    fn create_alias(&self, application: &Path, destination: &Path) -> io::Result<()>;
+    fn resolve_alias(&self, alias: &Path) -> io::Result<PathBuf>;
 }
 
-impl WorkflowArtifact {
+pub trait CodeSignatureVerifier {
+    fn verify(&self, path: &Path, identity: &str, team: &str) -> io::Result<bool>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplicationArtifact {
+    application: PathBuf,
+    executable: PathBuf,
+    sha256: String,
+    signature_identity: String,
+    team_identifier: String,
+}
+
+impl ApplicationArtifact {
     pub fn new(
-        bytes: Vec<u8>,
-        version: impl Into<String>,
+        application: PathBuf,
+        executable: PathBuf,
         sha256: impl Into<String>,
         signature_identity: impl Into<String>,
+        team_identifier: impl Into<String>,
     ) -> Result<Self, IntegrationError> {
         let artifact = Self {
-            bytes,
-            version: version.into(),
+            application,
+            executable,
             sha256: sha256.into(),
             signature_identity: signature_identity.into(),
+            team_identifier: team_identifier.into(),
         };
-        if artifact.bytes.is_empty()
-            || artifact.signature_identity.is_empty()
-            || artifact.sha256 != sha256_hex(&artifact.bytes)
-            || embedded_version(&artifact.bytes) != Some(artifact.version.as_str())
+        let relative_executable = !artifact.executable.as_os_str().is_empty()
+            && !artifact.executable.is_absolute()
+            && artifact
+                .executable
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)));
+        let valid_identity = !artifact.signature_identity.is_empty()
+            && artifact
+                .signature_identity
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'));
+        let valid_team = !artifact.team_identifier.is_empty()
+            && artifact
+                .team_identifier
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
+        if !artifact.application.is_absolute()
+            || !relative_executable
+            || artifact.sha256.len() != 64
+            || !artifact
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || !valid_identity
+            || !valid_team
         {
             return Err(IntegrationError::InvalidArtifact);
         }
         Ok(artifact)
     }
-}
 
-pub trait CodeSignatureVerifier {
-    fn verify(&self, path: &Path, identity: &str) -> io::Result<bool>;
+    fn executable_path(&self, application: &Path) -> PathBuf {
+        application.join(&self.executable)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct SystemCodeSignatureVerifier;
 
 impl CodeSignatureVerifier for SystemCodeSignatureVerifier {
-    fn verify(&self, path: &Path, identity: &str) -> io::Result<bool> {
+    fn verify(&self, path: &Path, identity: &str, team: &str) -> io::Result<bool> {
         #[cfg(target_os = "macos")]
         {
+            let requirement =
+                format!("=anchor apple generic and certificate leaf[subject.OU] = \"{team}\"");
             let verified = Command::new("/usr/bin/codesign")
-                .args(["--verify", "--strict"])
+                .args(["--verify", "--strict", "--test-requirement", &requirement])
                 .arg(path)
-                .status()?;
-            if !verified.success() {
+                .output()?;
+            if !verified.status.success() {
                 return Ok(false);
             }
             let details = Command::new("/usr/bin/codesign")
@@ -115,26 +144,82 @@ impl CodeSignatureVerifier for SystemCodeSignatureVerifier {
             Ok(details.status.success()
                 && stderr
                     .lines()
-                    .any(|line| line == format!("Identifier={identity}")))
+                    .any(|line| line == format!("Identifier={identity}"))
+                && stderr
+                    .lines()
+                    .any(|line| line == format!("TeamIdentifier={team}")))
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (path, identity);
+            let _ = (path, identity, team);
             Ok(false)
         }
     }
 }
 
-pub struct IntegrationManager<V> {
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+pub struct NativeApplicationAlias;
+
+#[cfg(target_os = "macos")]
+impl ApplicationAlias for NativeApplicationAlias {
+    fn create_alias(&self, application: &Path, destination: &Path) -> io::Result<()> {
+        use objc2_foundation::{NSArray, NSString, NSURL, NSURLBookmarkCreationOptions};
+
+        let application = NSURL::fileURLWithPath(&NSString::from_str(
+            application
+                .to_str()
+                .ok_or_else(|| io::Error::other("invalid application path"))?,
+        ));
+        let destination = NSURL::fileURLWithPath(&NSString::from_str(
+            destination
+                .to_str()
+                .ok_or_else(|| io::Error::other("invalid alias path"))?,
+        ));
+        let bookmark = application
+            .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
+                NSURLBookmarkCreationOptions::SuitableForBookmarkFile,
+                None::<&NSArray<_>>,
+                None,
+            )
+            .map_err(|_| io::Error::other("could not create application alias"))?;
+        NSURL::writeBookmarkData_toURL_options_error(&bookmark, &destination, 0)
+            .map_err(|_| io::Error::other("could not write application alias"))
+    }
+
+    fn resolve_alias(&self, alias: &Path) -> io::Result<PathBuf> {
+        use objc2_foundation::{NSString, NSURL, NSURLBookmarkResolutionOptions};
+
+        let alias = NSURL::fileURLWithPath(&NSString::from_str(
+            alias
+                .to_str()
+                .ok_or_else(|| io::Error::other("invalid alias path"))?,
+        ));
+        let resolved = NSURL::URLByResolvingAliasFileAtURL_options_error(
+            &alias,
+            NSURLBookmarkResolutionOptions::WithoutUI
+                | NSURLBookmarkResolutionOptions::WithoutMounting,
+        )
+        .map_err(|_| io::Error::other("could not resolve application alias"))?;
+        let path = resolved
+            .path()
+            .ok_or_else(|| io::Error::other("application alias has no file path"))?;
+        Ok(PathBuf::from(path.to_string()))
+    }
+}
+
+pub struct IntegrationManager<A, V> {
     target: PathBuf,
-    artifact: WorkflowArtifact,
+    artifact: ApplicationArtifact,
+    alias: A,
     verifier: V,
 }
 
-impl<V: CodeSignatureVerifier> IntegrationManager<V> {
+impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
     pub fn new(
         home: impl AsRef<Path>,
-        artifact: WorkflowArtifact,
+        artifact: ApplicationArtifact,
+        alias: A,
         verifier: V,
     ) -> Result<Self, IntegrationError> {
         let home = home.as_ref();
@@ -144,6 +229,7 @@ impl<V: CodeSignatureVerifier> IntegrationManager<V> {
         Ok(Self {
             target: home.join("Library/PDF Services").join(WORKFLOW_NAME),
             artifact,
+            alias,
             verifier,
         })
     }
@@ -154,32 +240,7 @@ impl<V: CodeSignatureVerifier> IntegrationManager<V> {
     }
 
     pub fn status(&self) -> Result<IntegrationStatus, IntegrationError> {
-        let metadata = match fs::symlink_metadata(&self.target) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(IntegrationStatus::NotInstalled);
-            }
-            Err(_) => return Err(IntegrationError::Io),
-        };
-        if !metadata.file_type().is_file() {
-            return Ok(IntegrationStatus::Invalid);
-        }
-        let bytes = fs::read(&self.target).map_err(|_| IntegrationError::Io)?;
-        if !contains_marker(&bytes)
-            || !self
-                .verifier
-                .verify(&self.target, &self.artifact.signature_identity)
-                .map_err(|_| IntegrationError::Io)?
-        {
-            return Ok(IntegrationStatus::Invalid);
-        }
-        if embedded_version(&bytes) != Some(self.artifact.version.as_str()) {
-            return Ok(IntegrationStatus::Outdated);
-        }
-        if sha256_hex(&bytes) != self.artifact.sha256 {
-            return Ok(IntegrationStatus::Invalid);
-        }
-        Ok(IntegrationStatus::Installed)
+        self.status_at(&self.target)
     }
 
     pub fn install(&self) -> Result<(), IntegrationError> {
@@ -191,60 +252,91 @@ impl<V: CodeSignatureVerifier> IntegrationManager<V> {
 
     pub fn repair(&self) -> Result<(), IntegrationError> {
         match self.status()? {
-            IntegrationStatus::NotInstalled => return Err(IntegrationError::UnsafeTarget),
-            IntegrationStatus::Installed
-            | IntegrationStatus::Outdated
-            | IntegrationStatus::Invalid => {}
+            IntegrationStatus::Installed | IntegrationStatus::Outdated => self.publish(true),
+            IntegrationStatus::NotInstalled | IntegrationStatus::Invalid => {
+                Err(IntegrationError::UnsafeTarget)
+            }
         }
-        let metadata =
-            fs::symlink_metadata(&self.target).map_err(|_| IntegrationError::UnsafeTarget)?;
-        if !metadata.file_type().is_file()
-            || !contains_marker(
-                &fs::read(&self.target).map_err(|_| IntegrationError::UnsafeTarget)?,
-            )
-        {
-            return Err(IntegrationError::UnsafeTarget);
-        }
-        self.publish(true)
     }
 
     pub fn uninstall(&self) -> Result<(), IntegrationError> {
-        if self.status()? != IntegrationStatus::Installed {
-            return Err(IntegrationError::UnsafeTarget);
+        match self.status()? {
+            IntegrationStatus::Installed | IntegrationStatus::Outdated => {}
+            IntegrationStatus::NotInstalled | IntegrationStatus::Invalid => {
+                return Err(IntegrationError::UnsafeTarget);
+            }
         }
         fs::remove_file(&self.target).map_err(|_| IntegrationError::Io)?;
         sync_parent(&self.target)
     }
 
+    fn status_at(&self, target: &Path) -> Result<IntegrationStatus, IntegrationError> {
+        let metadata = match fs::symlink_metadata(target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(IntegrationStatus::NotInstalled);
+            }
+            Err(_) => return Err(IntegrationError::Io),
+        };
+        if !metadata.file_type().is_file() {
+            return Ok(IntegrationStatus::Invalid);
+        }
+        let application = match self.alias.resolve_alias(target) {
+            Ok(application) if application.is_absolute() => application,
+            Ok(_) | Err(_) => return Ok(IntegrationStatus::Invalid),
+        };
+        if !self
+            .verifier
+            .verify(
+                &application,
+                &self.artifact.signature_identity,
+                &self.artifact.team_identifier,
+            )
+            .map_err(|_| IntegrationError::Io)?
+        {
+            return Ok(IntegrationStatus::Invalid);
+        }
+        let executable = self.artifact.executable_path(&application);
+        let bytes = match fs::read(executable) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(IntegrationStatus::Invalid),
+        };
+        if sha256_hex(&bytes) == self.artifact.sha256 {
+            Ok(IntegrationStatus::Installed)
+        } else {
+            Ok(IntegrationStatus::Outdated)
+        }
+    }
+
     fn publish(&self, replace: bool) -> Result<(), IntegrationError> {
+        if !self
+            .verifier
+            .verify(
+                &self.artifact.application,
+                &self.artifact.signature_identity,
+                &self.artifact.team_identifier,
+            )
+            .map_err(|_| IntegrationError::Io)?
+        {
+            return Err(IntegrationError::InvalidSignature);
+        }
+        let executable = fs::read(self.artifact.executable_path(&self.artifact.application))
+            .map_err(|_| IntegrationError::InvalidArtifact)?;
+        if sha256_hex(&executable) != self.artifact.sha256 {
+            return Err(IntegrationError::InvalidArtifact);
+        }
         let parent = self.target.parent().ok_or(IntegrationError::UnsafeTarget)?;
         ensure_safe_parent(parent)?;
         let temporary = parent.join(format!(".{WORKFLOW_NAME}.install-{}", Uuid::new_v4()));
         let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o700);
-            }
-            let mut file = options.open(&temporary).map_err(|_| IntegrationError::Io)?;
-            file.write_all(&self.artifact.bytes)
+            self.alias
+                .create_alias(&self.artifact.application, &temporary)
                 .map_err(|_| IntegrationError::Io)?;
-            file.sync_all().map_err(|_| IntegrationError::Io)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
-                    .map_err(|_| IntegrationError::Io)?;
-                file.sync_all().map_err(|_| IntegrationError::Io)?;
-            }
-            if !self
-                .verifier
-                .verify(&temporary, &self.artifact.signature_identity)
-                .map_err(|_| IntegrationError::Io)?
-            {
-                return Err(IntegrationError::InvalidSignature);
+            File::open(&temporary)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| IntegrationError::Io)?;
+            if self.status_at(&temporary)? != IntegrationStatus::Installed {
+                return Err(IntegrationError::InvalidArtifact);
             }
             if replace {
                 fs::rename(&temporary, &self.target).map_err(|_| IntegrationError::Io)?;
@@ -261,7 +353,7 @@ impl<V: CodeSignatureVerifier> IntegrationManager<V> {
             sync_parent(&self.target)
         })();
         if result.is_err() {
-            let _ = fs::remove_file(temporary);
+            let _ = fs::remove_file(&temporary);
         }
         result
     }
@@ -271,7 +363,7 @@ fn ensure_safe_parent(parent: &Path) -> Result<(), IntegrationError> {
     let library = parent.parent().ok_or(IntegrationError::UnsafeTarget)?;
     if library.exists() {
         let metadata = fs::symlink_metadata(library).map_err(|_| IntegrationError::Io)?;
-        if !metadata.file_type().is_dir() {
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
             return Err(IntegrationError::UnsafeTarget);
         }
     } else {
@@ -279,32 +371,13 @@ fn ensure_safe_parent(parent: &Path) -> Result<(), IntegrationError> {
     }
     if parent.exists() {
         let metadata = fs::symlink_metadata(parent).map_err(|_| IntegrationError::Io)?;
-        if !metadata.file_type().is_dir() {
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
             return Err(IntegrationError::UnsafeTarget);
         }
     } else {
         fs::create_dir(parent).map_err(|_| IntegrationError::Io)?;
     }
     Ok(())
-}
-
-fn contains_marker(bytes: &[u8]) -> bool {
-    bytes
-        .windows(WORKFLOW_MARKER.len())
-        .any(|window| window == WORKFLOW_MARKER.as_bytes())
-}
-
-fn embedded_version(bytes: &[u8]) -> Option<&str> {
-    const PREFIX: &[u8] = b"version=";
-    let start = bytes
-        .windows(PREFIX.len())
-        .position(|window| window == PREFIX)?
-        + PREFIX.len();
-    let remainder = &bytes[start..];
-    let end = remainder
-        .iter()
-        .position(|byte| *byte == b'\n' || *byte == 0)?;
-    std::str::from_utf8(&remainder[..end]).ok()
 }
 
 fn sync_parent(path: &Path) -> Result<(), IntegrationError> {
@@ -319,14 +392,84 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(target_os = "macos")]
+fn current_application_bundle() -> Result<(PathBuf, PathBuf), IntegrationError> {
+    let executable = std::env::current_exe().map_err(|_| IntegrationError::InvalidArtifact)?;
+    let application = executable
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .ok_or(IntegrationError::InvalidArtifact)?
+        .to_path_buf();
+    let relative = executable
+        .strip_prefix(&application)
+        .map_err(|_| IntegrationError::InvalidArtifact)?
+        .to_path_buf();
+    Ok((application, relative))
+}
+
+#[cfg(target_os = "macos")]
+fn current_code_identity(application: &Path) -> Result<(String, String), IntegrationError> {
+    let details = Command::new("/usr/bin/codesign")
+        .args(["--display", "--verbose=2"])
+        .arg(application)
+        .output()
+        .map_err(|_| IntegrationError::InvalidSignature)?;
+    if !details.status.success() {
+        return Err(IntegrationError::InvalidSignature);
+    }
+    let stderr = String::from_utf8_lossy(&details.stderr);
+    let value = |prefix: &str| {
+        stderr
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let identity = value("Identifier=").ok_or(IntegrationError::InvalidSignature)?;
+    let team = value("TeamIdentifier=").ok_or(IntegrationError::InvalidSignature)?;
+    Ok((identity, team))
+}
+
+#[cfg(target_os = "macos")]
 pub fn embedded_manager()
--> Result<IntegrationManager<SystemCodeSignatureVerifier>, IntegrationError> {
+-> Result<IntegrationManager<NativeApplicationAlias, SystemCodeSignatureVerifier>, IntegrationError>
+{
     let home = std::env::var_os("HOME").ok_or(IntegrationError::UnsafeTarget)?;
-    let artifact = WorkflowArtifact::new(
-        EMBEDDED_WORKFLOW.to_vec(),
-        env!("CARGO_PKG_VERSION"),
-        EMBEDDED_WORKFLOW_SHA256,
-        WORKFLOW_SIGNATURE_IDENTITY,
-    )?;
-    IntegrationManager::new(PathBuf::from(home), artifact, SystemCodeSignatureVerifier)
+    let (application, executable) = current_application_bundle()?;
+    let bytes =
+        fs::read(application.join(&executable)).map_err(|_| IntegrationError::InvalidArtifact)?;
+    let (identity, team) = current_code_identity(&application)?;
+    if identity != DESKTOP_BUNDLE_IDENTIFIER {
+        return Err(IntegrationError::InvalidSignature);
+    }
+    let artifact =
+        ApplicationArtifact::new(application, executable, sha256_hex(&bytes), identity, team)?;
+    IntegrationManager::new(
+        PathBuf::from(home),
+        artifact,
+        NativeApplicationAlias,
+        SystemCodeSignatureVerifier,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn manager_for_application(
+    home: impl AsRef<Path>,
+    application: PathBuf,
+) -> Result<IntegrationManager<NativeApplicationAlias, SystemCodeSignatureVerifier>, IntegrationError>
+{
+    let executable = PathBuf::from("Contents/MacOS/mdviewer-desktop");
+    let bytes =
+        fs::read(application.join(&executable)).map_err(|_| IntegrationError::InvalidArtifact)?;
+    let (identity, team) = current_code_identity(&application)?;
+    if identity != DESKTOP_BUNDLE_IDENTIFIER {
+        return Err(IntegrationError::InvalidSignature);
+    }
+    let artifact =
+        ApplicationArtifact::new(application, executable, sha256_hex(&bytes), identity, team)?;
+    IntegrationManager::new(
+        home,
+        artifact,
+        NativeApplicationAlias,
+        SystemCodeSignatureVerifier,
+    )
 }

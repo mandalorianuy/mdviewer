@@ -69,12 +69,15 @@ export function IntegrationsPanel({ backend, onClose }: IntegrationsPanelProps) 
             "The workflow could not be installed.",
           )}>Install</button>
         )}
-        {(status === "outdated" || status === "invalid") && (
+        {status === "outdated" && (
           <button type="button" disabled={busy} aria-label="Repair macOS PDF Workflow" onClick={() => void perform(
             () => backend.repairMacosWorkflow(),
             "Workflow repaired.",
             "The workflow could not be repaired.",
           )}>Repair</button>
+        )}
+        {status === "invalid" && (
+          <p className="integration-warning">An unrelated or unverifiable item was preserved at the PDF Services path.</p>
         )}
         {status === "installed" && !confirmingUninstall && (
           <button type="button" disabled={busy} aria-label="Uninstall macOS PDF Workflow" onClick={() => setConfirmingUninstall(true)}>Uninstall</button>

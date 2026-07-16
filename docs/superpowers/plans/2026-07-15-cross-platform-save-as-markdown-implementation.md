@@ -4,7 +4,7 @@
 
 **Goal:** Entregar MDViewer como aplicación Tauri 2 portable, con núcleo Rust local y determinista, y publicar primero un DMG firmado y notarizado para macOS 13+ Apple Silicon que agregue “Guardar como Markdown con MDViewer…” al menú PDF de impresión.
 
-**Architecture:** Un monorepo conserva la aplicación Swift buildable como baseline hasta alcanzar paridad. Todos los extractores producen un modelo intermedio común; un único emisor crea GFM y un escritor transaccional publica el `.md` y sus assets. La aplicación Tauri usa ese mismo núcleo que la CLI. El PDF Workflow de macOS sólo persiste un job local y abre un deep link con UUID; no contiene lógica de conversión.
+**Architecture:** Un monorepo conserva la aplicación Swift buildable como baseline hasta alcanzar paridad. Todos los extractores producen un modelo intermedio común; un único emisor crea GFM y un escritor transaccional publica el `.md` y sus assets. La aplicación Tauri usa ese mismo núcleo que la CLI. El PDF Service de macOS es un alias nativo al bundle firmado: macOS entrega el PDF con `RunEvent::Opened` y el propio proceso de MDViewer persiste el job antes de emitir únicamente su UUID al WebView.
 
 **Tech Stack:** Rust 1.94, Cargo workspace, Tauri 2.11.x, React 19.2, TypeScript 5.9, Vite 7.3, PDFium `chromium/7947` vía `pdfium-render` 0.9.3, `html5ever` 0.39, Vitest 4, Playwright 1.61, Swift 6.2 únicamente para el baseline y el adaptador nativo cuando sea necesario.
 
@@ -38,7 +38,6 @@
 ├── crates/mdconvert-pdf/              PDFium, layout y heurísticas
 ├── crates/mdconvert-formats/          CSV, JSON, XML, ZIP, EPUB y OOXML
 ├── crates/mdconvert-cli/              CLI y JSON de resultados v1
-├── platform/macos/pdf-workflow/       Executable PDF Workflow e instalador
 ├── legacy/macos-swift/                Aplicación y tests Swift congelados
 ├── scripts/                           Gates, descarga PDFium y release
 ├── tests/fixtures/                    Corpus portable versionado
@@ -700,29 +699,41 @@ Expected: unit, build and E2E tests pass; Swift baseline remains green.
 
 ---
 
-## Task 14: Add the macOS PDF Workflow and Integration Controls
+## Task 14: Add the macOS PDF Service and Integration Controls
 
 **Files:**
 
-- Create: `platform/macos/pdf-workflow/Cargo.toml`
-- Create: `platform/macos/pdf-workflow/src/{lib,main}.rs`
-- Create: `platform/macos/pdf-workflow/tests/workflow.rs`
 - Create: `apps/desktop/src-tauri/src/macos_integration.rs`
 - Create: `apps/desktop/src-tauri/tests/macos_integration.rs`
 - Create: `apps/desktop/src/features/settings/IntegrationsPanel.tsx`
 - Create: `docs/user-guide/macos-print-workflow.md`
 
-- [ ] **Step 1: Write lifecycle and invocation tests**
+- [x] **Approved plan deviation (2026-07-16)**
 
-Test install, status, repair, version mismatch, checksum mismatch, uninstall, invocation with CUPS options and PDF path, MDViewer closed/open and failure to persist a job.
+The executable design was rejected by the real TextEdit gate: `printtool` could read its temporary
+PDF but returned `PermissionDenied` when the helper tried to create the first staging directory in
+MDViewer's Application Support. Apple documents an Application/Application-alias PDF Workflow
+item that delivers the PDF using an application open event. The user approved switching to that
+native contract; the executable helper is removed from the installed path.
 
-- [ ] **Step 2: Implement the workflow executable**
+- [x] **Step 1: Write lifecycle and native open-event tests**
 
-Name it exactly `Guardar como Markdown con MDViewer`. Treat the final process argument as PDF path and preceding arguments as opaque CUPS options. Validate a regular readable PDF, stage through `PrintJobStore`, fsync, then open only `mdviewer://print/<uuid>` with Launch Services.
+Test install, status, repair, checksum mismatch, uninstall, native alias resolution, multiple PDF
+open events, invalid paths, MDViewer closed/open and failure to persist a job.
 
-Exit 0 only after persistence and dispatch succeed. Never choose a destination or convert in this tool.
+- [x] **Step 2: Implement the native Application alias workflow**
 
-- [ ] **Step 3: Implement install, repair and uninstall**
+Name it exactly `Guardar como Markdown con MDViewer`. Install a Foundation bookmark alias to the
+exact signed MDViewer bundle. Handle Tauri `RunEvent::Opened` synchronously: validate and stage each
+PDF through `PrintJobStore`, fsync, queue the UUID and emit only that opaque UUID to the WebView.
+Never choose a destination or convert in the event handler.
+
+The signed application bundle includes the Task 7 pinned PDFium runtime from the ignored verified
+cache as `Contents/Resources/lib/libpdfium.dylib`. Desktop configures that canonical bundled path
+directly before accepting conversions; it does not depend on `PDFIUM_DYNAMIC_LIB_PATH`. Sign the
+nested runtime before signing the outer app, and never add the dylib to Git.
+
+- [x] **Step 3: Implement install, repair and uninstall**
 
 Install per-user at:
 
@@ -730,16 +741,18 @@ Install per-user at:
 ~/Library/PDF Services/Guardar como Markdown con MDViewer
 ```
 
-Compare embedded version, SHA-256 and code signature before reporting `installed`. Replace atomically. Uninstall only the exact regular file whose marker and signature identify this build; never recursively remove `~/Library/PDF Services`.
+Resolve the alias without UI and compare exact bundle ID, Team ID, strict code signature and
+executable SHA-256 before reporting `installed`. Replace an owned outdated alias atomically.
+Uninstall only a current or verifiably outdated alias; never recursively remove
+`~/Library/PDF Services` and never replace an invalid/unrelated item.
 
-- [ ] **Step 4: Connect Preferences → Integrations**
+- [x] **Step 4: Connect Preferences → Integrations**
 
 Display `not installed`, `installed`, `outdated` or `invalid`; expose Install, Repair or Uninstall with accessible confirmation and result text.
 
-- [ ] **Step 5: Verify automated and real-system behavior**
+- [x] **Step 5: Verify automated and real-system behavior**
 
 ```bash
-cargo test -p mdviewer-pdf-workflow
 cargo test -p mdviewer-desktop --test macos_integration
 npm test --workspace @mdviewer/desktop -- --run
 ```
@@ -752,10 +765,16 @@ Archivo → Imprimir → PDF → Guardar como Markdown con MDViewer…
 
 Expected: MDViewer opens, Save As appears, cancel leaves no output, success creates GFM and opens it.
 
-- [ ] **Step 6: Commit**
+Verified on 2026-07-16 with the exact signed Apple Silicon bundle. Cancel created no output and
+left the store empty. Success created a 110-byte Markdown file, opened it in MDViewer with status
+`Guardado`, rendered the complete heading and three bullets, showed no alert and left the store
+empty. The final executable SHA-256 was
+`feae71f2b6cc65837f5c9d734b37b7d8924bc77fd23ba4cdc43718d2d9f11515`.
+
+- [x] **Step 6: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock platform/macos/pdf-workflow apps/desktop docs/user-guide/macos-print-workflow.md
+git add Cargo.toml Cargo.lock apps/desktop docs/user-guide/macos-print-workflow.md
 git commit -m "feat(macos): install universal Save as Markdown workflow"
 ```
 

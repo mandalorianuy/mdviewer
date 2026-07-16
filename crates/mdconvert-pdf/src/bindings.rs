@@ -10,12 +10,44 @@ use pdfium_render::prelude::{Pdfium, PdfiumError};
 const PDFIUM_DYNAMIC_LIB_PATH: &str = "PDFIUM_DYNAMIC_LIB_PATH";
 
 static LOADED_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+static CONFIGURED_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub fn configure_pdfium_library_path(path: impl AsRef<Path>) -> Result<(), ConversionError> {
+    let canonical = canonical_library_path(path.as_ref())?;
+    let mut configured = CONFIGURED_PATH
+        .lock()
+        .map_err(|_| ConversionError::ConversionFailed {
+            message: "PDFium configuration state is unavailable".into(),
+        })?;
+    if let Some(existing) = configured.as_ref() {
+        return if existing == &canonical {
+            Ok(())
+        } else {
+            Err(ConversionError::ConversionFailed {
+                message: "PDFium is already configured with a different verified runtime".into(),
+            })
+        };
+    }
+    let loaded = LOADED_PATH
+        .lock()
+        .map_err(|_| ConversionError::ConversionFailed {
+            message: "PDFium binding state is unavailable".into(),
+        })?;
+    if loaded
+        .as_ref()
+        .is_some_and(|existing| existing != &canonical)
+    {
+        return Err(ConversionError::ConversionFailed {
+            message: "PDFium is already bound to a different verified runtime".into(),
+        });
+    }
+    drop(loaded);
+    *configured = Some(canonical);
+    Ok(())
+}
 
 pub(crate) fn load_pdfium() -> Result<Pdfium, ConversionError> {
-    let configured =
-        env::var_os(PDFIUM_DYNAMIC_LIB_PATH).ok_or(ConversionError::PdfiumUnavailable)?;
-    let configured = PathBuf::from(configured);
-    let canonical = canonical_library_path(&configured)?;
+    let canonical = configured_library_path()?;
 
     let mut loaded_path = LOADED_PATH
         .lock()
@@ -26,11 +58,7 @@ pub(crate) fn load_pdfium() -> Result<Pdfium, ConversionError> {
     if let Some(existing) = loaded_path.as_ref() {
         if existing != &canonical {
             return Err(ConversionError::ConversionFailed {
-                message: format!(
-                    "PDFium is already bound to {}, not {}",
-                    existing.display(),
-                    canonical.display()
-                ),
+                message: "PDFium is already bound to a different verified runtime".into(),
             });
         }
         return Ok(Pdfium::default());
@@ -49,6 +77,21 @@ pub(crate) fn load_pdfium() -> Result<Pdfium, ConversionError> {
         }
         Err(error) => Err(binding_error(&canonical, error)),
     }
+}
+
+fn configured_library_path() -> Result<PathBuf, ConversionError> {
+    if let Some(configured) = CONFIGURED_PATH
+        .lock()
+        .map_err(|_| ConversionError::ConversionFailed {
+            message: "PDFium configuration state is unavailable".into(),
+        })?
+        .clone()
+    {
+        return Ok(configured);
+    }
+    let configured =
+        env::var_os(PDFIUM_DYNAMIC_LIB_PATH).ok_or(ConversionError::PdfiumUnavailable)?;
+    canonical_library_path(Path::new(&configured))
 }
 
 fn canonical_library_path(configured: &Path) -> Result<PathBuf, ConversionError> {

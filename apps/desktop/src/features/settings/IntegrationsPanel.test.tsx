@@ -29,15 +29,25 @@ describe("macOS PDF Workflow integration", () => {
     expect(screen.getByText("installed")).toBeInTheDocument();
   });
 
-  it.each(["outdated", "invalid"] as const)("repairs the %s state", async (status) => {
-    const api = backend(status);
+  it("repairs the outdated state", async () => {
+    const api = backend("outdated");
     render(<IntegrationsPanel backend={api} />);
 
-    expect(await screen.findByText(status)).toBeInTheDocument();
+    expect(await screen.findByText("outdated")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Repair macOS PDF Workflow" }));
 
     expect(await screen.findByRole("status")).toHaveTextContent("Workflow repaired.");
     expect(api.repairMacosWorkflow).toHaveBeenCalledOnce();
+  });
+
+  it("preserves an invalid unrelated item and offers no destructive action", async () => {
+    const api = backend("invalid");
+    render(<IntegrationsPanel backend={api} />);
+
+    expect(await screen.findByText("invalid")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Repair macOS PDF Workflow" })).not.toBeInTheDocument();
+    expect(screen.getByText(/preserved/i)).toBeInTheDocument();
+    expect(api.repairMacosWorkflow).not.toHaveBeenCalled();
   });
 
   it("requires an accessible confirmation before uninstalling", async () => {
@@ -56,14 +66,14 @@ describe("macOS PDF Workflow integration", () => {
   });
 
   it("announces lifecycle failures without changing the state", async () => {
-    const api = backend("invalid");
+    const api = backend("outdated");
     api.repairMacosWorkflow.mockRejectedValue({ code: "unsafe_workflow_target" });
     render(<IntegrationsPanel backend={api} />);
-    await screen.findByText("invalid");
+    await screen.findByText("outdated");
 
     fireEvent.click(screen.getByRole("button", { name: "Repair macOS PDF Workflow" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("The workflow could not be repaired.");
-    expect(screen.getByText("invalid")).toBeInTheDocument();
+    expect(screen.getByText("outdated")).toBeInTheDocument();
   });
 });
