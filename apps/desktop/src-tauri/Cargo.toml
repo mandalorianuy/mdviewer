@@ -10,7 +10,29 @@ name = "mdviewer_desktop_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
-tauri-build = "=2.6.3"
+tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
+mdconvert-cli = { path = "../../../crates/mdconvert-cli" }
+mdconvert-core = { path = "../../../crates/mdconvert-core" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
 tauri.workspace = true
+tauri-plugin-deep-link = "=2.4.9"
+tempfile = "=3.27.0"
+thiserror = "=2.0.18"
+url = "=2.5.8"
+uuid = { version = "=1.22.0", features = ["serde", "v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.186"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+serde_json = "=1.0.150"
