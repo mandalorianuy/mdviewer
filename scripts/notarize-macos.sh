@@ -11,20 +11,38 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 verify_clean_release_tree "$ROOT"
 reject_hardcoded_apple_ids "$ROOT"
 
-: "${APPLE_API_KEY_PATH:?APPLE_API_KEY_PATH is required}"
-: "${APPLE_API_KEY:?APPLE_API_KEY is required}"
-: "${APPLE_API_ISSUER:?APPLE_API_ISSUER is required}"
-: "${CODESIGN_IDENTITY:?CODESIGN_IDENTITY is required to recreate the DMG}"
-test -f "$APPLE_API_KEY_PATH" || release_die "APPLE_API_KEY_PATH does not point to a file"
-
 version="$(release_version "$ROOT")"
 app="$ROOT/dist/macos-arm64/MDViewer.app"
 dmg="$ROOT/dist/macos-arm64/MDViewer-$version-arm64.dmg"
 receipt="$ROOT/dist/macos-arm64/package-receipt.json"
 verify_developer_id_app "$app"
 test -f "$dmg" || release_die "signed DMG is missing"
-node -e 'const r=require(process.argv[1]); if (!r.signed || r.mode !== "signed" || r.publishable || r.notarized) process.exit(1)' "$receipt" ||
-  release_die "package receipt is not a pending signed release"
+codesign --verify --strict --verbose=2 "$app/Contents/Resources/lib/libpdfium.dylib"
+codesign --verify --strict --verbose=2 "$dmg"
+
+receipt_state="$(node -e 'const r=require(process.argv[1]); process.stdout.write(String(r.notarized) + ":" + String(r.publishable))' "$receipt")" ||
+  release_die "package receipt is invalid"
+case "$receipt_state" in
+  false:false)
+    verify_package_receipt "$ROOT" "$receipt" signed "$app" "$dmg" false false
+    ;;
+  true:false)
+    verify_package_receipt "$ROOT" "$receipt" signed "$app" "$dmg" true false
+    xcrun stapler validate "$app"
+    xcrun stapler validate "$dmg"
+    printf 'NOTARIZATION ALREADY COMPLETE: receipt remains pending production verification.\n'
+    exit 0
+    ;;
+  *)
+    release_die "package receipt is not a pending signed or notarized release"
+    ;;
+esac
+
+: "${APPLE_API_KEY_PATH:?APPLE_API_KEY_PATH is required}"
+: "${APPLE_API_KEY:?APPLE_API_KEY is required}"
+: "${APPLE_API_ISSUER:?APPLE_API_ISSUER is required}"
+: "${CODESIGN_IDENTITY:?CODESIGN_IDENTITY is required to recreate the DMG}"
+test -f "$APPLE_API_KEY_PATH" || release_die "APPLE_API_KEY_PATH does not point to a file"
 
 zip="$ROOT/dist/macos-arm64/MDViewer-$version-notarization.zip"
 rm -f "$zip"
@@ -54,15 +72,7 @@ submit "$dmg" "$ROOT/dist/macos-arm64/notary-dmg.json"
 xcrun stapler staple "$dmg"
 xcrun stapler validate "$dmg"
 
-node - "$receipt" "$dmg" <<'NODE'
-const crypto = require('node:crypto');
-const fs = require('node:fs');
-const [receiptPath, dmgPath] = process.argv.slice(2);
-const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
-receipt.notarized = true;
-receipt.publishable = true;
-receipt.artifacts.dmgSha256 = crypto.createHash('sha256').update(fs.readFileSync(dmgPath)).digest('hex');
-fs.writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
-NODE
+mark_package_receipt_notarized "$receipt" "$dmg" "$ROOT" "$app"
+verify_package_receipt "$ROOT" "$receipt" signed "$app" "$dmg" true false
 
-printf 'NOTARIZATION COMPLETE: app and DMG tickets are stapled.\n'
+printf 'NOTARIZATION COMPLETE: app and DMG tickets are stapled; receipt is pending production verification.\n'

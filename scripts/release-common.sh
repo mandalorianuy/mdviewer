@@ -90,10 +90,12 @@ reject_hardcoded_apple_ids() {
 const fs = require('node:fs');
 const path = require('node:path');
 const patterns = [
-  ['key ID assignment', /(?:AUTH_KEY_ID|ASC_KEY_ID|APPLE_API_KEY)\s*=\s*["'][A-Z0-9]{10}["']/],
-  ['issuer ID assignment', /(?:AUTH_ISSUER_ID|ASC_ISSUER_ID|APPLE_API_ISSUER)\s*=\s*["'][0-9a-fA-F-]{36}["']/],
-  ['key ID default', /(?:AUTH_KEY_ID|ASC_KEY_ID|APPLE_API_KEY)[^\n]{0,120}:-[A-Z0-9]{10}/],
+  ['key ID assignment', /\b(?:AUTH_KEY_ID|ASC_KEY_ID|APPLE_API_KEY(?:_ID)?)\b["']?\s*(?:=|:)\s*["']?[A-Z0-9]{10}["']?/],
+  ['issuer ID assignment', /\b(?:AUTH_ISSUER_ID|ASC_ISSUER_ID|APPLE_API_ISSUER)\b["']?\s*(?:=|:)\s*["']?[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}["']?/],
+  ['key ID default', /(?:AUTH_KEY_ID|ASC_KEY_ID|APPLE_API_KEY(?:_ID)?)[^\n]{0,120}:-[A-Z0-9]{10}/],
   ['issuer ID default', /(?:AUTH_ISSUER_ID|ASC_ISSUER_ID|APPLE_API_ISSUER)[^\n]{0,160}:-[0-9a-fA-F-]{36}/],
+  ['key ID CLI argument', /--key-id(?:=|\s+)["']?[A-Z0-9]{10}["']?/],
+  ['issuer ID CLI argument', /--issuer(?:=|\s+)["']?[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}["']?/],
   ['machine-specific private key path', /AuthKey_[A-Z0-9]{10}\.p8/],
 ];
 const excluded = new Set(['test-release-scripts.sh']);
@@ -191,6 +193,175 @@ verify_unsigned_app() {
     grep -qx 'com.mdviewer.desktop' || release_die "unexpected application bundle identifier" || return 1
   /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:LSHandlerRank' "$app/Contents/Info.plist" |
     grep -qx 'None' || release_die "PDF handler rank must remain None" || return 1
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeName' "$app/Contents/Info.plist" |
+    grep -qx 'PDF document from macOS Print' || release_die "unexpected PDF document type name" || return 1
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0' "$app/Contents/Info.plist" |
+    grep -qx 'pdf' || release_die "PDF document extension metadata is missing" || return 1
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:LSItemContentTypes:0' "$app/Contents/Info.plist" |
+    grep -qx 'com.adobe.pdf' || release_die "PDF content type metadata is missing" || return 1
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeRole' "$app/Contents/Info.plist" |
+    grep -qx 'Viewer' || release_die "PDF document role must remain Viewer" || return 1
+}
+
+verify_package_receipt() {
+  local root="$1"
+  local receipt="$2"
+  local expected_mode="$3"
+  local app="$4"
+  local dmg="$5"
+  local expected_notarized="$6"
+  local expected_publishable="$7"
+  local head_commit
+
+  test -f "$receipt" && test ! -L "$receipt" ||
+    release_die "package receipt is missing or is a symlink" || return 1
+  test -d "$app" || release_die "application bundle is missing: $app" || return 1
+  test -f "$dmg" && test ! -L "$dmg" ||
+    release_die "DMG is missing or is a symlink: $dmg" || return 1
+  head_commit="$(git -C "$root" rev-parse HEAD 2>/dev/null)" ||
+    release_die "release root has no Git HEAD" || return 1
+
+  node - "$receipt" "$expected_mode" "$expected_notarized" "$expected_publishable" \
+    "$head_commit" "$app/Contents/MacOS/mdviewer-desktop" \
+    "$app/Contents/Resources/lib/libpdfium.dylib" "$dmg" <<'NODE' || {
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const [receiptPath, expectedMode, expectedNotarized, expectedPublishable, headCommit, executable, pdfium, dmg] = process.argv.slice(2);
+const fail = (message) => { console.error(`package receipt rejected: ${message}`); process.exit(1); };
+let receipt;
+try { receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8')); } catch { fail('invalid JSON'); }
+const expectedBoolean = (value) => value === 'true';
+const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+if (receipt.schemaVersion !== 1) fail('unsupported schemaVersion');
+if (receipt.mode !== expectedMode) fail('mode mismatch');
+if (receipt.target !== 'aarch64-apple-darwin') fail('target mismatch');
+if (receipt.signed !== (expectedMode === 'signed')) fail('signed claim mismatch');
+if (receipt.notarized !== expectedBoolean(expectedNotarized)) fail('notarized claim mismatch');
+if (receipt.publishable !== expectedBoolean(expectedPublishable)) fail('publishable claim mismatch');
+if (receipt.publishable && (!receipt.signed || !receipt.notarized)) fail('publishable state lacks prerequisites');
+if (receipt.commit !== headCommit) fail('commit does not match Git HEAD');
+if (receipt.artifacts?.executableSha256 !== sha256(executable)) fail('executable checksum mismatch');
+if (receipt.artifacts?.pdfiumSha256 !== sha256(pdfium)) fail('PDFium checksum mismatch');
+if (receipt.artifacts?.dmgSha256 !== sha256(dmg)) fail('DMG checksum mismatch');
+NODE
+    release_die "package receipt provenance or state validation failed"
+    return 1
+  }
+}
+
+verify_mounted_release_contents() {
+  local receipt="$1"
+  local outer_app="$2"
+  local mounted_app="$3"
+  local applications_link="$4"
+
+  test -L "$applications_link" || release_die "DMG does not contain the Applications link" || return 1
+  [ "$(readlink "$applications_link")" = "/Applications" ] ||
+    release_die "DMG Applications link must point exactly to /Applications" || return 1
+  verify_unsigned_app "$outer_app" || return 1
+  verify_unsigned_app "$mounted_app" || return 1
+
+  node - "$receipt" "$outer_app" "$mounted_app" <<'NODE' || {
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const [receiptPath, outerApp, mountedApp] = process.argv.slice(2);
+const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+for (const [relative, key] of [
+  ['Contents/MacOS/mdviewer-desktop', 'executableSha256'],
+  ['Contents/Resources/lib/libpdfium.dylib', 'pdfiumSha256'],
+]) {
+  const outer = sha256(`${outerApp}/${relative}`);
+  const mounted = sha256(`${mountedApp}/${relative}`);
+  if (outer !== mounted || mounted !== receipt.artifacts?.[key]) process.exit(1);
+}
+NODE
+    release_die "mounted DMG application does not match the exterior app and receipt"
+    return 1
+  }
+}
+
+atomic_update_package_receipt() {
+  local receipt="$1"
+  local operation="$2"
+  local dmg="${3:-}"
+  local root="${4:-}"
+  local app="${5:-}"
+  node - "$receipt" "$operation" "$dmg" "$root" "$app" <<'NODE' || {
+const crypto = require('node:crypto');
+const childProcess = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const [receiptPath, operation, dmgPath, root, app] = process.argv.slice(2);
+const directory = path.dirname(receiptPath);
+const temporary = path.join(directory, `.${path.basename(receiptPath)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+if (receipt.schemaVersion !== 1 || receipt.mode !== 'signed' || !receipt.signed) process.exit(1);
+if (!root || !app || !dmgPath) process.exit(1);
+const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const head = childProcess.execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+if (receipt.commit !== head) process.exit(1);
+if (receipt.artifacts?.executableSha256 !== sha256(`${app}/Contents/MacOS/mdviewer-desktop`)) process.exit(1);
+if (receipt.artifacts?.pdfiumSha256 !== sha256(`${app}/Contents/Resources/lib/libpdfium.dylib`)) process.exit(1);
+if (operation === 'notarized') {
+  if (receipt.notarized || receipt.publishable) process.exit(1);
+  receipt.artifacts.dmgSha256 = sha256(dmgPath);
+  receipt.notarized = true;
+  receipt.publishable = false;
+} else if (operation === 'publishable') {
+  if (!receipt.notarized || receipt.publishable) process.exit(1);
+  if (receipt.artifacts?.dmgSha256 !== sha256(dmgPath)) process.exit(1);
+  receipt.publishable = true;
+} else {
+  process.exit(1);
+}
+const data = `${JSON.stringify(receipt, null, 2)}\n`;
+let descriptor;
+try {
+  descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+  fs.writeFileSync(descriptor, data);
+  fs.fsyncSync(descriptor);
+  fs.closeSync(descriptor);
+  descriptor = undefined;
+  fs.renameSync(temporary, receiptPath);
+  const directoryDescriptor = fs.openSync(directory, fs.constants.O_RDONLY);
+  fs.fsyncSync(directoryDescriptor);
+  fs.closeSync(directoryDescriptor);
+} catch (error) {
+  if (descriptor !== undefined) fs.closeSync(descriptor);
+  try { fs.unlinkSync(temporary); } catch {}
+  throw error;
+}
+NODE
+    release_die "atomic package receipt transition failed: $operation"
+    return 1
+  }
+}
+
+mark_package_receipt_notarized() {
+  atomic_update_package_receipt "$1" notarized "$2" "$3" "$4"
+}
+
+mark_package_receipt_publishable() {
+  atomic_update_package_receipt "$1" publishable "$2" "$3" "$4"
+}
+
+verify_then_publish_release() {
+  local root="$1"
+  local receipt="$2"
+  local app="$3"
+  local dmg="$4"
+  local gate_function="$5"
+
+  verify_package_receipt "$root" "$receipt" signed "$app" "$dmg" true false || return 1
+  type "$gate_function" >/dev/null 2>&1 || release_die "release gate function is unavailable" || return 1
+  "$gate_function" "$root" "$receipt" "$app" "$dmg" || {
+    release_die "signed release verification gate failed"
+    return 1
+  }
+  verify_package_receipt "$root" "$receipt" signed "$app" "$dmg" true false || return 1
+  mark_package_receipt_publishable "$receipt" "$dmg" "$root" "$app" || return 1
+  verify_package_receipt "$root" "$receipt" signed "$app" "$dmg" true true
 }
 
 release_version() {

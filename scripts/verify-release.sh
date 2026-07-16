@@ -26,20 +26,11 @@ test -f "$receipt" || release_die "package receipt is missing"
 test -f "$dmg" || release_die "DMG is missing"
 
 verify_unsigned_app "$app"
-require_arm64_file "$app/Contents/MacOS/mdviewer-desktop"
-require_arm64_file "$app/Contents/Resources/lib/libpdfium.dylib"
-
-node - "$receipt" "$mode" "$app/Contents/MacOS/mdviewer-desktop" "$app/Contents/Resources/lib/libpdfium.dylib" "$dmg" <<'NODE'
-const crypto = require('node:crypto');
-const fs = require('node:fs');
-const [receiptPath, expectedMode, executable, pdfium, dmg] = process.argv.slice(2);
-const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
-const sha256 = (path) => crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex');
-if (receipt.mode !== expectedMode || receipt.target !== 'aarch64-apple-darwin') process.exit(1);
-if (receipt.artifacts?.executableSha256 !== sha256(executable)) process.exit(1);
-if (receipt.artifacts?.pdfiumSha256 !== sha256(pdfium)) process.exit(1);
-if (receipt.artifacts?.dmgSha256 !== sha256(dmg)) process.exit(1);
-NODE
+if [ "$mode" = "unsigned-smoke" ]; then
+  verify_package_receipt "$ROOT" "$receipt" "$mode" "$app" "$dmg" false false
+else
+  verify_package_receipt "$ROOT" "$receipt" "$mode" "$app" "$dmg" true false
+fi
 
 mount="$(mktemp -d "${TMPDIR:-/tmp}/mdviewer-verify-dmg.XXXXXX")"
 cleanup() {
@@ -48,10 +39,7 @@ cleanup() {
 }
 trap cleanup EXIT
 hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mount" "$dmg"
-test -d "$mount/MDViewer.app" || release_die "DMG does not contain MDViewer.app"
-test -L "$mount/Applications" || release_die "DMG does not contain the Applications link"
-require_arm64_file "$mount/MDViewer.app/Contents/MacOS/mdviewer-desktop"
-require_arm64_file "$mount/MDViewer.app/Contents/Resources/lib/libpdfium.dylib"
+verify_mounted_release_contents "$receipt" "$app" "$mount/MDViewer.app" "$mount/Applications"
 
 if [ "$mode" = "unsigned-smoke" ]; then
   node -e 'const r=require(process.argv[1]); if (r.publishable || r.signed || r.notarized) process.exit(1)' "$receipt" ||
@@ -64,32 +52,51 @@ if [ "$mode" = "unsigned-smoke" ]; then
   exit 0
 fi
 
-verify_clean_release_tree "$ROOT"
-verify_developer_id_app "$app"
-codesign --verify --strict --verbose=2 "$app/Contents/Resources/lib/libpdfium.dylib"
-codesign --verify --strict --verbose=2 "$dmg"
-xcrun stapler validate "$app"
-xcrun stapler validate "$dmg"
-spctl --assess --type execute --verbose=4 "$app"
-spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
-node -e 'const r=require(process.argv[1]); if (!r.publishable || !r.signed || !r.notarized) process.exit(1)' "$receipt" ||
-  release_die "release receipt does not attest signed and notarized production mode"
+run_signed_release_gates() {
+  local root="$1"
+  : "$2"
+  local exterior_app="$3"
+  local exterior_dmg="$4"
+  local mounted_app="$mount/MDViewer.app"
+  local alias_home workflow
 
-env -u PDFIUM_DYNAMIC_LIB_PATH \
-MDVIEWER_APPLICATION_BUNDLE="$app" \
-cargo test -p mdviewer-desktop --test macos_integration \
-  signed_application_uses_its_bundled_pdfium_without_environment_configuration \
-  -- --ignored --exact
+  verify_clean_release_tree "$root" || return 1
+  verify_developer_id_app "$exterior_app" || return 1
+  verify_developer_id_app "$mounted_app" || return 1
+  codesign --verify --strict --verbose=2 "$exterior_app/Contents/Resources/lib/libpdfium.dylib" || return 1
+  codesign --verify --strict --verbose=2 "$mounted_app/Contents/Resources/lib/libpdfium.dylib" || return 1
+  codesign --verify --strict --verbose=2 "$exterior_dmg" || return 1
+  xcrun stapler validate "$exterior_app" || return 1
+  xcrun stapler validate "$mounted_app" || return 1
+  xcrun stapler validate "$exterior_dmg" || return 1
+  spctl --assess --type execute --verbose=4 "$exterior_app" || return 1
+  spctl --assess --type execute --verbose=4 "$mounted_app" || return 1
+  spctl --assess --type open --context context:primary-signature --verbose=4 "$exterior_dmg" || return 1
 
-alias_home="$(mktemp -d "${TMPDIR:-/tmp}/mdviewer-alias-gate.XXXXXX")"
-HOME="$alias_home" \
-MDVIEWER_CONFIRM_REAL_WORKFLOW_INSTALL=yes \
-MDVIEWER_APPLICATION_BUNDLE="$app" \
-cargo test -p mdviewer-desktop --test macos_integration \
-  installs_the_exact_embedded_development_application_alias -- --ignored --exact
-workflow="$alias_home/Library/PDF Services/Guardar como Markdown con MDViewer"
-test "$(file -b "$workflow")" = "MacOS Alias file" ||
-  release_die "installed PDF Service is not a native macOS alias"
-rm -rf "$alias_home"
+  env -u PDFIUM_DYNAMIC_LIB_PATH \
+  MDVIEWER_APPLICATION_BUNDLE="$exterior_app" \
+  cargo test -p mdviewer-desktop --test macos_integration \
+    signed_application_uses_its_bundled_pdfium_without_environment_configuration \
+    -- --ignored --exact || return 1
+
+  alias_home="$(mktemp -d "${TMPDIR:-/tmp}/mdviewer-alias-gate.XXXXXX")"
+  HOME="$alias_home" \
+  MDVIEWER_CONFIRM_REAL_WORKFLOW_INSTALL=yes \
+  MDVIEWER_APPLICATION_BUNDLE="$exterior_app" \
+  cargo test -p mdviewer-desktop --test macos_integration \
+    installs_the_exact_embedded_development_application_alias -- --ignored --exact || {
+      rm -rf "$alias_home"
+      return 1
+    }
+  workflow="$alias_home/Library/PDF Services/Guardar como Markdown con MDViewer"
+  test "$(file -b "$workflow")" = "MacOS Alias file" || {
+    rm -rf "$alias_home"
+    release_die "installed PDF Service is not a native macOS alias"
+    return 1
+  }
+  rm -rf "$alias_home"
+}
+
+verify_then_publish_release "$ROOT" "$receipt" "$app" "$dmg" run_signed_release_gates
 
 printf 'SIGNED RELEASE VERIFIED: Developer ID, exact native alias lifecycle, notarization, stapling, Gatekeeper and arm64-only contents pass.\n'

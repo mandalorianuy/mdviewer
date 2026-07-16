@@ -69,7 +69,17 @@ Task 7 URL, verifies the archive and receipt, builds only `aarch64-apple-darwin`
 the outer app, then creates and signs the DMG. Notarization submits the app ZIP with `notarytool`,
 staples the app, recreates the DMG with that stapled app, submits the DMG, and staples it. Final
 verification runs strict `codesign`, `stapler`, Gatekeeper, architecture/content and isolated native
-alias lifecycle gates.
+alias lifecycle gates. The package receipt is bound to the current Git commit and exact executable,
+PDFium and DMG checksums before any notary submission. Notarization updates the recreated DMG hash
+atomically and leaves `notarized: true`, `publishable: false`. Only `verify-release.sh`, after every
+production gate passes, atomically changes `publishable` to `true`; a failed Gatekeeper, mounted-DMG
+or alias check leaves it false. Re-running notarization on that pending verified receipt validates
+the stapled tickets without submitting the artifacts again.
+
+Verification mounts the DMG read-only and requires its app executable, bundled PDFium, PDF handler
+metadata and handler rank to match the exterior app and receipt exactly. Its `Applications` link
+must resolve exactly to `/Applications`. Signed mode also revalidates nested and outer signatures,
+stapled tickets and Gatekeeper against the mounted copy.
 
 Artifacts are written under `dist/macos-arm64/`. These commands do not create a GitHub release.
 The GitHub release workflow uses repository secrets, minimal read-only permissions and uploads a
