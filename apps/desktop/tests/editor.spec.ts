@@ -6,6 +6,7 @@ test.beforeEach(async ({ page }) => {
     window.__MDVIEWER_TEST_BACKEND__ = {
       selectOpenDocument: async () => ({ name: "e2e.md", readToken: "read", writeToken: "write" }),
       selectSaveDocument: async (name: string) => ({ name, writeToken: "save" }),
+      selectExportDocument: async (name: string) => ({ name, writeToken: "export" }),
       selectConversionSource: async () => null,
       openDocument: async () => ({ content: "# Browser E2E\n\n[unsafe](javascript:alert(1))" }),
       saveDocument: async () => ({ saved: true, writeToken: "renewed-write" }),

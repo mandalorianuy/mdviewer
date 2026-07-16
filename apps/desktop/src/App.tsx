@@ -10,6 +10,7 @@ import {
   type DocumentState,
 } from "./features/documents/document";
 import { EditorSurface } from "./features/editor/EditorSurface";
+import { buildStandaloneHtml, htmlExportName, PRINT_STYLESHEET } from "./features/export/htmlExport";
 import { MarkdownPreview } from "./features/preview/MarkdownPreview";
 import { ThemeSelect, type ThemePreference } from "./features/settings/ThemeSelect";
 import { IntegrationsPanel } from "./features/settings/IntegrationsPanel";
@@ -46,6 +47,7 @@ export default function App({ backend = tauriBackend }: AppProps) {
   const [conversionNotice, setConversionNotice] = useState<string>();
   const [openBusy, setOpenBusy] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
   const [workflowBusy, setWorkflowBusy] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string>();
@@ -61,6 +63,8 @@ export default function App({ backend = tauriBackend }: AppProps) {
   const pendingJobFinishes = useRef(new Set<string>());
   const terminalJobs = useRef(new Set<string>());
   const saveBusyRef = useRef(false);
+  const exportBusyRef = useRef(false);
+  const previewRef = useRef<HTMLElement>(null);
   const workflowTail = useRef<Promise<void>>(Promise.resolve());
   const workflowCount = useRef(0);
 
@@ -83,6 +87,10 @@ export default function App({ backend = tauriBackend }: AppProps) {
     window.document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("mdviewer.theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    window.document.title = currentDocument.name.replace(/\.md$/i, "") || "MDViewer";
+  }, [currentDocument.name]);
 
   useEffect(() => {
     const find = (event: KeyboardEvent) => {
@@ -363,6 +371,46 @@ export default function App({ backend = tauriBackend }: AppProps) {
     }
   };
 
+  const exportHtml = useCallback(async () => {
+    if (exportBusyRef.current) return;
+    exportBusyRef.current = true;
+    setExportBusy(true);
+    setError(undefined);
+    try {
+      const submittedDocument = documentRef.current;
+      const preview = previewRef.current;
+      if (!preview) throw new Error("preview unavailable");
+      const html = await buildStandaloneHtml(preview, submittedDocument.name);
+      const selection = await backend.selectExportDocument(htmlExportName(submittedDocument.name), "html");
+      if (!selection) return;
+      await backend.saveDocument(selection.writeToken, html);
+    } catch {
+      setError("No se pudo exportar el documento como HTML.");
+    } finally {
+      exportBusyRef.current = false;
+      setExportBusy(false);
+    }
+  }, [backend]);
+
+  const exportPdf = useCallback(() => {
+    setError(undefined);
+    const root = document.documentElement;
+    const previousTitle = document.title;
+    const printTitle = documentRef.current.name.replace(/\.md$/i, "").trim() || "Documento";
+    root.dataset.mdviewerPrinting = "true";
+    document.title = printTitle;
+    try {
+      window.print();
+    } catch {
+      setError("No se pudo abrir el diálogo de impresión.");
+    } finally {
+      delete root.dataset.mdviewerPrinting;
+      document.title = previousTitle;
+    }
+  }, []);
+
+  const blocked = openBusy || saveBusy || workflowBusy || exportBusy;
+
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -370,16 +418,18 @@ export default function App({ backend = tauriBackend }: AppProps) {
         <ThemeSelect value={theme} onChange={setTheme} />
       </header>
       <nav className="toolbar" aria-label="Documento">
-        <button type="button" onClick={() => void openMarkdown()} disabled={openBusy || saveBusy || workflowBusy}>Abrir Markdown</button>
-        <button type="button" onClick={() => void save()} disabled={!dirty || openBusy || saveBusy || workflowBusy}>Guardar</button>
-        <button type="button" className="quiet" onClick={() => void saveAs()} disabled={openBusy || saveBusy || workflowBusy}>Guardar como</button>
+        <button type="button" onClick={() => void openMarkdown()} disabled={blocked}>Abrir Markdown</button>
+        <button type="button" onClick={() => void save()} disabled={!dirty || blocked}>Guardar</button>
+        <button type="button" className="quiet" onClick={() => void saveAs()} disabled={blocked}>Guardar como</button>
         <span className="toolbar-separator" />
-        <button type="button" className="quiet" onClick={() => setFindOpen(true)}>Buscar</button>
-        {macosIntegrationsAvailable && <button type="button" className="quiet" onClick={() => setIntegrationsOpen(true)}>Integrations</button>}
+        <button type="button" className="quiet" onClick={() => setFindOpen(true)} disabled={exportBusy}>Buscar</button>
+        <button type="button" className="quiet" onClick={() => void exportHtml()} disabled={blocked}>Exportar HTML</button>
+        <button type="button" className="quiet" onClick={exportPdf} disabled={blocked}>Exportar PDF</button>
+        {macosIntegrationsAvailable && <button type="button" className="quiet" onClick={() => setIntegrationsOpen(true)} disabled={exportBusy}>Integrations</button>}
         <button
           type="button"
           className="accent"
-          disabled={openBusy || saveBusy || workflowBusy}
+          disabled={blocked}
           onClick={() => enqueueWorkflow(convertDirectly)}
         >
           Convertir archivo
@@ -405,6 +455,7 @@ export default function App({ backend = tauriBackend }: AppProps) {
           </button>
         </section>
       )}
+      {exportBusy && <div className="conversion-notice" role="status" aria-live="polite">Exportando HTML…</div>}
       {conversionNotice && <div className="conversion-notice" role="status">{conversionNotice}</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
       {Object.entries(jobCleanupErrors).map(([id, message]) => (
@@ -423,8 +474,9 @@ export default function App({ backend = tauriBackend }: AppProps) {
       {warnings.length > 0 && <aside className="warning-list" aria-label="Advertencias"><strong>Conversión completada con observaciones</strong><ul>{warnings.map((code, index) => <li key={`${code}-${index}`}>{warningMessage(code)}</li>)}</ul></aside>}
       <div className="workspace">
         <EditorSurface content={currentDocument.content} findOpen={findOpen} findQuery={findQuery} onChange={(content) => setDocument((current) => ({ ...current, content }))} onFindChange={setFindQuery} onFindClose={() => setFindOpen(false)} />
-        <MarkdownPreview markdown={currentDocument.content} onExternalLink={followExternal} />
+        <MarkdownPreview markdown={currentDocument.content} onExternalLink={followExternal} elementRef={previewRef} />
       </div>
+      <style data-mdviewer-print>{PRINT_STYLESHEET}</style>
       <footer className="status-bar"><span>{currentDocument.content.length} caracteres</span><span>Procesamiento local</span></footer>
     </main>
   );

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "rowId": "textedit",
+  "result": "pass",
+  "application": "TextEdit",
+  "bundleId": "com.apple.TextEdit",
+  "applicationVersion": "1.20",
+  "generatedAt": "2026-07-16T22:03:35Z",
+  "environment": {"platform": "macOS", "osVersion": "26.6 (25G5028f)", "architecture": "arm64"},
+  "fixtureSha256": {"tests/parity/fixtures/textedit-acceptance.rtf": "078d6c4eedbaceb838b81f60c376cdf7f42ad169cdf6347d8bf845e730bd98be"},
+  "output": {"markdownSha256": "3c77c394e2431217ca2c2288abc0243c22f8aa35b000eb1b9af8066fb8563f07", "bytes": 248},
+  "warnings": [],
+  "checks": {
+    "reading_order": "pass",
+    "headings": "pass",
+    "lists": "pass",
+    "tables": "pass",
+    "links": "pass",
+    "images": {"result": "not_applicable", "reason": "TextEdit did not render the embedded RTF pict block in the local acceptance fixture, so no image entered its print output."},
+    "warnings": "pass",
+    "success_output": "pass",
+    "opened_in_mdviewer": "pass",
+    "cancellation_no_output": "pass",
+    "cleanup_empty_store": "pass"
+  }
+}

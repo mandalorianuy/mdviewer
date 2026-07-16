@@ -36,6 +36,7 @@ impl CommandError {
             "already_claimed" => "print job was already claimed",
             "invalid_job_metadata" => "print job metadata is invalid",
             "invalid_external_url" => "external URL is not allowed",
+            "invalid_export_format" => "export format is not allowed",
             _ => "operation could not be completed",
         };
         Self {
@@ -135,6 +136,24 @@ pub fn authorize_save_selection(
     Ok(SaveSelectionResult { name, write_token })
 }
 
+pub fn authorize_export_selection(
+    state: &AppState,
+    path: &Path,
+    format: &str,
+) -> Result<SaveSelectionResult, CommandError> {
+    if format != "html" {
+        return Err(CommandError::new("invalid_export_format"));
+    }
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("html"))
+    {
+        return Err(CommandError::new("invalid_selection"));
+    }
+    authorize_save_selection(state, path)
+}
+
 fn selected_name(path: &Path) -> Result<String, CommandError> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -192,6 +211,23 @@ pub fn sanitized_markdown_name(value: &str) -> String {
     }
     bounded.push_str(".md");
     bounded
+}
+
+pub fn sanitized_export_name(value: &str, format: &str) -> Result<String, CommandError> {
+    if format != "html" {
+        return Err(CommandError::new("invalid_export_format"));
+    }
+    let value = value.trim();
+    let without_html = value
+        .get(value.len().saturating_sub(5)..)
+        .filter(|suffix| suffix.eq_ignore_ascii_case(".html"))
+        .map_or(value, |_| &value[..value.len() - 5]);
+    let without_markdown = without_html
+        .get(without_html.len().saturating_sub(3)..)
+        .filter(|suffix| suffix.eq_ignore_ascii_case(".md"))
+        .map_or(without_html, |_| &without_html[..without_html.len() - 3]);
+    let markdown_name = sanitized_markdown_name(without_markdown);
+    Ok(format!("{}.html", markdown_name.trim_end_matches(".md")))
 }
 
 pub fn validate_external_url(value: &str) -> Result<Url, CommandError> {
@@ -510,6 +546,24 @@ mod ipc {
     }
 
     #[tauri::command]
+    pub(super) async fn select_export_document(
+        state: State<'_, AppState>,
+        suggested_name: String,
+        format: String,
+    ) -> Result<Option<SaveSelectionResult>, CommandError> {
+        let name = sanitized_export_name(&suggested_name, &format)?;
+        let Some(file) = rfd::AsyncFileDialog::new()
+            .add_filter("HTML", &["html"])
+            .set_file_name(name)
+            .save_file()
+            .await
+        else {
+            return Ok(None);
+        };
+        authorize_export_selection(&state, file.path(), &format).map(Some)
+    }
+
+    #[tauri::command]
     pub(super) fn open(
         state: State<'_, AppState>,
         token: String,
@@ -614,6 +668,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         ipc::select_open_document,
         ipc::select_conversion_source,
         ipc::select_save_document,
+        ipc::select_export_document,
         ipc::open,
         ipc::save,
         ipc::convert,

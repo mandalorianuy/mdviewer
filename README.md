@@ -19,6 +19,10 @@ OCR is intentionally deferred to v1.1. Scanned or image-only PDFs report `ocr_re
 metadata but do not have text recognized. Printing through PDF can also lose semantic structure and
 reading-order information, so fidelity depends on what the source application preserves.
 
+The Swift application remains preserved until the strict [v1 parity report](docs/release/v1-parity-report.md)
+has no required or manual row pending. YouTube import remains an explicit post-v1 exclusion rather
+than evidence of local-conversion parity.
+
 ## Develop
 
 Requirements: Node.js 24, Rust 1.94 and the Tauri prerequisites for your platform.
@@ -47,6 +51,7 @@ Build a local macOS artifact without making signing or notarization claims:
 
 - [macOS print workflow](docs/user-guide/macos-print-workflow.md)
 - [macOS release and unsigned smoke](docs/release/macos.md)
+- [v1 parity and Swift retirement gate](docs/release/v1-parity-report.md)
 - [CLI contract](docs/reference/cli.md)
 - [cross-platform architecture](docs/superpowers/specs/2026-07-15-cross-platform-save-as-markdown-design.md)
 - [preserved Swift baseline](docs/architecture/swift-baseline.md)

@@ -52,7 +52,7 @@ pub(crate) fn group_page_lines(page: &RawPage, config: &HeuristicConfig) -> Vec<
                 .last()
                 .and_then(|segment| segment.last())
                 .is_some_and(|previous| {
-                    glyph.1.bounds.left - previous.1.bounds.right > config.line_segment_gap_points
+                    segment_gap_splits(&previous.1.text, previous.1.bounds, glyph.1.bounds, config)
                 });
             if splits || segments.is_empty() {
                 segments.push(Vec::new());
@@ -96,7 +96,7 @@ fn group_page_words(page: &RawPage, config: &HeuristicConfig) -> Vec<Line> {
                 .last()
                 .and_then(|segment| segment.last())
                 .is_some_and(|previous| {
-                    word.bounds.left - previous.bounds.right > config.line_segment_gap_points
+                    segment_gap_splits(&previous.text, previous.bounds, word.bounds, config)
                 });
             if splits || segments.is_empty() {
                 segments.push(Vec::new());
@@ -112,6 +112,28 @@ fn group_page_words(page: &RawPage, config: &HeuristicConfig) -> Vec<Line> {
     }
     lines.sort_by(line_position_cmp);
     lines
+}
+
+fn segment_gap_splits(
+    previous_text: &str,
+    previous: RawRect,
+    next: RawRect,
+    config: &HeuristicConfig,
+) -> bool {
+    let gap = next.left - previous.right;
+    if gap <= config.line_segment_gap_points {
+        return false;
+    }
+    let detached_marker_tab_stop = next.height().max(previous.height()) * 3.0;
+    !(is_detached_list_marker(previous_text) && gap <= detached_marker_tab_stop)
+}
+
+fn is_detached_list_marker(text: &str) -> bool {
+    let marker = text.trim();
+    matches!(marker, "-" | "*" | "•")
+        || marker
+            .strip_suffix('.')
+            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn build_word_line(page: &RawPage, words: &[&RawWord], config: &HeuristicConfig) -> Option<Line> {
@@ -188,6 +210,7 @@ fn build_line(page: &RawPage, glyphs: Vec<RawGlyph>, config: &HeuristicConfig) -
             glyph.bounds.left - previous.bounds.right
                 > previous.font_size.max(glyph.font_size) * config.word_gap_ratio
         }) && !text.ends_with(' ')
+            && !starts_with_attached_punctuation(&glyph.text)
         {
             text.push(' ');
         }
@@ -216,6 +239,15 @@ fn build_line(page: &RawPage, glyphs: Vec<RawGlyph>, config: &HeuristicConfig) -
         font_weight: weights.get(weights.len() / 2).copied(),
         glyph_spans,
     }
+}
+
+fn starts_with_attached_punctuation(text: &str) -> bool {
+    text.chars().next().is_some_and(|character| {
+        matches!(
+            character,
+            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '%'
+        )
+    })
 }
 
 pub(crate) fn line_position_cmp(left: &Line, right: &Line) -> std::cmp::Ordering {

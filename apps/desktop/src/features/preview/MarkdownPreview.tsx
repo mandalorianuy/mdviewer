@@ -1,10 +1,11 @@
-import type { AnchorHTMLAttributes, ImgHTMLAttributes, KeyboardEvent, MouseEvent, ReactNode } from "react";
+import type { AnchorHTMLAttributes, ImgHTMLAttributes, KeyboardEvent, MouseEvent, ReactNode, Ref } from "react";
 import ReactMarkdown, { type Components, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 interface MarkdownPreviewProps {
   markdown: string;
   onExternalLink(url: string): void;
+  elementRef?: Ref<HTMLElement>;
 }
 
 function strictPreviewUrl(url: string, key: string): string | undefined {
@@ -52,7 +53,7 @@ function PreviewLink({ href, children, onExternalLink, ...props }: AnchorHTMLAtt
     event.preventDefault();
     onExternalLink(href);
   };
-  return <a {...props} role="link" tabIndex={0} onClick={follow} onKeyDown={followWithKeyboard}>{children}</a>;
+  return <a {...props} data-export-href={href} role="link" tabIndex={0} onClick={follow} onKeyDown={followWithKeyboard}>{children}</a>;
 }
 
 function PreviewImage({ src, alt, ...props }: ImgHTMLAttributes<HTMLImageElement>) {
@@ -71,10 +72,10 @@ function components(onExternalLink: (url: string) => void): Components {
   };
 }
 
-export function MarkdownPreview({ markdown, onExternalLink }: MarkdownPreviewProps) {
+export function MarkdownPreview({ markdown, onExternalLink, elementRef }: MarkdownPreviewProps) {
   const transform: UrlTransform = (url, key) => strictPreviewUrl(url, key);
   return (
-    <section className="preview-pane markdown-body" aria-label="Vista previa">
+    <section ref={elementRef} className="preview-pane markdown-body" aria-label="Vista previa">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         skipHtml

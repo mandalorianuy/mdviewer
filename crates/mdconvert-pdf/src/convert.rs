@@ -173,6 +173,13 @@ fn infer_page(
     };
 
     let column_boundary = order_columns(&mut lines, config, warnings);
+    let primary_heading_size = lines
+        .iter()
+        .filter(|line| {
+            body_size > 0.0 && line.font_size / body_size >= config.heading_level_1_size_ratio
+        })
+        .map(|line| line.font_size)
+        .max_by(f32::total_cmp);
     let links = &page.links;
     let mut index = 0;
     while index < lines.len() {
@@ -223,7 +230,7 @@ fn infer_page(
         }
 
         let line = &lines[index];
-        if let Some(level) = heading_level(line, body_size, config) {
+        if let Some(level) = heading_level(line, body_size, primary_heading_size, config) {
             output.push(PositionedBlock {
                 page: page.number,
                 top: line.bounds.top,
@@ -245,7 +252,7 @@ fn infer_page(
         while index < lines.len()
             && same_paragraph(paragraph_lines.last().unwrap(), &lines[index], config)
             && parse_list_marker(&lines[index].text).is_none()
-            && heading_level(&lines[index], body_size, config).is_none()
+            && heading_level(&lines[index], body_size, primary_heading_size, config).is_none()
         {
             paragraph_lines.push(lines[index].clone());
             index += 1;
@@ -341,6 +348,7 @@ fn infer_table(
                         <= config.table_alignment_tolerance_points
                 })
         });
+        let separated = has_stable_non_overlapping_columns(&multi_rows, width);
         let compact = multi_rows.windows(2).all(|pair| {
             let previous = pair[0];
             let next = pair[1];
@@ -353,20 +361,13 @@ fn infer_table(
             next[0].bounds.top - previous[0].bounds.top
                 <= row_font_size * config.table_max_row_gap_ratio
         });
-        if aligned && compact {
+        if (aligned || separated) && compact {
             let first_top = first_row[0].bounds.top;
             let last_top = multi_rows.last().unwrap()[0].bounds.top;
-            let edge_allowance = multi_rows
-                .iter()
-                .flat_map(|row| row.iter())
-                .map(|line| line.font_size)
-                .max_by(f32::total_cmp)
-                .unwrap_or(0.0)
-                * config.table_max_row_gap_ratio;
             let has_incomplete_local_row = rows.iter().any(|row| {
                 row.len() != width
-                    && row[0].bounds.top >= first_top - edge_allowance
-                    && row[0].bounds.top <= last_top + edge_allowance
+                    && row[0].bounds.top >= first_top - config.table_row_y_tolerance_points
+                    && row[0].bounds.top <= last_top + config.table_row_y_tolerance_points
             });
             if has_incomplete_local_row {
                 warnings.push(ConversionWarning {
@@ -377,7 +378,7 @@ fn infer_table(
                 });
                 return None;
             }
-            if has_borderless_table_shape(&multi_rows, config.borderless_table_min_rows) {
+            if has_borderless_table_shape(&multi_rows, config.borderless_table_min_rows, config) {
                 return Some(table_from_rows(page, &multi_rows, config, warnings));
             }
             warnings.push(ConversionWarning {
@@ -403,13 +404,37 @@ fn infer_table(
     None
 }
 
+fn has_stable_non_overlapping_columns(rows: &[&Vec<&Line>], width: usize) -> bool {
+    if width < 2 || rows.iter().any(|row| row.len() != width) {
+        return false;
+    }
+
+    (0..width - 1).all(|column| {
+        let right_edge = rows
+            .iter()
+            .map(|row| row[column].bounds.right)
+            .max_by(f32::total_cmp)
+            .unwrap_or(f32::INFINITY);
+        let next_left_edge = rows
+            .iter()
+            .map(|row| row[column + 1].bounds.left)
+            .min_by(f32::total_cmp)
+            .unwrap_or(f32::NEG_INFINITY);
+        right_edge < next_left_edge
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BorderlessCellShape {
     Numeric,
     Text,
 }
 
-fn has_borderless_table_shape(rows: &[&Vec<&Line>], minimum_rows: usize) -> bool {
+fn has_borderless_table_shape(
+    rows: &[&Vec<&Line>],
+    minimum_rows: usize,
+    config: &HeuristicConfig,
+) -> bool {
     if rows.len() < minimum_rows {
         return false;
     }
@@ -431,8 +456,22 @@ fn has_borderless_table_shape(rows: &[&Vec<&Line>], minimum_rows: usize) -> bool
         }
         column_shapes.push(expected);
     }
-    column_shapes.contains(&BorderlessCellShape::Numeric)
-        && column_shapes.contains(&BorderlessCellShape::Text)
+    let heterogeneous = column_shapes.contains(&BorderlessCellShape::Numeric)
+        && column_shapes.contains(&BorderlessCellShape::Text);
+    heterogeneous || has_tight_table_row_spacing(rows, config)
+}
+
+fn has_tight_table_row_spacing(rows: &[&Vec<&Line>], config: &HeuristicConfig) -> bool {
+    rows.windows(2).all(|pair| {
+        let row_font_size = pair[0]
+            .iter()
+            .chain(pair[1].iter())
+            .map(|line| line.font_size)
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
+        pair[1][0].bounds.top - pair[0][0].bounds.top
+            <= row_font_size * (1.0 + config.paragraph_gap_ratio)
+    })
 }
 
 fn borderless_cell_shape(text: &str) -> BorderlessCellShape {
@@ -825,14 +864,36 @@ fn body_font_size<'a>(lines: impl Iterator<Item = &'a Line>) -> f32 {
         .unwrap_or(10.0)
 }
 
-fn heading_level(line: &Line, body_size: f32, config: &HeuristicConfig) -> Option<u8> {
-    if line.font_weight.unwrap_or_default() < config.heading_bold_weight || body_size <= 0.0 {
+fn heading_level(
+    line: &Line,
+    body_size: f32,
+    primary_heading_size: Option<f32>,
+    config: &HeuristicConfig,
+) -> Option<u8> {
+    if body_size <= 0.0 {
         return None;
     }
     let ratio = line.font_size / body_size;
     if ratio >= config.heading_level_1_size_ratio {
-        Some(1)
-    } else if ratio >= config.heading_level_2_size_ratio {
+        let is_secondary_prominent_size =
+            primary_heading_size.is_some_and(|primary| line.font_size < primary - f32::EPSILON);
+        if is_secondary_prominent_size
+            && (line.font_weight == Some(0)
+                || line.font_weight.unwrap_or_default() >= config.heading_bold_weight)
+        {
+            Some(2)
+        } else {
+            Some(1)
+        }
+    } else if line.font_weight == Some(0) && ratio >= config.heading_level_2_size_ratio {
+        if primary_heading_size.is_none() && ratio >= config.heading_level_2_size_ratio + 0.25 {
+            Some(1)
+        } else {
+            Some(2)
+        }
+    } else if line.font_weight.unwrap_or_default() >= config.heading_bold_weight
+        && ratio >= config.heading_level_2_size_ratio
+    {
         Some(2)
     } else {
         None

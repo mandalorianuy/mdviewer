@@ -82,6 +82,7 @@ export function isBackendErrorCode(reason: unknown, code: string): reason is Bac
 export interface Backend extends MacosIntegrationBackend {
   selectOpenDocument(): Promise<OpenSelection | null>;
   selectSaveDocument(suggestedName: string): Promise<SaveSelection | null>;
+  selectExportDocument(suggestedName: string, format: "html"): Promise<SaveSelection | null>;
   selectConversionSource(): Promise<ConversionSource | null>;
   openDocument(token: string): Promise<OpenDocumentResult>;
   saveDocument(token: string, content: string): Promise<SaveDocumentResult>;
@@ -146,6 +147,13 @@ export const tauriBackend: Backend = {
   async selectSaveDocument(suggestedName) {
     const value = await invoke<WireSaveSelection | null>("select_save_document", {
       suggestedName,
+    });
+    return value ? { name: value.name, writeToken: value.write_token } : null;
+  },
+  async selectExportDocument(suggestedName, format) {
+    const value = await invoke<WireSaveSelection | null>("select_export_document", {
+      suggestedName,
+      format,
     });
     return value ? { name: value.name, writeToken: value.write_token } : null;
   },

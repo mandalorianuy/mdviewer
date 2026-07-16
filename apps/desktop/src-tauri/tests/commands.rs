@@ -3,9 +3,10 @@ use std::{fs, path::PathBuf};
 use mdviewer_desktop_lib::{
     PendingOpenedPrintFiles,
     commands::{
-        authorize_open_selection, authorize_save_selection, cancel_conversion, claim_print_job,
-        convert_document, finish_print_job, integration_status, invoke_handler, open_document,
-        sanitized_markdown_name, save_document, validate_external_url, warning_codes,
+        authorize_export_selection, authorize_open_selection, authorize_save_selection,
+        cancel_conversion, claim_print_job, convert_document, finish_print_job, integration_status,
+        invoke_handler, open_document, sanitized_export_name, sanitized_markdown_name,
+        save_document, validate_external_url, warning_codes,
     },
     deep_link::parse_print_deep_link,
     flush_pending_opened_print_files, forward_opened_print_files, forward_print_deep_link,
@@ -44,6 +45,34 @@ fn native_save_name_is_bounded_on_unicode_grapheme_boundaries() {
     assert!(!name.to_lowercase().ends_with(".md.md"));
     assert!(name.graphemes(true).count() <= 120);
     assert!(name.is_char_boundary(name.len()));
+}
+
+#[test]
+fn html_export_selector_allowlists_format_sanitizes_extension_and_scopes_opaque_write_token() {
+    let name = sanitized_export_name("  Informe <privado>.MD.html  ", "html").unwrap();
+    assert_eq!(name, "Informe privado.html");
+    assert_eq!(
+        sanitized_export_name("report.md", "pdf").unwrap_err().code,
+        "invalid_export_format"
+    );
+
+    let temp = temp_dir("html-export-selection");
+    let state = state(&temp);
+    let html = temp.join("scope").join("report.html");
+    let wrong_extension = temp.join("scope").join("report.md");
+    assert_eq!(
+        authorize_export_selection(&state, &wrong_extension, "html")
+            .unwrap_err()
+            .code,
+        "invalid_selection"
+    );
+
+    let selection = authorize_export_selection(&state, &html, "html").unwrap();
+    assert_eq!(selection.name, "report.html");
+    assert!(!selection.write_token.contains(std::path::MAIN_SEPARATOR));
+    save_document(&state, &selection.write_token, "<!doctype html>").unwrap();
+    assert_eq!(fs::read_to_string(html).unwrap(), "<!doctype html>");
+    fs::remove_dir_all(temp).unwrap();
 }
 
 #[test]
@@ -826,7 +855,7 @@ fn tauri_configuration_has_one_scheme_strict_csp_and_no_shell_or_fs_permissions(
     );
     let csp = config["app"]["security"]["csp"].as_str().unwrap();
     assert!(csp.contains("default-src 'self'"));
-    assert!(csp.contains("connect-src ipc: http://ipc.localhost"));
+    assert!(csp.contains("connect-src ipc: http://ipc.localhost asset: http://asset.localhost"));
     assert!(csp.contains("object-src 'none'"));
 
     let capability = fs::read_to_string(manifest.join("capabilities/default.json")).unwrap();

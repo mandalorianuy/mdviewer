@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "rowId": "mail",
+  "result": "pass",
+  "application": "Mail",
+  "bundleId": "com.apple.mail",
+  "applicationVersion": "16.0",
+  "generatedAt": "2026-07-16T22:03:35Z",
+  "environment": {"platform": "macOS", "osVersion": "26.6 (25G5028f)", "architecture": "arm64"},
+  "fixtureSha256": {"tests/parity/fixtures/mail-acceptance.eml": "04617baf4a3cee3163f1a62e8a2750b0360b6f5b19927a2808e726be9f2317f8"},
+  "output": {"markdownSha256": "47248dfb657e71a016712bef85059d51006dca371fd6f5a91ce04f0b3c97e2d4", "bytes": 648},
+  "warnings": ["missing_image_alt"],
+  "checks": {
+    "reading_order": "pass",
+    "headings": "pass",
+    "lists": "pass",
+    "tables": "pass",
+    "links": "pass",
+    "images": "pass",
+    "warnings": "pass",
+    "success_output": "pass",
+    "opened_in_mdviewer": "pass",
+    "cancellation_no_output": "pass",
+    "cleanup_empty_store": "pass"
+  }
+}

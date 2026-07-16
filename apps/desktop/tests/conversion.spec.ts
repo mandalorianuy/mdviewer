@@ -6,6 +6,7 @@ test("converts through the typed boundary and opens the result with warnings", a
     window.__MDVIEWER_TEST_BACKEND__ = {
       selectOpenDocument: async () => null,
       selectSaveDocument: async () => ({ name: "converted.md", writeToken: "output" }),
+      selectExportDocument: async (name: string) => ({ name, writeToken: "export" }),
       selectConversionSource: async () => ({ name: "source.pdf", readToken: "source" }),
       openDocument: async () => ({ content: "# Converted in browser" }),
       saveDocument: async () => ({ saved: true, writeToken: "renewed-write" }),

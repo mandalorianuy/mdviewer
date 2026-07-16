@@ -25,6 +25,7 @@ function backend() {
   const api = {
     selectOpenDocument: vi.fn().mockResolvedValue(null),
     selectSaveDocument: vi.fn().mockResolvedValue({ name: "report.md", writeToken: "output-token" }),
+    selectExportDocument: vi.fn().mockResolvedValue({ name: "report.html", writeToken: "html-token" }),
     selectConversionSource: vi.fn().mockResolvedValue({ name: "report.pdf", readToken: "source-token" }),
     openDocument: vi.fn().mockResolvedValue({ content: "# Converted" }),
     saveDocument: vi.fn().mockResolvedValue({ saved: true, writeToken: "write-token" }),

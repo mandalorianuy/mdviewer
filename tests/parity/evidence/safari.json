@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "rowId": "safari",
+  "result": "pass",
+  "application": "Safari",
+  "bundleId": "com.apple.Safari",
+  "applicationVersion": "26.5",
+  "generatedAt": "2026-07-16T22:03:35Z",
+  "environment": {"platform": "macOS", "osVersion": "26.6 (25G5028f)", "architecture": "arm64"},
+  "fixtureSha256": {"tests/parity/fixtures/web-acceptance.html": "1eaff09957dce0e7a294c9c6511a2b0534381c2978f2c36c7eea451bde6335d8"},
+  "output": {"markdownSha256": "47e32f4ce95655fccb8f000b89d184792ca5d267a4507c914672767af0c1ee58", "bytes": 401},
+  "warnings": ["missing_image_alt"],
+  "checks": {
+    "reading_order": "pass",
+    "headings": "pass",
+    "lists": "pass",
+    "tables": "pass",
+    "links": "pass",
+    "images": "pass",
+    "warnings": "pass",
+    "success_output": "pass",
+    "opened_in_mdviewer": "pass",
+    "cancellation_no_output": "pass",
+    "cleanup_empty_store": "pass"
+  }
+}

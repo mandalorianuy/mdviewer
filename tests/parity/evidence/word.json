@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "rowId": "word",
+  "result": "pass",
+  "application": "Microsoft Word",
+  "bundleId": "com.microsoft.Word",
+  "applicationVersion": "16.112",
+  "generatedAt": "2026-07-16T22:03:35Z",
+  "environment": {"platform": "macOS", "osVersion": "26.6 (25G5028f)", "architecture": "arm64"},
+  "fixtureSha256": {"tests/parity/fixtures/word-acceptance.docx": "86434e0f024b48cfd507ca5826cf49f951c50eefb555120f9ec8c7c319bfdfe0"},
+  "output": {"markdownSha256": "ee4031016d0733b2883c487093957191ef18ab9a344d614f25664b70da2e3d9a", "bytes": 218},
+  "warnings": [],
+  "checks": {
+    "reading_order": "pass",
+    "headings": "pass",
+    "lists": "pass",
+    "tables": "pass",
+    "links": "pass",
+    "images": {"result": "not_applicable", "reason": "The native Word acceptance fixture contains headings, paragraphs, an ordered list, a table and a visible URL, but no embedded image."},
+    "warnings": "pass",
+    "success_output": "pass",
+    "opened_in_mdviewer": "pass",
+    "cancellation_no_output": "pass",
+    "cleanup_empty_store": "pass"
+  }
+}

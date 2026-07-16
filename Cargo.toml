@@ -17,3 +17,7 @@ license = "MIT"
 
 [workspace.dependencies]
 tauri = "=2.11.5"
+
+[workspace.metadata.mdviewer]
+parity-manifest = "tests/parity/manifest.json"
+parity-command = "scripts/verify-parity.sh"

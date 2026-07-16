@@ -862,24 +862,35 @@ git commit -m "build: add portable CI and Apple Silicon release pipeline"
 - Remove after gate: `legacy/macos-swift/`
 - Modify: `Cargo.toml`, `README.md`, `scripts/verify-workspace.sh`
 
-- [ ] **Step 1: Create a machine-readable parity manifest**
+- [x] **Step 1: Create a machine-readable parity manifest**
 
 List every approved v1 behavior and the automated test, manual evidence or explicit exclusion proving it. Include viewer/editor/save/preview/preferences/export, local converters, print integration, cancellation, warnings and cleanup. Record YouTube and OCR as exclusions.
 
-- [ ] **Step 2: Run evidence while Swift still exists**
+- [x] **Step 2: Run evidence while Swift still exists**
 
 ```bash
 ./scripts/verify-legacy-swift.sh
 ./scripts/verify-workspace.sh
-./scripts/verify-parity.sh
+./scripts/verify-parity.sh --automated
 git status --short
 ```
 
-Expected: all exit 0; no unreviewed golden diff; only intentionally untracked user files remain.
+Expected: all exit 0; every automated or excluded row is proven; manual rows may remain explicitly
+`pending` and cannot pass the default retirement gate; no unreviewed golden diff; only intentionally
+untracked user files remain.
 
-- [ ] **Step 3: Perform the macOS acceptance matrix**
+- [x] **Step 3: Perform the macOS acceptance matrix**
 
 On macOS 13+ Apple Silicon test Safari, Mail, TextEdit, Preview and available Office apps. Record reading order, headings, lists, tables, links, images, warnings, cancellation and cleanup. Turn every reproducible defect into a fixture before fixing it.
+
+After attaching the acceptance evidence, run the strict gate:
+
+```bash
+./scripts/verify-parity.sh
+```
+
+Expected: all approved v1 rows are proven or explicitly excluded. A pending or failed manual row
+must stop tagging and retirement.
 
 - [ ] **Step 4: Tag the last Swift baseline**
 

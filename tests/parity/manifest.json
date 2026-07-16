@@ -1,0 +1,346 @@
+{
+  "schemaVersion": 1,
+  "scope": "v1",
+  "product": "MDViewer",
+  "retirementGate": "strict",
+  "automatedSuites": [
+    {"id": "core", "command": ["cargo", "test", "-p", "mdconvert-core"]},
+    {
+      "id": "cli",
+      "command": [
+        "bash",
+        "-lc",
+        "./scripts/fetch-pdfium.sh >/dev/null && PDFIUM_DYNAMIC_LIB_PATH=\"$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib\" cargo test -p mdconvert-cli"
+      ]
+    },
+    {"id": "formats", "command": ["cargo", "test", "-p", "mdconvert-formats"]},
+    {"id": "html", "command": ["cargo", "test", "-p", "mdconvert-html"]},
+    {
+      "id": "pdf",
+      "command": [
+        "bash",
+        "-lc",
+        "./scripts/fetch-pdfium.sh >/dev/null && PDFIUM_DYNAMIC_LIB_PATH=\"$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib\" cargo test -p mdconvert-pdf"
+      ]
+    },
+    {
+      "id": "desktop-rust",
+      "command": [
+        "bash",
+        "-lc",
+        "./scripts/fetch-pdfium.sh >/dev/null && PDFIUM_DYNAMIC_LIB_PATH=\"$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib\" cargo test -p mdviewer-desktop"
+      ]
+    },
+    {"id": "desktop-ui", "command": ["npm", "test", "--workspace", "@mdviewer/desktop", "--", "--run"]}
+  ],
+  "behaviors": [
+    {
+      "id": "desktop.viewer_open",
+      "area": "desktop",
+      "requirement": "Open a local Markdown document in the viewer",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "opens Markdown, edits it, reports dirty state and saves repeatedly"}
+    },
+    {
+      "id": "desktop.editor_dirty",
+      "area": "desktop",
+      "requirement": "Edit Markdown and preserve accurate dirty state across asynchronous saves",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "keeps edits made while Save is pending dirty"}
+    },
+    {
+      "id": "desktop.save",
+      "area": "desktop",
+      "requirement": "Save repeatedly through an opaque filesystem capability",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "saves repeatedly with opaque capabilities"}
+    },
+    {
+      "id": "desktop.save_as",
+      "area": "desktop",
+      "requirement": "Save As retains the selected Markdown name and concurrent edits",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "keeps edits made while Save As is pending dirty"}
+    },
+    {
+      "id": "desktop.close_confirmation",
+      "area": "desktop",
+      "requirement": "Reject or confirm closing a dirty document",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "intercepts rejected dirty close and allows the confirmed close branch"}
+    },
+    {
+      "id": "desktop.find",
+      "area": "desktop",
+      "requirement": "Find and navigate editor matches without corrupting Unicode offsets",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "navigates find matches and selects the current occurrence"}
+    },
+    {
+      "id": "desktop.preview_gfm",
+      "area": "desktop",
+      "requirement": "Render sanitized GFM preview with safe links and local images",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "renders a real GFM AST while disabling raw HTML and unsafe navigation"}
+    },
+    {
+      "id": "desktop.preferences_theme",
+      "area": "desktop",
+      "requirement": "Persist system, light and dark appearance preference",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "persists light, dark and system theme preference locally"}
+    },
+    {
+      "id": "desktop.export_html",
+      "area": "desktop",
+      "requirement": "Export the current Markdown document as HTML",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "exports standalone sanitized HTML through an opaque format-scoped capability"}
+    },
+    {
+      "id": "desktop.export_pdf",
+      "area": "desktop",
+      "requirement": "Export the current Markdown document as PDF",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/editor.spec.tsx", "selector": "exports PDF through the universal native print dialog and ships a preview-only print stylesheet"}
+    },
+    {
+      "id": "conversion.direct",
+      "area": "conversion",
+      "requirement": "Convert a selected local source through the typed desktop boundary",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-rust", "path": "apps/desktop/src-tauri/tests/commands.rs", "selector": "convert_uses_the_cli_transaction_and_exposes_only_stable_warning_codes"}
+    },
+    {
+      "id": "conversion.progress_cancel",
+      "area": "conversion",
+      "requirement": "Expose progress state and typed cancellation",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/conversion.spec.tsx", "selector": "shows cancelling state and distinguishes typed cancellation from failure"}
+    },
+    {
+      "id": "conversion.warnings",
+      "area": "conversion",
+      "requirement": "Surface stable conversion warnings in the current window",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/conversion.spec.tsx", "selector": "opens warnings in the same window"}
+    },
+    {
+      "id": "conversion.open_result",
+      "area": "conversion",
+      "requirement": "Open the successfully converted Markdown through a new read capability",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-rust", "path": "apps/desktop/src-tauri/tests/commands.rs", "selector": "converted_result_can_be_reopened_only_through_its_new_read_capability"}
+    },
+    {
+      "id": "converter.pdf",
+      "area": "converter",
+      "requirement": "Convert digital PDF reading order, headings, lists, tables, links and images",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "pdf", "path": "crates/mdconvert-pdf/tests/pdf_conversion.rs", "selector": "fixture_models_cover_columns_headings_lists_tables_chrome_images_and_links"}
+    },
+    {
+      "id": "converter.html",
+      "area": "converter",
+      "requirement": "Convert semantic and malformed local HTML with bounded assets",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "html", "path": "crates/mdconvert-html/tests/html_conversion.rs", "selector": "semantic_fixture_maps_dom_structure_and_uses_shared_golden"}
+    },
+    {
+      "id": "converter.csv",
+      "area": "converter",
+      "requirement": "Convert CSV tables without losing quotes, newlines or empty cells",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/structured_formats.rs", "selector": "csv_preserves_quotes_newlines_empty_cells_and_warns_on_ragged_rows"}
+    },
+    {
+      "id": "converter.json",
+      "area": "converter",
+      "requirement": "Convert ordered JSON types, arrays and nested objects",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/structured_formats.rs", "selector": "json_preserves_source_order_types_arrays_and_nested_objects"}
+    },
+    {
+      "id": "converter.xml",
+      "area": "converter",
+      "requirement": "Convert bounded XML namespaces, attributes and mixed content",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/structured_formats.rs", "selector": "xml_preserves_namespaces_attributes_repetition_mixed_content_and_entities"}
+    },
+    {
+      "id": "converter.zip",
+      "area": "converter",
+      "requirement": "Convert bounded local ZIP content without unsafe extraction",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/container_formats.rs", "selector": "zip_converts_the_first_supported_entry_in_normalized_order_without_extraction"}
+    },
+    {
+      "id": "converter.epub",
+      "area": "converter",
+      "requirement": "Convert EPUB spine, navigation and local images",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/container_formats.rs", "selector": "epub_validates_container_and_uses_spine_nav_and_local_images"}
+    },
+    {
+      "id": "converter.docx",
+      "area": "converter",
+      "requirement": "Convert DOCX headings, lists, tables, images and safe links",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/container_formats.rs", "selector": "docx_preserves_headings_lists_tables_images_and_safe_links"}
+    },
+    {
+      "id": "converter.pptx",
+      "area": "converter",
+      "requirement": "Convert PPTX slide order, notes, tables, links and images",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/container_formats.rs", "selector": "pptx_preserves_slide_tables_and_local_images"}
+    },
+    {
+      "id": "converter.xlsx",
+      "area": "converter",
+      "requirement": "Convert XLSX workbook order, formulas and displayed values",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/container_formats.rs", "selector": "xlsx_preserves_workbook_order_formulas_and_cached_display_values"}
+    },
+    {
+      "id": "converter.image_metadata",
+      "area": "converter",
+      "requirement": "Preserve bounded PNG and JPEG metadata without invoking OCR",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/image_without_ocr.rs", "selector": "png_dimensions_and_semantic_metadata_are_preserved_without_ocr"}
+    },
+    {
+      "id": "print.install_repair_uninstall",
+      "area": "print",
+      "requirement": "Install, detect, repair and uninstall only the owned macOS PDF Service alias",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-rust", "path": "apps/desktop/src-tauri/tests/macos_integration.rs", "selector": "uninstall_accepts_current_or_outdated_owned_alias_and_preserves_siblings"}
+    },
+    {
+      "id": "print.closed_start",
+      "area": "print",
+      "requirement": "Buffer a native PDF Open Event received before desktop state and frontend readiness",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-rust", "path": "apps/desktop/src-tauri/tests/commands.rs", "selector": "cold_start_opened_pdf_is_buffered_until_app_state_is_managed"}
+    },
+    {
+      "id": "print.warm_start",
+      "area": "print",
+      "requirement": "Stage and dispatch native PDF Open Events to the running window using opaque job IDs",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-rust", "path": "apps/desktop/src-tauri/tests/commands.rs", "selector": "native_opened_pdf_events_stage_before_emitting_only_opaque_job_ids"}
+    },
+    {
+      "id": "print.native_save_as",
+      "area": "print",
+      "requirement": "Activate MDViewer and present native Save As with a sanitized Markdown title",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/conversion.spec.tsx", "selector": "claims a print job, activates the current window and sanitizes the Save As title"}
+    },
+    {
+      "id": "print.cancellation_cleanup",
+      "area": "print",
+      "requirement": "Cancel Save As or conversion without leaving output or a staged print job",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/conversion.spec.tsx", "selector": "finishes claimed jobs when Save As is cancelled or conversion fails"}
+    },
+    {
+      "id": "print.warning_cleanup",
+      "area": "print",
+      "requirement": "Keep warnings visible and cleanup failures actionable per print job",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "desktop-ui", "path": "apps/desktop/tests/conversion.spec.tsx", "selector": "keeps cleanup failures actionable per job when another job finishes"}
+    },
+    {
+      "id": "output.gfm_assets",
+      "area": "output",
+      "requirement": "Publish GFM, relative assets and a deterministic ownership manifest",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "core", "path": "crates/mdconvert-core/tests/output_transaction.rs", "selector": "publishes_markdown_assets_and_sorted_manifest_without_mutating_document"}
+    },
+    {
+      "id": "output.transaction_cleanup",
+      "area": "output",
+      "requirement": "Cancellation and errors remove staging and preserve existing output",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "core", "path": "crates/mdconvert-core/tests/output_transaction.rs", "selector": "cancellation_before_commit_cleans_staging_and_leaves_no_output"}
+    },
+    {
+      "id": "exclusion.ocr",
+      "area": "exclusion",
+      "requirement": "OCR and reliable scanned-PDF conversion are excluded from v1",
+      "disposition": "excluded",
+      "status": "excluded",
+      "target": "v1.1",
+      "evidence": {"kind": "approved_exclusion", "path": "docs/superpowers/specs/2026-07-15-cross-platform-save-as-markdown-design.md", "selector": "OCR y conversión fiable de PDFs escaneados"}
+    },
+    {
+      "id": "exclusion.youtube",
+      "area": "exclusion",
+      "requirement": "YouTube and every network-backed conversion source are excluded from v1",
+      "disposition": "excluded",
+      "status": "excluded",
+      "target": "post-v1 network import design",
+      "evidence": {"kind": "approved_exclusion", "path": "docs/superpowers/specs/2026-07-15-cross-platform-save-as-markdown-design.md", "selector": "Importación de YouTube u otras fuentes que requieran acceso de red"}
+    }
+  ],
+  "manualAcceptance": {
+    "platform": "macOS 13+",
+    "architecture": "arm64",
+    "requiredChecks": [
+      "reading_order",
+      "headings",
+      "lists",
+      "tables",
+      "links",
+      "images",
+      "warnings",
+      "success_output",
+      "opened_in_mdviewer",
+      "cancellation_no_output",
+      "cleanup_empty_store"
+    ],
+    "rows": [
+      {"id": "safari", "application": "Safari", "bundleId": "com.apple.Safari", "availability": "available", "fixtures": ["tests/parity/fixtures/web-acceptance.html"], "status": "pass", "evidence": "tests/parity/evidence/safari.json"},
+      {"id": "mail", "application": "Mail", "bundleId": "com.apple.mail", "availability": "available", "fixtures": ["tests/parity/fixtures/mail-acceptance.eml"], "status": "pass", "evidence": "tests/parity/evidence/mail.json"},
+      {"id": "textedit", "application": "TextEdit", "bundleId": "com.apple.TextEdit", "availability": "available", "fixtures": ["tests/parity/fixtures/textedit-acceptance.rtf"], "status": "pass", "evidence": "tests/parity/evidence/textedit.json"},
+      {"id": "preview", "application": "Preview", "bundleId": "com.apple.Preview", "availability": "available", "fixtures": ["tests/parity/fixtures/preview-acceptance.pdf"], "status": "pass", "evidence": "tests/parity/evidence/preview.json"},
+      {"id": "word", "application": "Microsoft Word", "bundleId": "com.microsoft.Word", "availability": "available", "fixtures": ["tests/parity/fixtures/word-acceptance.docx"], "status": "pass", "evidence": "tests/parity/evidence/word.json"},
+      {"id": "excel", "application": "Microsoft Excel", "bundleId": "com.microsoft.Excel", "availability": "available", "fixtures": ["tests/parity/fixtures/excel-acceptance.xlsx"], "status": "pass", "evidence": "tests/parity/evidence/excel.json"},
+      {"id": "powerpoint", "application": "Microsoft PowerPoint", "bundleId": "com.microsoft.Powerpoint", "availability": "available", "fixtures": ["tests/parity/fixtures/powerpoint-acceptance.pptx"], "status": "pass", "evidence": "tests/parity/evidence/powerpoint.json"}
+    ]
+  }
+}

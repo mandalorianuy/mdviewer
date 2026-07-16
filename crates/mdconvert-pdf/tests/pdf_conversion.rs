@@ -231,6 +231,71 @@ fn infers_heading_levels_from_named_size_and_weight_thresholds() {
 }
 
 #[test]
+fn infers_a_highly_prominent_regular_weight_title_from_printed_app_output() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Printed application title", 20.0, 20.0, 20.0, 400),
+            ("Body", 20.0, 100.0, 10.0, 400),
+            ("More body", 20.0, 120.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(matches!(output.blocks[0], Block::Heading { level: 1, .. }));
+    assert!(matches!(output.blocks[1], Block::Paragraph { .. }));
+}
+
+#[test]
+fn infers_a_word_heading_one_when_pdfium_reports_zero_font_weight() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Word heading", 20.0, 20.0, 19.92, 0),
+            ("Body", 20.0, 80.0, 12.0, 400),
+            ("More body", 20.0, 100.0, 12.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(matches!(output.blocks[0], Block::Heading { level: 1, .. }));
+}
+
+#[test]
+fn preserves_two_prominent_heading_levels_when_mail_reports_zero_font_weight() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Mail title", 20.0, 20.0, 25.6, 0),
+            ("Mail section", 20.0, 70.0, 19.2, 0),
+            ("Body", 20.0, 120.0, 7.68, 400),
+            ("More body", 20.0, 140.0, 7.68, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(matches!(output.blocks[0], Block::Heading { level: 1, .. }));
+    assert!(matches!(output.blocks[1], Block::Heading { level: 2, .. }));
+}
+
+#[test]
+fn preserves_preview_secondary_heading_when_a_larger_primary_heading_exists() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Preview title", 20.0, 20.0, 24.572, 0),
+            ("Preview section", 20.0, 70.0, 18.429, 0),
+            ("Body", 20.0, 120.0, 12.286, 0),
+            ("More body", 20.0, 140.0, 12.286, 0),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(matches!(output.blocks[0], Block::Heading { level: 1, .. }));
+    assert!(matches!(output.blocks[1], Block::Heading { level: 2, .. }));
+}
+
+#[test]
 fn heading_ratio_boundary_is_configurable() {
     let config = HeuristicConfig {
         heading_level_2_size_ratio: 1.6,
@@ -271,6 +336,78 @@ fn infers_contiguous_unordered_and_ordered_lists() {
     assert!(matches!(
         output.blocks[1],
         Block::List { ordered: true, start: Some(3), ref items } if items.len() == 2
+    ));
+}
+
+#[test]
+fn rejoins_a_detached_printed_bullet_with_its_tabbed_list_item() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("•", 20.0, 30.0, 10.0, 400),
+            ("Alpha", 50.0, 30.0, 10.0, 400),
+            ("•", 20.0, 45.0, 10.0, 400),
+            ("Beta", 50.0, 45.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(matches!(
+        output.blocks.as_slice(),
+        [Block::List { ordered: false, items, .. }]
+            if items.len() == 2
+                && block_text(&items[0].blocks[0]) == "Alpha"
+                && block_text(&items[1].blocks[0]) == "Beta"
+    ));
+}
+
+#[test]
+fn populated_words_do_not_gain_a_space_before_list_marker_punctuation() {
+    let mut source = page(
+        1,
+        &[
+            ("1.", 20.0, 30.0, 10.0, 400),
+            ("Alpha", 50.0, 30.0, 10.0, 400),
+            ("2.", 20.0, 45.0, 10.0, 400),
+            ("Beta", 50.0, 45.0, 10.0, 400),
+        ],
+    );
+    source.glyphs[1].bounds = rect(30.0, 30.0, 35.0, 40.0);
+    source.glyphs[8].bounds = rect(30.0, 45.0, 35.0, 55.0);
+    source.words = vec![
+        RawWord {
+            text: "1.".into(),
+            bounds: rect(20.0, 30.0, 35.0, 40.0),
+            glyph_start: 0,
+            glyph_end: 2,
+        },
+        RawWord {
+            text: "Alpha".into(),
+            bounds: rect(50.0, 30.0, 75.0, 40.0),
+            glyph_start: 2,
+            glyph_end: 7,
+        },
+        RawWord {
+            text: "2.".into(),
+            bounds: rect(20.0, 45.0, 35.0, 55.0),
+            glyph_start: 7,
+            glyph_end: 9,
+        },
+        RawWord {
+            text: "Beta".into(),
+            bounds: rect(50.0, 45.0, 70.0, 55.0),
+            glyph_start: 9,
+            glyph_end: 13,
+        },
+    ];
+
+    let output = reconstruct(document(vec![source])).unwrap();
+    assert!(matches!(
+        output.blocks.as_slice(),
+        [Block::List { ordered: true, start: Some(1), items }]
+            if items.len() == 2
+                && block_text(&items[0].blocks[0]) == "Alpha"
+                && block_text(&items[1].blocks[0]) == "Beta"
     ));
 }
 
@@ -421,6 +558,89 @@ fn infers_borderless_table_from_repeated_heterogeneous_column_types() {
             .warnings
             .iter()
             .all(|warning| warning.code != WarningCode::TableDegraded)
+    );
+}
+
+#[test]
+fn infers_spreadsheet_table_when_text_headers_and_numeric_cells_use_different_alignment() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Item", 20.0, 20.0, 10.0, 400),
+            ("Value", 130.0, 20.0, 10.0, 400),
+            ("Formula", 200.0, 20.0, 10.0, 400),
+            ("Alpha", 20.0, 40.0, 10.0, 400),
+            ("2", 170.0, 40.0, 10.0, 400),
+            ("3", 240.0, 40.0, 10.0, 400),
+            ("Beta", 20.0, 60.0, 10.0, 400),
+            ("4", 170.0, 60.0, 10.0, 400),
+            ("5", 240.0, 60.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(matches!(
+        output.blocks.as_slice(),
+        [Block::Table { rows, .. }]
+            if rows.len() == 3
+                && rows[0].len() == 3
+                && inline_text(&rows[1][0]) == "Alpha"
+                && inline_text(&rows[1][1]) == "2"
+                && inline_text(&rows[1][2]) == "3"
+    ));
+    assert!(
+        output
+            .warnings
+            .iter()
+            .all(|warning| warning.code != WarningCode::TableDegraded)
+    );
+}
+
+#[test]
+fn infers_a_tightly_spaced_all_text_table_from_printed_rich_text() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Column", 20.0, 20.0, 10.0, 400),
+            ("Value", 180.0, 20.0, 10.0, 400),
+            ("Local", 20.0, 33.0, 10.0, 400),
+            ("Only", 180.0, 33.0, 10.0, 400),
+            ("Assets", 20.0, 46.0, 10.0, 400),
+            ("Embedded", 180.0, 46.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(matches!(
+        output.blocks.as_slice(),
+        [Block::Table { rows, .. }]
+            if rows.len() == 3
+                && rows[0].len() == 2
+                && inline_text(&rows[2][0]) == "Assets"
+                && inline_text(&rows[2][1]) == "Embedded"
+    ));
+}
+
+#[test]
+fn three_rows_of_normally_spaced_all_text_columns_remain_prose() {
+    let output = reconstruct(document(vec![page(
+        1,
+        &[
+            ("Left first", 20.0, 20.0, 10.0, 400),
+            ("Right first", 180.0, 20.0, 10.0, 400),
+            ("Left second", 20.0, 40.0, 10.0, 400),
+            ("Right second", 180.0, 40.0, 10.0, 400),
+            ("Left third", 20.0, 60.0, 10.0, 400),
+            ("Right third", 180.0, 60.0, 10.0, 400),
+        ],
+    )]))
+    .unwrap();
+
+    assert!(
+        !output
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. }))
     );
 }
 
@@ -1005,6 +1225,8 @@ fn incomplete_borderless_table_row_preserves_all_text_and_degrades() {
             ("Alpha", 20.0, 40.0, 10.0, 400),
             ("10", 130.0, 40.0, 10.0, 400),
             ("Incomplete", 20.0, 60.0, 10.0, 400),
+            ("Beta", 20.0, 80.0, 10.0, 400),
+            ("20", 130.0, 80.0, 10.0, 400),
         ],
     )]))
     .unwrap();

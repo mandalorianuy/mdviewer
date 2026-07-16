@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+"$ROOT/tests/parity/verify-parity.test.sh"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then

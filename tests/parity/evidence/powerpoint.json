@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "rowId": "powerpoint",
+  "result": "pass",
+  "application": "Microsoft PowerPoint",
+  "bundleId": "com.microsoft.Powerpoint",
+  "applicationVersion": "16.112",
+  "generatedAt": "2026-07-16T22:03:35Z",
+  "environment": {"platform": "macOS", "osVersion": "26.6 (25G5028f)", "architecture": "arm64"},
+  "fixtureSha256": {"tests/parity/fixtures/powerpoint-acceptance.pptx": "e900f22746b7e6eb7c294dace794b5e7ba9e060fa5f2f5a7392e4ce89414fbf0"},
+  "output": {"markdownSha256": "c68841a854cd675c12428a5ff7bff0c5646b5ee185d2db45ad0e5827fd7d54b0", "bytes": 40},
+  "warnings": ["ambiguous_reading_order"],
+  "checks": {
+    "reading_order": "pass",
+    "headings": "pass",
+    "lists": {"result": "not_applicable", "reason": "The native PowerPoint acceptance fixture contains no list."},
+    "tables": {"result": "not_applicable", "reason": "The native PowerPoint acceptance fixture contains no table."},
+    "links": {"result": "not_applicable", "reason": "The native PowerPoint acceptance fixture contains no hyperlink."},
+    "images": {"result": "not_applicable", "reason": "The native PowerPoint acceptance fixture contains no embedded image."},
+    "warnings": "pass",
+    "success_output": "pass",
+    "opened_in_mdviewer": "pass",
+    "cancellation_no_output": "pass",
+    "cleanup_empty_store": "pass"
+  }
+}

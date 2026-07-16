@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>MDViewer Preview acceptance fixture</title>
+    <style>
+      h1 { font-size: 32px; font-weight: 700; }
+      h2 { font-size: 24px; font-weight: 700; }
+      table { border-collapse: collapse; }
+      th, td { border: 1px solid #111; padding: 4px 10px; }
+      ul { list-style: none; padding-left: 24px; }
+      li::before { content: "• "; }
+    </style>
+  </head>
+  <body>
+    <h1>Preview acceptance</h1>
+    <p>First Preview paragraph.</p>
+    <h2>Preview list</h2>
+    <ul><li>Alpha</li><li>Beta</li></ul>
+    <table>
+      <tr><th>Column</th><th>Value</th></tr>
+      <tr><td>Local</td><td>Only</td></tr>
+      <tr><td>Assets</td><td>Embedded</td></tr>
+    </table>
+    <p><a href="https://example.test/preview-parity">https://example.test/preview-parity</a></p>
+    <img
+      alt="MDViewer app fixture"
+      width="32"
+      height="32"
+      src="../../../apps/desktop/src-tauri/icons/icon.png">
+    <p>Final Preview paragraph.</p>
+  </body>
+</html>
