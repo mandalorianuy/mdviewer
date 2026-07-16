@@ -8,11 +8,12 @@ test("converts through the typed boundary and opens the result with warnings", a
       selectSaveDocument: async () => ({ name: "converted.md", writeToken: "output" }),
       selectConversionSource: async () => ({ name: "source.pdf", readToken: "source" }),
       openDocument: async () => ({ content: "# Converted in browser" }),
-      saveDocument: async () => ({ saved: true }),
+      saveDocument: async () => ({ saved: true, writeToken: "renewed-write" }),
       convertDocument: async (request) => ({
         operationId: request.operationId,
         markdownToken: "markdown",
         warningCodes: ["table_degraded"],
+        writeToken: "converted-write",
       }),
       cancelConversion: async () => undefined,
       claimPrintJob: async () => { throw new Error("unused"); },

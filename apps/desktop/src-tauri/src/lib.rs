@@ -34,7 +34,7 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
         .invoke_handler(commands::invoke_handler())
 }
 
-fn forward_print_deep_link<R: tauri::Runtime>(app: &tauri::AppHandle<R>, value: &str) {
+pub fn forward_print_deep_link<R: tauri::Runtime>(app: &tauri::AppHandle<R>, value: &str) {
     let Ok(id) = deep_link::parse_print_deep_link(value) else {
         return;
     };

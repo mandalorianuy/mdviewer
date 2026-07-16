@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
       selectSaveDocument: async (name: string) => ({ name, writeToken: "save" }),
       selectConversionSource: async () => null,
       openDocument: async () => ({ content: "# Browser E2E\n\n[unsafe](javascript:alert(1))" }),
-      saveDocument: async () => ({ saved: true }),
+      saveDocument: async () => ({ saved: true, writeToken: "renewed-write" }),
       convertDocument: async () => { throw new Error("unused"); },
       cancelConversion: async () => undefined,
       claimPrintJob: async () => { throw new Error("unused"); },
@@ -41,7 +41,8 @@ test("opens, edits, saves and sanitizes preview in the running app", async ({ pa
 test("opens find from the platform keyboard shortcut", async ({ page }) => {
   const editor = page.getByRole("textbox", { name: "Editor Markdown" });
   await editor.fill("alpha beta alpha");
-  await page.keyboard.press(process.platform === "darwin" ? "Meta+f" : "Control+f");
+  const modifier = await page.evaluate(() => navigator.platform.startsWith("Mac") ? "Meta" : "Control");
+  await page.keyboard.press(`${modifier}+f`);
   const search = page.getByRole("searchbox", { name: "Buscar en el documento" });
   await expect(search).toBeFocused();
   await search.fill("alpha");

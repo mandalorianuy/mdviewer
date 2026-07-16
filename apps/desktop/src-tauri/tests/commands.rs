@@ -4,12 +4,14 @@ use mdviewer_desktop_lib::{
     commands::{
         authorize_open_selection, authorize_save_selection, cancel_conversion, claim_print_job,
         convert_document, finish_print_job, integration_status, invoke_handler, open_document,
-        save_document, validate_external_url, warning_codes,
+        sanitized_markdown_name, save_document, validate_external_url, warning_codes,
     },
     deep_link::parse_print_deep_link,
+    forward_print_deep_link,
     jobs::PrintJobStore,
     state::{AppState, SelectionAccess},
 };
+use tauri::Listener;
 
 fn temp_dir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -26,6 +28,128 @@ fn state(temp: &std::path::Path) -> AppState {
     fs::create_dir(&scope).unwrap();
     let store = PrintJobStore::new(temp.join("jobs"), [&scope]).unwrap();
     AppState::new(store, temp.join("runtime")).unwrap()
+}
+
+#[test]
+fn native_save_name_is_bounded_on_unicode_grapheme_boundaries() {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let family = "👨‍👩‍👧‍👦";
+    let suggested = format!("{}{}.MD", "Información ".repeat(30), family.repeat(30));
+    let name = sanitized_markdown_name(&suggested);
+
+    assert!(name.to_lowercase().ends_with(".md"));
+    assert!(!name.to_lowercase().ends_with(".md.md"));
+    assert!(name.graphemes(true).count() <= 120);
+    assert!(name.is_char_boundary(name.len()));
+}
+
+#[test]
+fn mock_runtime_dispatches_ipc_deep_links_events_and_window_lifecycle() {
+    let temp = temp_dir("mock-runtime-lifecycle");
+    let app_state = state(&temp);
+    let source = temp.join("scope").join("input.pdf");
+    fs::write(&source, b"%PDF-1.7\n%%EOF\n").unwrap();
+    let staged = app_state
+        .jobs()
+        .stage_pdf(&source, Some("Runtime job"))
+        .unwrap();
+    let job_id = staged.id.to_string();
+
+    let app = tauri::test::mock_builder()
+        .manage(app_state)
+        .invoke_handler(invoke_handler())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .unwrap();
+
+    let invoke = |cmd: &str, body: serde_json::Value, callback: u32| {
+        tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(callback),
+                error: tauri::ipc::CallbackFn(callback + 1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_owned(),
+            },
+        )
+        .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+    };
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    app.listen("print-job-requested", move |event| {
+        event_tx.send(event.payload().to_owned()).unwrap();
+    });
+    forward_print_deep_link(app.handle(), &format!("mdviewer://print/{job_id}"));
+    let payload = event_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("deep link did not emit print-job-requested");
+    assert_eq!(serde_json::from_str::<String>(&payload).unwrap(), job_id);
+
+    forward_print_deep_link(app.handle(), "mdviewer://print/not-a-uuid");
+    assert!(
+        event_rx
+            .recv_timeout(std::time::Duration::from_millis(20))
+            .is_err()
+    );
+
+    let status = invoke("integration_status", serde_json::json!({}), 10).unwrap();
+    assert_eq!(status["deep_link_scheme"], "mdviewer");
+    assert_eq!(status["pending_print_job_ids"], serde_json::json!([job_id]));
+
+    let claimed = invoke("claim_print_job", serde_json::json!({ "id": job_id }), 12).unwrap();
+    assert_eq!(claimed["title"], "Runtime job");
+    assert!(claimed["source_token"].as_str().is_some());
+    assert!(claimed.get("input_pdf").is_none());
+    let claimed_id = claimed["id"].as_str().unwrap();
+    invoke(
+        "finish_print_job",
+        serde_json::json!({ "id": claimed_id }),
+        14,
+    )
+    .unwrap();
+
+    webview.show().unwrap();
+    webview.set_focus().unwrap();
+    let (lifecycle_tx, lifecycle_rx) = std::sync::mpsc::channel();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let close_window = webview.clone();
+    let closer = std::thread::spawn(move || {
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("mock runtime did not become ready");
+        close_window.close().unwrap();
+    });
+    app.run(move |_handle, event| {
+        let marker = match event {
+            tauri::RunEvent::Ready => {
+                ready_tx.send(()).unwrap();
+                Some("ready")
+            }
+            tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::CloseRequested { .. },
+                ..
+            } => Some("close-requested"),
+            tauri::RunEvent::ExitRequested { .. } => Some("exit-requested"),
+            tauri::RunEvent::Exit => Some("exit"),
+            _ => None,
+        };
+        if let Some(marker) = marker {
+            lifecycle_tx.send(marker).unwrap();
+        }
+    });
+    closer.join().unwrap();
+    let lifecycle = lifecycle_rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle,
+        ["ready", "close-requested", "exit-requested", "exit"]
+    );
+    fs::remove_dir_all(temp).unwrap();
 }
 
 #[test]

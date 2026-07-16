@@ -136,7 +136,9 @@ fn selected_name(path: &Path) -> Result<String, CommandError> {
         .ok_or_else(|| CommandError::new("invalid_selection"))
 }
 
-fn sanitized_markdown_name(value: &str) -> String {
+pub fn sanitized_markdown_name(value: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+
     let mut result = value
         .chars()
         .map(|character| {
@@ -158,14 +160,31 @@ fn sanitized_markdown_name(value: &str) -> String {
     while result.ends_with(['.', ' ']) {
         result.pop();
     }
+    if result
+        .get(result.len().saturating_sub(3)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".md"))
+    {
+        result.truncate(result.len() - 3);
+        while result.ends_with(['.', ' ']) {
+            result.pop();
+        }
+    }
     if result.is_empty() {
         result.push_str("Documento");
     }
-    if !result.to_ascii_lowercase().ends_with(".md") {
-        result.push_str(".md");
+
+    let mut bounded = String::new();
+    for grapheme in result.graphemes(true).take(117) {
+        if bounded.len() + grapheme.len() + 3 > 240 {
+            break;
+        }
+        bounded.push_str(grapheme);
     }
-    result.truncate(123);
-    result
+    if bounded.is_empty() {
+        bounded.push_str("Documento");
+    }
+    bounded.push_str(".md");
+    bounded
 }
 
 pub fn validate_external_url(value: &str) -> Result<Url, CommandError> {

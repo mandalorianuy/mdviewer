@@ -14,10 +14,15 @@ export const untitledDocument: DocumentState = {
 export function markdownName(title: string): string {
   const base = title
     .normalize("NFKC")
+    .replace(/\.md$/i, "")
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")
     .replace(/\s+/g, " ")
     .replace(/[. ]+$/g, "")
-    .trim()
-    .slice(0, 120);
-  return `${base || "Documento"}.md`;
+    .trim();
+  const stem = base || "Documento";
+  const graphemes = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(stem)]
+    .map((segment) => segment.segment)
+    .slice(0, 117)
+    .join("");
+  return `${graphemes}.md`;
 }

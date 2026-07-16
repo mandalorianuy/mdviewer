@@ -37,7 +37,7 @@ export interface ConversionResult {
   operationId: string;
   markdownToken: string;
   warningCodes: string[];
-  writeToken?: string;
+  writeToken: string;
 }
 
 export interface ClaimedPrintJob {
