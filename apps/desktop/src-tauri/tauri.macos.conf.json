@@ -1,0 +1,19 @@
+{
+  "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    },
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "contentTypes": ["com.adobe.pdf"],
+        "name": "PDF document from macOS Print",
+        "role": "Viewer",
+        "rank": "None"
+      }
+    ],
+    "resources": {
+      "../../../.cache/pdfium/chromium-7947/lib/libpdfium.dylib": "lib/libpdfium.dylib"
+    }
+  }
+}

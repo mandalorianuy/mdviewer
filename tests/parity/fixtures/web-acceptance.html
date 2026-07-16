@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>MDViewer local acceptance fixture</title>
+    <style>
+      h1 { font-size: 32px; font-weight: 700; }
+      h2 { font-size: 24px; font-weight: 700; }
+      table { border-collapse: collapse; }
+      th, td { border: 1px solid #111; padding: 4px 10px; }
+    </style>
+  </head>
+  <body>
+    <header>Repeated acceptance header</header>
+    <main>
+      <h1>MDViewer acceptance</h1>
+      <p>First paragraph before every structured block.</p>
+      <h2>Ordered content</h2>
+      <ol>
+        <li>First local item</li>
+        <li>Second local item</li>
+      </ol>
+      <table>
+        <thead><tr><th>Format</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>GFM</td><td>Local</td></tr>
+          <tr><td>Assets</td><td>Embedded</td></tr>
+        </tbody>
+      </table>
+      <p><a href="https://example.test/mdviewer-parity">Safe fixture link</a></p>
+      <img
+        alt="MDViewer app fixture"
+        width="32"
+        height="32"
+        src="../../../apps/desktop/src-tauri/icons/icon.png">
+      <p>Final paragraph after every structured block.</p>
+    </main>
+    <footer>Repeated acceptance footer</footer>
+  </body>
+</html>

@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-22.04
+          - name: Windows x64
+            os: windows-latest
+          - name: macOS Apple Silicon
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+          package-manager-cache: false
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils
+      - name: Activate pinned Rust toolchain
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Fetch pinned PDFium on Apple Silicon
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          ./scripts/fetch-pdfium.sh
+          source scripts/release-common.sh
+          verify_pdfium_receipt "$PWD"
+          printf 'PDFIUM_DYNAMIC_LIB_PATH=%s\n' \
+            "$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib" >> "$GITHUB_ENV"
+      - name: Rust format and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo check -p mdconvert-pdf --all-targets
+      - name: Portable Rust tests
+        run: |
+          cargo test --workspace --exclude mdconvert-pdf
+          cargo test -p mdconvert-pdf --test pdf_conversion
+      - name: Frontend checks
+        run: |
+          npm run check
+          npm test -- --run
+          npm run build
+      - name: Portable Tauri smoke build
+        run: npm exec --workspace @mdviewer/desktop tauri -- build --ci --no-bundle
+      - name: PDFium extraction and golden tests
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          PDFIUM_DYNAMIC_LIB_PATH: ${{ github.workspace }}/.cache/pdfium/chromium-7947/lib/libpdfium.dylib
+        run: cargo test -p mdconvert-pdf
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+          package-manager-cache: false
+      - name: Activate pinned Rust toolchain
+        run: rustup show
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Audit locked dependencies
+        run: ./scripts/audit.sh

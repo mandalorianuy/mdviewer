@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "rowId": "excel",
+  "result": "pass",
+  "application": "Microsoft Excel",
+  "bundleId": "com.microsoft.Excel",
+  "applicationVersion": "16.112",
+  "generatedAt": "2026-07-16T22:03:35Z",
+  "environment": {"platform": "macOS", "osVersion": "26.6 (25G5028f)", "architecture": "arm64"},
+  "fixtureSha256": {"tests/parity/fixtures/excel-acceptance.xlsx": "b20040d799ba0e6475b66349ad042cfb4c3c9e45934a817ed516e6f38d32dfc3"},
+  "output": {"markdownSha256": "9c317ac19efe3d84bd35f9f2324262fde701e9c6fcd5f13205351f053e72dff0", "bytes": 82},
+  "warnings": [],
+  "checks": {
+    "reading_order": "pass",
+    "headings": {"result": "not_applicable", "reason": "The native Excel acceptance fixture is a worksheet table and contains no document heading."},
+    "lists": {"result": "not_applicable", "reason": "The native Excel acceptance fixture contains no list."},
+    "tables": "pass",
+    "links": {"result": "not_applicable", "reason": "The native Excel acceptance fixture contains no hyperlink."},
+    "images": {"result": "not_applicable", "reason": "The native Excel acceptance fixture contains no image."},
+    "warnings": "pass",
+    "success_output": "pass",
+    "opened_in_mdviewer": "pass",
+    "cancellation_no_output": "pass",
+    "cleanup_empty_store": "pass"
+  }
+}

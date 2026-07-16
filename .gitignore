@@ -1,6 +1,15 @@
 .DS_Store
 /.build
+/.cache/
 /dist
+node_modules/
+/target
+/apps/desktop/dist
+/apps/desktop/playwright-report
+/apps/desktop/test-results
+/apps/desktop/src-tauri/gen
+/legacy/macos-swift/.build
+/legacy/macos-swift/dist
 /.worktrees
 /Packages
 xcuserdata/
@@ -8,4 +17,7 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+*.p12
+AuthKey*.p8
+*.keychain-db
 /MDViewer 2026-03-13 15-23-48/

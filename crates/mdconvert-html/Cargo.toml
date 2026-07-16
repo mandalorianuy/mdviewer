@@ -1,0 +1,17 @@
+[package]
+name = "mdconvert-html"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+data-url = "=0.3.2"
+html5ever = "=0.39.0"
+# Cargo ignores SemVer build metadata; this exact pin resolves to 0.39.0+unofficial in Cargo.lock.
+markup5ever_rcdom = "=0.39.0"
+mdconvert-core = { path = "../mdconvert-core" }
+url = "=2.5.8"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

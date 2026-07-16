@@ -4,7 +4,7 @@
 
 **Goal:** Entregar MDViewer como aplicación Tauri 2 portable, con núcleo Rust local y determinista, y publicar primero un DMG firmado y notarizado para macOS 13+ Apple Silicon que agregue “Guardar como Markdown con MDViewer…” al menú PDF de impresión.
 
-**Architecture:** Un monorepo conserva la aplicación Swift buildable como baseline hasta alcanzar paridad. Todos los extractores producen un modelo intermedio común; un único emisor crea GFM y un escritor transaccional publica el `.md` y sus assets. La aplicación Tauri usa ese mismo núcleo que la CLI. El PDF Workflow de macOS sólo persiste un job local y abre un deep link con UUID; no contiene lógica de conversión.
+**Architecture:** Un monorepo conserva la aplicación Swift buildable como baseline hasta alcanzar paridad. Todos los extractores producen un modelo intermedio común; un único emisor crea GFM y un escritor transaccional publica el `.md` y sus assets. La aplicación Tauri usa ese mismo núcleo que la CLI. El PDF Service de macOS es un alias nativo al bundle firmado: macOS entrega el PDF con `RunEvent::Opened` y el propio proceso de MDViewer persiste el job antes de emitir únicamente su UUID al WebView.
 
 **Tech Stack:** Rust 1.94, Cargo workspace, Tauri 2.11.x, React 19.2, TypeScript 5.9, Vite 7.3, PDFium `chromium/7947` vía `pdfium-render` 0.9.3, `html5ever` 0.39, Vitest 4, Playwright 1.61, Swift 6.2 únicamente para el baseline y el adaptador nativo cuando sea necesario.
 
@@ -38,7 +38,6 @@
 ├── crates/mdconvert-pdf/              PDFium, layout y heurísticas
 ├── crates/mdconvert-formats/          CSV, JSON, XML, ZIP, EPUB y OOXML
 ├── crates/mdconvert-cli/              CLI y JSON de resultados v1
-├── platform/macos/pdf-workflow/       Executable PDF Workflow e instalador
 ├── legacy/macos-swift/                Aplicación y tests Swift congelados
 ├── scripts/                           Gates, descarga PDFium y release
 ├── tests/fixtures/                    Corpus portable versionado
@@ -700,29 +699,43 @@ Expected: unit, build and E2E tests pass; Swift baseline remains green.
 
 ---
 
-## Task 14: Add the macOS PDF Workflow and Integration Controls
+## Task 14: Add the macOS PDF Service and Integration Controls
 
 **Files:**
 
-- Create: `platform/macos/pdf-workflow/Cargo.toml`
-- Create: `platform/macos/pdf-workflow/src/{lib,main}.rs`
-- Create: `platform/macos/pdf-workflow/tests/workflow.rs`
 - Create: `apps/desktop/src-tauri/src/macos_integration.rs`
 - Create: `apps/desktop/src-tauri/tests/macos_integration.rs`
 - Create: `apps/desktop/src/features/settings/IntegrationsPanel.tsx`
 - Create: `docs/user-guide/macos-print-workflow.md`
 
-- [ ] **Step 1: Write lifecycle and invocation tests**
+- [x] **Approved plan deviation (2026-07-16)**
 
-Test install, status, repair, version mismatch, checksum mismatch, uninstall, invocation with CUPS options and PDF path, MDViewer closed/open and failure to persist a job.
+The executable design was rejected by the real TextEdit gate: `printtool` could read its temporary
+PDF but returned `PermissionDenied` when the helper tried to create the first staging directory in
+MDViewer's Application Support. Apple documents an Application/Application-alias PDF Workflow
+item that delivers the PDF using an application open event. The user approved switching to that
+native contract; the executable helper is removed from the installed path.
 
-- [ ] **Step 2: Implement the workflow executable**
+- [x] **Step 1: Write lifecycle and native open-event tests**
 
-Name it exactly `Guardar como Markdown con MDViewer`. Treat the final process argument as PDF path and preceding arguments as opaque CUPS options. Validate a regular readable PDF, stage through `PrintJobStore`, fsync, then open only `mdviewer://print/<uuid>` with Launch Services.
+Test install, status, repair, checksum mismatch, uninstall, native alias resolution, multiple PDF
+open events, invalid paths, MDViewer closed/open and failure to persist a job.
 
-Exit 0 only after persistence and dispatch succeed. Never choose a destination or convert in this tool.
+- [x] **Step 2: Implement the native Application alias workflow**
 
-- [ ] **Step 3: Implement install, repair and uninstall**
+Name it exactly `Guardar como Markdown con MDViewer`. Install a Foundation bookmark alias to the
+exact signed MDViewer bundle. Handle Tauri `RunEvent::Opened` synchronously: validate and stage each
+PDF through `PrintJobStore`, fsync, queue the UUID and emit only that opaque UUID to the WebView.
+Never choose a destination or convert in the event handler.
+
+The signed application bundle includes the Task 7 pinned PDFium runtime from the ignored verified
+cache as `Contents/Resources/lib/libpdfium.dylib`. Desktop configures that canonical bundled path
+directly before accepting conversions; it does not depend on `PDFIUM_DYNAMIC_LIB_PATH`. Sign the
+nested runtime before signing the outer app, and never add the dylib to Git. Keep the PDF file
+association and bundled PDFium resource mapping in `tauri.macos.conf.json`; the portable base
+configuration must not require either resource on Windows or Linux.
+
+- [x] **Step 3: Implement install, repair and uninstall**
 
 Install per-user at:
 
@@ -730,16 +743,33 @@ Install per-user at:
 ~/Library/PDF Services/Guardar como Markdown con MDViewer
 ```
 
-Compare embedded version, SHA-256 and code signature before reporting `installed`. Replace atomically. Uninstall only the exact regular file whose marker and signature identify this build; never recursively remove `~/Library/PDF Services`.
+Resolve the alias without UI and compare exact bundle ID, Team ID, strict code signature and
+executable SHA-256 before reporting `installed`. Replace an owned outdated alias atomically.
+Uninstall only a current or verifiably outdated alias; never recursively remove
+`~/Library/PDF Services` and never replace an invalid/unrelated item. For repair and uninstall,
+move the observed target exclusively to a UUID quarantine, revalidate its filesystem identity and
+owned-alias checks there, then move it exclusively into the retained tombstone directory under
+`~/Library/Application Support/com.mdviewer.desktop/Retired PDF Services`. Publish or restore only
+with no-overwrite operations. Never unlink the quarantine, tombstone or an abandoned UUID temporary
+by pathname; retain uncertain objects. Open every source and destination directory as a no-follow
+chain relative to `HOME`, rename relative to verified directory handles, compare handle identity
+against the visible path before and after the move, and roll back through the same handles on any
+directory swap. Task 14 performs no automatic tombstone cleanup.
+Capture the validated temporary alias stable filesystem key, exact length and content hash before
+publication. Use device/inode on Unix and volume serial/file ID from a non-reparse Windows handle.
+Keep change-time in the pre/post semantic observations but out of the across-rename identity. After
+the exclusive relative rename, require the stable identity and rerun the complete owned-alias
+contract between identical observations. On any swap or in-place mutation, retain the reached
+object without overwrite, restore the previously validated workflow during repair, and return a
+safe error rather than success.
 
-- [ ] **Step 4: Connect Preferences → Integrations**
+- [x] **Step 4: Connect Preferences → Integrations**
 
 Display `not installed`, `installed`, `outdated` or `invalid`; expose Install, Repair or Uninstall with accessible confirmation and result text.
 
-- [ ] **Step 5: Verify automated and real-system behavior**
+- [x] **Step 5: Verify automated and real-system behavior**
 
 ```bash
-cargo test -p mdviewer-pdf-workflow
 cargo test -p mdviewer-desktop --test macos_integration
 npm test --workspace @mdviewer/desktop -- --run
 ```
@@ -752,10 +782,16 @@ Archivo → Imprimir → PDF → Guardar como Markdown con MDViewer…
 
 Expected: MDViewer opens, Save As appears, cancel leaves no output, success creates GFM and opens it.
 
-- [ ] **Step 6: Commit**
+Verified on 2026-07-16 with the exact signed Apple Silicon bundle. Cancel created no output and
+left the store empty. Success created a 110-byte Markdown file, opened it in MDViewer with status
+`Guardado`, rendered the complete heading and three bullets, showed no alert and left the store
+empty. The final executable SHA-256 was
+`feae71f2b6cc65837f5c9d734b37b7d8924bc77fd23ba4cdc43718d2d9f11515`.
+
+- [x] **Step 6: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock platform/macos/pdf-workflow apps/desktop docs/user-guide/macos-print-workflow.md
+git add Cargo.toml Cargo.lock apps/desktop docs/user-guide/macos-print-workflow.md
 git commit -m "feat(macos): install universal Save as Markdown workflow"
 ```
 
@@ -772,15 +808,15 @@ git commit -m "feat(macos): install universal Save as Markdown workflow"
 - Modify: `apps/desktop/src-tauri/tauri.conf.json`, `README.md`, `.gitignore`
 - Modify: legacy release scripts containing machine-specific signing metadata
 
-- [ ] **Step 1: Add a safe local release preflight**
+- [x] **Step 1: Add a safe local release preflight**
 
 Reject non-Apple-Silicon output, unsigned app/workflow, missing PDFium checksum receipt, hardcoded App Store Connect identifiers, modified lockfiles and a dirty tree.
 
-- [ ] **Step 2: Configure portable CI**
+- [x] **Step 2: Configure portable CI**
 
 On macOS, Windows and Linux run Rust formatting, clippy, all pure unit tests (including layout PDF), frontend lint/typecheck/tests/build and Tauri smoke build. Run PDFium extraction and golden integration tests on macOS Apple Silicon with the asset and checksum pinned in Task 7; Windows and Linux compile `mdconvert-pdf` against dynamic loading but do not download an unpublished v1 runtime. Run `cargo audit` and npm audit with reviewed allowlists stored as data.
 
-- [ ] **Step 3: Configure `aarch64-apple-darwin` release only**
+- [x] **Step 3: Configure `aarch64-apple-darwin` release only**
 
 Build and sign app plus workflow, bundle pinned PDFium, create DMG, notarize, staple and verify:
 
@@ -792,11 +828,11 @@ xcrun stapler validate MDViewer.app
 
 Developer ID identity, notary key ID, issuer and private key come only from GitHub Secrets or explicit environment variables.
 
-- [ ] **Step 4: Finish public documentation**
+- [x] **Step 4: Finish public documentation**
 
 Document macOS 13+, Apple Silicon-only v1, local processing, no OCR until v1.1, fidelity limits, build commands and print-action installation. Link contribution, security and architecture docs.
 
-- [ ] **Step 5: Run release gates without publishing**
+- [x] **Step 5: Run release gates without publishing**
 
 ```bash
 ./scripts/verify-workspace.sh
@@ -807,7 +843,7 @@ Document macOS 13+, Apple Silicon-only v1, local processing, no OCR until v1.1, 
 
 Expected: workspace and audit pass; unsigned smoke proves architecture and contents while making no signature or notary claim.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add .github .gitignore README.md CONTRIBUTING.md SECURITY.md apps/desktop/src-tauri/tauri.conf.json docs/release scripts legacy/macos-swift/scripts
@@ -826,26 +862,37 @@ git commit -m "build: add portable CI and Apple Silicon release pipeline"
 - Remove after gate: `legacy/macos-swift/`
 - Modify: `Cargo.toml`, `README.md`, `scripts/verify-workspace.sh`
 
-- [ ] **Step 1: Create a machine-readable parity manifest**
+- [x] **Step 1: Create a machine-readable parity manifest**
 
 List every approved v1 behavior and the automated test, manual evidence or explicit exclusion proving it. Include viewer/editor/save/preview/preferences/export, local converters, print integration, cancellation, warnings and cleanup. Record YouTube and OCR as exclusions.
 
-- [ ] **Step 2: Run evidence while Swift still exists**
+- [x] **Step 2: Run evidence while Swift still exists**
 
 ```bash
 ./scripts/verify-legacy-swift.sh
 ./scripts/verify-workspace.sh
-./scripts/verify-parity.sh
+./scripts/verify-parity.sh --automated
 git status --short
 ```
 
-Expected: all exit 0; no unreviewed golden diff; only intentionally untracked user files remain.
+Expected: all exit 0; every automated or excluded row is proven; manual rows may remain explicitly
+`pending` and cannot pass the default retirement gate; no unreviewed golden diff; only intentionally
+untracked user files remain.
 
-- [ ] **Step 3: Perform the macOS acceptance matrix**
+- [x] **Step 3: Perform the macOS acceptance matrix**
 
 On macOS 13+ Apple Silicon test Safari, Mail, TextEdit, Preview and available Office apps. Record reading order, headings, lists, tables, links, images, warnings, cancellation and cleanup. Turn every reproducible defect into a fixture before fixing it.
 
-- [ ] **Step 4: Tag the last Swift baseline**
+After attaching the acceptance evidence, run the strict gate:
+
+```bash
+./scripts/verify-parity.sh
+```
+
+Expected: all approved v1 rows are proven or explicitly excluded. A pending or failed manual row
+must stop tagging and retirement.
+
+- [x] **Step 4: Tag the last Swift baseline**
 
 ```bash
 git tag -a swift-baseline-final -m "Last buildable Swift MDViewer baseline"
@@ -855,7 +902,7 @@ git push onedev swift-baseline-final
 
 Expected: both remotes contain the annotated tag before Swift removal.
 
-- [ ] **Step 5: Remove Swift in a dedicated commit**
+- [x] **Step 5: Remove Swift in a dedicated commit**
 
 ```bash
 git rm -r legacy/macos-swift

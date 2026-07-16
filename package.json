@@ -1,0 +1,16 @@
+{
+  "name": "mdviewer",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "test": "npm test --workspaces --if-present --",
+    "tauri": "npm run tauri --workspace @mdviewer/desktop"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

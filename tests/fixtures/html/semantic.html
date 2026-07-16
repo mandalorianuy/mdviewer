@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+  <head>
+    <base href="https://example.test/docs/">
+    <title>  Semantic document  </title>
+    <style>.secret { display: block }</style>
+    <script>window.secret = "script text"</script>
+  </head>
+  <body>
+    <h1 onclick="alert('ignored')">Semantic HTML</h1>
+    <p>Text with <strong>strength</strong>, <em>emphasis</em>, <code>inline()</code>, and <a href="guide/start">a guide</a>.<br>Next line.</p>
+    <p>Before image <img src="https://cdn.example.test/photo.png" alt="Remote photo"> after image.</p>
+    <ul>
+      <li>First</li>
+      <li>Second
+        <ol start="3">
+          <li>Nested three</li>
+          <li>Nested four</li>
+        </ol>
+      </li>
+    </ul>
+    <table>
+      <thead><tr><th align="left">Name</th><th style="text-align: right">Count</th></tr></thead>
+      <tbody><tr><td>Alpha</td><td>2</td></tr></tbody>
+      <tfoot><tr><td>Total</td><td>2</td></tr></tfoot>
+    </table>
+    <blockquote><p>Quoted <b>content</b>.</p></blockquote>
+    <pre><code class="language-rust">fn main() {
+    println!("hello");
+}</code></pre>
+    <hr>
+    <p hidden>hidden attribute text</p>
+    <p aria-hidden="true">aria hidden text</p>
+    <p style="color: red; DISPLAY: none">display hidden text</p>
+    <p style="display: none !important">important hidden text</p>
+    <div style="visibility: hidden">visibility hidden text</div>
+    <template>template text</template>
+    <noscript>noscript text</noscript>
+  </body>
+</html>

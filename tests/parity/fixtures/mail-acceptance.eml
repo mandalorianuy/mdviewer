@@ -1,0 +1,71 @@
+From: Fixture Sender <fixture@example.test>
+To: Fixture Recipient <fixture@example.test>
+Date: Wed, 15 Jul 2026 15:00:00 +0000
+Subject: MDViewer local acceptance fixture
+Message-ID: <mdviewer-parity@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="mdviewer-local-boundary"
+
+--mdviewer-local-boundary
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+<!doctype html><html><head><style>
+h1 { font-size: 32px; font-weight: 700; }
+h2 { font-size: 24px; font-weight: 700; }
+table { border-collapse: collapse; }
+th, td { border: 1px solid #111; padding: 0 10px; line-height: 1; }
+ul { list-style: none; padding-left: 24px; }
+li::before { content: "• "; }
+</style></head><body>
+<h1>Mail acceptance</h1>
+<p>First mail paragraph.</p>
+<h2>Mail list</h2>
+<ul><li>Alpha</li><li>Beta</li></ul>
+<table><tr><th>Column</th><th>Value</th></tr><tr><td>Local</td><td>Only</td></tr><tr><td>Assets</td><td>Embedded</td></tr></table>
+<p><a href="https://example.test/mail-parity">Safe mail fixture link</a></p>
+<img src="cid:pixel@mdviewer.test" alt="Mail app fixture" width="32" height="32">
+<p>Final mail paragraph.</p>
+</body></html>
+
+--mdviewer-local-boundary
+Content-Type: image/png; name="pixel.png"
+Content-Disposition: inline; filename="pixel.png"
+Content-ID: <pixel@mdviewer.test>
+Content-Transfer-Encoding: base64
+
+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
+rkJggg==
+--mdviewer-local-boundary--

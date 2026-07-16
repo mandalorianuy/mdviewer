@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<x:root xmlns:x="urn:test" version="1"><x:item id="a">before<x:bold>middle</x:bold>after &amp; more</x:item><x:item id="b"><![CDATA[A & B]]></x:item></x:root>
