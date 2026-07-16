@@ -6,6 +6,8 @@ use std::{
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -215,6 +217,19 @@ pub struct IntegrationManager<A, V> {
     verifier: V,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+struct TargetInspection {
+    status: IntegrationStatus,
+    identity: Option<FileIdentity>,
+}
+
 impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
     pub fn new(
         home: impl AsRef<Path>,
@@ -247,12 +262,15 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
         if self.status()? != IntegrationStatus::NotInstalled {
             return Err(IntegrationError::TargetExists);
         }
-        self.publish(false)
+        self.publish(None)
     }
 
     pub fn repair(&self) -> Result<(), IntegrationError> {
-        match self.status()? {
-            IntegrationStatus::Installed | IntegrationStatus::Outdated => self.publish(true),
+        let inspected = self.inspect_target(&self.target)?;
+        match inspected.status {
+            IntegrationStatus::Installed | IntegrationStatus::Outdated => self.publish(Some(
+                inspected.identity.ok_or(IntegrationError::UnsafeTarget)?,
+            )),
             IntegrationStatus::NotInstalled | IntegrationStatus::Invalid => {
                 Err(IntegrationError::UnsafeTarget)
             }
@@ -260,30 +278,50 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
     }
 
     pub fn uninstall(&self) -> Result<(), IntegrationError> {
-        match self.status()? {
+        let inspected = self.inspect_target(&self.target)?;
+        match inspected.status {
             IntegrationStatus::Installed | IntegrationStatus::Outdated => {}
             IntegrationStatus::NotInstalled | IntegrationStatus::Invalid => {
                 return Err(IntegrationError::UnsafeTarget);
             }
         }
-        fs::remove_file(&self.target).map_err(|_| IntegrationError::Io)?;
+        let quarantine = self.quarantine_validated_target(
+            inspected.identity.ok_or(IntegrationError::UnsafeTarget)?,
+        )?;
+        fs::remove_file(quarantine).map_err(|_| IntegrationError::Io)?;
         sync_parent(&self.target)
     }
 
     fn status_at(&self, target: &Path) -> Result<IntegrationStatus, IntegrationError> {
+        Ok(self.inspect_target(target)?.status)
+    }
+
+    fn inspect_target(&self, target: &Path) -> Result<TargetInspection, IntegrationError> {
         let metadata = match fs::symlink_metadata(target) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(IntegrationStatus::NotInstalled);
+                return Ok(TargetInspection {
+                    status: IntegrationStatus::NotInstalled,
+                    identity: None,
+                });
             }
             Err(_) => return Err(IntegrationError::Io),
         };
         if !metadata.file_type().is_file() {
-            return Ok(IntegrationStatus::Invalid);
+            return Ok(TargetInspection {
+                status: IntegrationStatus::Invalid,
+                identity: None,
+            });
         }
+        let identity = file_identity(&metadata);
         let application = match self.alias.resolve_alias(target) {
             Ok(application) if application.is_absolute() => application,
-            Ok(_) | Err(_) => return Ok(IntegrationStatus::Invalid),
+            Ok(_) | Err(_) => {
+                return Ok(TargetInspection {
+                    status: IntegrationStatus::Invalid,
+                    identity,
+                });
+            }
         };
         if !self
             .verifier
@@ -294,21 +332,30 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             )
             .map_err(|_| IntegrationError::Io)?
         {
-            return Ok(IntegrationStatus::Invalid);
+            return Ok(TargetInspection {
+                status: IntegrationStatus::Invalid,
+                identity,
+            });
         }
         let executable = self.artifact.executable_path(&application);
         let bytes = match fs::read(executable) {
             Ok(bytes) => bytes,
-            Err(_) => return Ok(IntegrationStatus::Invalid),
+            Err(_) => {
+                return Ok(TargetInspection {
+                    status: IntegrationStatus::Invalid,
+                    identity,
+                });
+            }
         };
-        if sha256_hex(&bytes) == self.artifact.sha256 {
-            Ok(IntegrationStatus::Installed)
+        let status = if sha256_hex(&bytes) == self.artifact.sha256 {
+            IntegrationStatus::Installed
         } else {
-            Ok(IntegrationStatus::Outdated)
-        }
+            IntegrationStatus::Outdated
+        };
+        Ok(TargetInspection { status, identity })
     }
 
-    fn publish(&self, replace: bool) -> Result<(), IntegrationError> {
+    fn publish(&self, replace: Option<FileIdentity>) -> Result<(), IntegrationError> {
         if !self
             .verifier
             .verify(
@@ -338,17 +385,21 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             if self.status_at(&temporary)? != IntegrationStatus::Installed {
                 return Err(IntegrationError::InvalidArtifact);
             }
-            if replace {
-                fs::rename(&temporary, &self.target).map_err(|_| IntegrationError::Io)?;
+            if let Some(expected) = replace {
+                let quarantine = self.quarantine_validated_target(expected)?;
+                if move_no_replace(&temporary, &self.target).is_err() {
+                    let _ = move_no_replace(&quarantine, &self.target);
+                    return Err(IntegrationError::UnsafeTarget);
+                }
+                fs::remove_file(quarantine).map_err(|_| IntegrationError::Io)?;
             } else {
-                fs::hard_link(&temporary, &self.target).map_err(|error| {
+                move_no_replace(&temporary, &self.target).map_err(|error| {
                     if error.kind() == io::ErrorKind::AlreadyExists {
                         IntegrationError::TargetExists
                     } else {
                         IntegrationError::Io
                     }
                 })?;
-                fs::remove_file(&temporary).map_err(|_| IntegrationError::Io)?;
             }
             sync_parent(&self.target)
         })();
@@ -357,6 +408,81 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
         }
         result
     }
+
+    fn quarantine_validated_target(
+        &self,
+        expected: FileIdentity,
+    ) -> Result<PathBuf, IntegrationError> {
+        let parent = self.target.parent().ok_or(IntegrationError::UnsafeTarget)?;
+        let quarantine = parent.join(format!(".{WORKFLOW_NAME}.quarantine-{}", Uuid::new_v4()));
+        move_no_replace(&self.target, &quarantine).map_err(|_| IntegrationError::UnsafeTarget)?;
+
+        let moved = fs::symlink_metadata(&quarantine).ok();
+        let identity_matches = moved
+            .as_ref()
+            .and_then(file_identity)
+            .is_some_and(|identity| identity == expected);
+        let status_matches = identity_matches
+            && matches!(
+                self.status_at(&quarantine),
+                Ok(IntegrationStatus::Installed | IntegrationStatus::Outdated)
+            );
+        let identity_still_matches = status_matches
+            && fs::symlink_metadata(&quarantine)
+                .ok()
+                .as_ref()
+                .and_then(file_identity)
+                .is_some_and(|identity| identity == expected);
+        if !identity_still_matches {
+            let _ = move_no_replace(&quarantine, &self.target);
+            return Err(IntegrationError::UnsafeTarget);
+        }
+        Ok(quarantine)
+    }
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn file_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid source path"))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid destination path"))?;
+    // SAFETY: both C strings are alive for the call and contain no interior NUL bytes.
+    let result = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::hard_link(source, destination)?;
+    fs::remove_file(source)
 }
 
 fn ensure_safe_parent(parent: &Path) -> Result<(), IntegrationError> {

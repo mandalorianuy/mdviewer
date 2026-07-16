@@ -731,7 +731,9 @@ Never choose a destination or convert in the event handler.
 The signed application bundle includes the Task 7 pinned PDFium runtime from the ignored verified
 cache as `Contents/Resources/lib/libpdfium.dylib`. Desktop configures that canonical bundled path
 directly before accepting conversions; it does not depend on `PDFIUM_DYNAMIC_LIB_PATH`. Sign the
-nested runtime before signing the outer app, and never add the dylib to Git.
+nested runtime before signing the outer app, and never add the dylib to Git. Keep the PDF file
+association and bundled PDFium resource mapping in `tauri.macos.conf.json`; the portable base
+configuration must not require either resource on Windows or Linux.
 
 - [x] **Step 3: Implement install, repair and uninstall**
 
@@ -744,7 +746,9 @@ Install per-user at:
 Resolve the alias without UI and compare exact bundle ID, Team ID, strict code signature and
 executable SHA-256 before reporting `installed`. Replace an owned outdated alias atomically.
 Uninstall only a current or verifiably outdated alias; never recursively remove
-`~/Library/PDF Services` and never replace an invalid/unrelated item.
+`~/Library/PDF Services` and never replace an invalid/unrelated item. For repair and uninstall,
+move the observed target exclusively to a UUID quarantine, revalidate its filesystem identity and
+owned-alias checks there, and publish or restore only with no-overwrite operations.
 
 - [x] **Step 4: Connect Preferences → Integrations**
 

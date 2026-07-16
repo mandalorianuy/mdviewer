@@ -1,6 +1,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use mdviewer_desktop_lib::macos_integration::{
@@ -10,18 +11,25 @@ use mdviewer_desktop_lib::macos_integration::{
 use tempfile::TempDir;
 
 #[test]
-fn desktop_bundle_is_the_exact_native_open_file_target() {
-    let config: serde_json::Value =
-        serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+fn desktop_base_config_is_portable_and_macos_override_is_the_exact_native_target() {
+    let base: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let macos: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.macos.conf.json")).unwrap();
 
-    assert_eq!(config["identifier"], "com.mdviewer.desktop");
-    assert_eq!(config["bundle"]["active"], true);
+    assert_eq!(base["identifier"], "com.mdviewer.desktop");
+    assert_eq!(base["bundle"]["active"], true);
     assert_eq!(
-        config["plugins"]["deep-link"]["desktop"]["schemes"],
+        base["plugins"]["deep-link"]["desktop"]["schemes"],
         serde_json::json!(["mdviewer"])
     );
+    assert!(base["bundle"]["fileAssociations"].is_null());
+    assert!(base["bundle"]["resources"].is_null());
+    let portable = serde_json::to_string(&base).unwrap();
+    for macos_only in ["com.adobe.pdf", "libpdfium.dylib", ".cache/pdfium"] {
+        assert!(!portable.contains(macos_only));
+    }
     assert_eq!(
-        config["bundle"]["fileAssociations"],
+        macos["bundle"]["fileAssociations"],
         serde_json::json!([{
             "ext": ["pdf"],
             "contentTypes": ["com.adobe.pdf"],
@@ -31,7 +39,7 @@ fn desktop_bundle_is_the_exact_native_open_file_target() {
         }])
     );
     assert_eq!(
-        config["bundle"]["resources"]["../../../.cache/pdfium/chromium-7947/lib/libpdfium.dylib"],
+        macos["bundle"]["resources"]["../../../.cache/pdfium/chromium-7947/lib/libpdfium.dylib"],
         "lib/libpdfium.dylib"
     );
 }
@@ -67,6 +75,32 @@ impl CodeSignatureVerifier for FixtureSignature {
         Ok(identity == "com.mdviewer.desktop"
             && team == "TEAMFIXTURE"
             && !bytes.ends_with(b"BAD-SIGNATURE"))
+    }
+}
+
+struct SwapTargetOnFirstVerification {
+    target: PathBuf,
+    displaced: PathBuf,
+    swapped: AtomicBool,
+}
+
+impl SwapTargetOnFirstVerification {
+    fn new(target: PathBuf, displaced: PathBuf) -> Self {
+        Self {
+            target,
+            displaced,
+            swapped: AtomicBool::new(false),
+        }
+    }
+}
+
+impl CodeSignatureVerifier for SwapTargetOnFirstVerification {
+    fn verify(&self, path: &Path, identity: &str, team: &str) -> io::Result<bool> {
+        if !self.swapped.swap(true, Ordering::SeqCst) {
+            fs::rename(&self.target, &self.displaced)?;
+            fs::write(&self.target, b"unrelated replacement")?;
+        }
+        FixtureSignature.verify(path, identity, team)
     }
 }
 
@@ -167,6 +201,58 @@ fn a_valid_alias_to_an_older_signed_app_is_outdated_and_repair_is_atomic() {
         FixtureAlias.resolve_alias(&manager.target()).unwrap(),
         current_app
     );
+}
+
+#[test]
+fn repair_preserves_a_target_swapped_after_validation() {
+    let home = TempDir::new().unwrap();
+    let app = application(home.path(), "MDViewer.app", b"current-signed-app");
+    let installed = manager(&home, app.clone());
+    installed.install().unwrap();
+    let target = installed.target();
+    let displaced = home
+        .path()
+        .join("managed-alias-displaced-during-validation");
+    let manager = IntegrationManager::new(
+        home.path(),
+        artifact(app.clone()),
+        FixtureAlias,
+        SwapTargetOnFirstVerification::new(target.clone(), displaced.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        manager.repair().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"unrelated replacement");
+    assert_eq!(FixtureAlias.resolve_alias(&displaced).unwrap(), app);
+}
+
+#[test]
+fn uninstall_preserves_a_target_swapped_after_validation() {
+    let home = TempDir::new().unwrap();
+    let app = application(home.path(), "MDViewer.app", b"current-signed-app");
+    let installed = manager(&home, app.clone());
+    installed.install().unwrap();
+    let target = installed.target();
+    let displaced = home
+        .path()
+        .join("managed-alias-displaced-during-validation");
+    let manager = IntegrationManager::new(
+        home.path(),
+        artifact(app.clone()),
+        FixtureAlias,
+        SwapTargetOnFirstVerification::new(target.clone(), displaced.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        manager.uninstall().unwrap_err(),
+        IntegrationError::UnsafeTarget
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"unrelated replacement");
+    assert_eq!(FixtureAlias.resolve_alias(&displaced).unwrap(), app);
 }
 
 #[test]

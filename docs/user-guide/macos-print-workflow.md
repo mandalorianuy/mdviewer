@@ -13,7 +13,10 @@ MDViewer resuelve el alias sin mostrar interfaz y comprueba el bundle ID, el Tea
 código y el SHA-256 del ejecutable de la aplicación antes de mostrarlo como `installed`. Un alias a
 una versión anterior firmada aparece como `outdated` y ofrece **Repair**. Un elemento `invalid` se
 preserva sin ofrecer una acción destructiva. **Uninstall** requiere confirmación y elimina solamente
-el alias exacto administrado por MDViewer; nunca elimina `PDF Services` ni otros workflows.
+el alias exacto administrado por MDViewer; nunca elimina `PDF Services` ni otros workflows. Antes
+de reparar o desinstalar, MDViewer mueve el objeto observado a una cuarentena única sin sobrescribir,
+vuelve a comprobar su identidad y contenido, y aborta restaurándolo si el destino cambió durante la
+operación.
 
 ## Uso
 

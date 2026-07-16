@@ -76,7 +76,48 @@ pub struct OpenedPrintReport {
 
 #[derive(Clone, Default)]
 pub struct PendingOpenedPrintFiles {
-    urls: Arc<Mutex<Vec<tauri::Url>>>,
+    phase: Arc<Mutex<PendingOpenedPhase>>,
+}
+
+enum PendingOpenedPhase {
+    Buffering(Vec<tauri::Url>),
+    Ready,
+}
+
+impl Default for PendingOpenedPhase {
+    fn default() -> Self {
+        Self::Buffering(Vec::new())
+    }
+}
+
+enum OpenedFileRoute {
+    Buffered,
+    Forward(Vec<tauri::Url>),
+}
+
+impl PendingOpenedPrintFiles {
+    fn route_urls(&self, urls: &[tauri::Url]) -> Result<OpenedFileRoute, ()> {
+        let mut phase = self.phase.lock().map_err(|_| ())?;
+        match &mut *phase {
+            PendingOpenedPhase::Buffering(queued) => {
+                queued.extend_from_slice(urls);
+                Ok(OpenedFileRoute::Buffered)
+            }
+            PendingOpenedPhase::Ready => Ok(OpenedFileRoute::Forward(urls.to_vec())),
+        }
+    }
+
+    fn mark_ready_locked(phase: &mut PendingOpenedPhase) -> Vec<tauri::Url> {
+        match std::mem::replace(phase, PendingOpenedPhase::Ready) {
+            PendingOpenedPhase::Buffering(urls) => urls,
+            PendingOpenedPhase::Ready => Vec::new(),
+        }
+    }
+
+    fn take_buffered_and_mark_ready(&self) -> Result<Vec<tauri::Url>, ()> {
+        let mut phase = self.phase.lock().map_err(|_| ())?;
+        Ok(Self::mark_ready_locked(&mut phase))
+    }
 }
 
 pub fn route_opened_print_files<R: tauri::Runtime>(
@@ -84,16 +125,10 @@ pub fn route_opened_print_files<R: tauri::Runtime>(
     pending: &PendingOpenedPrintFiles,
     urls: &[tauri::Url],
 ) -> Option<OpenedPrintReport> {
-    if app.try_state::<state::AppState>().is_some() {
-        return Some(forward_opened_print_files(app, urls));
-    }
-
-    match pending.urls.lock() {
-        Ok(mut queued) => {
-            queued.extend_from_slice(urls);
-            None
-        }
-        Err(_) => Some(OpenedPrintReport {
+    match pending.route_urls(urls) {
+        Ok(OpenedFileRoute::Buffered) => None,
+        Ok(OpenedFileRoute::Forward(urls)) => Some(forward_opened_print_files(app, &urls)),
+        Err(()) => Some(OpenedPrintReport {
             staged_ids: Vec::new(),
             rejected: urls.len() as u64,
             rejection_codes: vec!["state_unavailable"; urls.len()],
@@ -105,9 +140,9 @@ pub fn flush_pending_opened_print_files<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     pending: &PendingOpenedPrintFiles,
 ) -> OpenedPrintReport {
-    let urls = match pending.urls.lock() {
-        Ok(mut queued) => std::mem::take(&mut *queued),
-        Err(_) => {
+    let urls = match pending.take_buffered_and_mark_ready() {
+        Ok(urls) => urls,
+        Err(()) => {
             return OpenedPrintReport {
                 staged_ids: Vec::new(),
                 rejected: 1,
@@ -183,4 +218,53 @@ pub fn run() {
                 log_opened_print_report(&report);
             }
         });
+}
+
+#[cfg(test)]
+mod opened_file_transition_tests {
+    use std::{fs, sync::mpsc};
+
+    use tauri::Manager;
+
+    use super::*;
+
+    #[test]
+    fn ready_transition_cannot_lose_or_duplicate_a_concurrent_opened_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("concurrent.pdf");
+        fs::write(&source, b"%PDF-1.7\nconcurrent\n%%EOF\n").unwrap();
+        let store =
+            PrintJobStore::new(directory.path().join("jobs"), [source.parent().unwrap()]).unwrap();
+        let state = state::AppState::new(store, directory.path().join("runtime")).unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let pending = PendingOpenedPrintFiles::default();
+        let mut transition = pending.phase.lock().unwrap();
+        let url = tauri::Url::from_file_path(source).unwrap();
+        let concurrent = pending.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let route = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            concurrent.route_urls(&[url]).unwrap()
+        });
+        started_rx.recv().unwrap();
+
+        let buffered = PendingOpenedPrintFiles::mark_ready_locked(&mut transition);
+        drop(transition);
+        let OpenedFileRoute::Forward(urls) = route.join().unwrap() else {
+            panic!("a route after the ready transition must not buffer");
+        };
+
+        assert!(buffered.is_empty());
+        let report = forward_opened_print_files(app.handle(), &urls);
+        assert_eq!(report.staged_ids.len(), 1);
+        assert_eq!(report.rejected, 0);
+        assert!(pending.take_buffered_and_mark_ready().unwrap().is_empty());
+        assert_eq!(
+            app.state::<state::AppState>().pending_print_jobs().unwrap(),
+            report.staged_ids
+        );
+    }
 }
