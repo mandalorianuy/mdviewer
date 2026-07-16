@@ -184,12 +184,18 @@ fn stage_rejects_a_parent_replaced_with_a_symlink_after_scope_authorization() {
 
 #[test]
 fn source_opening_is_anchored_to_authorized_scope_handles() {
-    let source =
+    let jobs_source =
         fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/jobs.rs")).unwrap();
-    assert!(source.contains("struct AuthorizedScope"));
-    assert!(source.contains("libc::openat("));
-    assert!(source.contains("FILE_FLAG_BACKUP_SEMANTICS"));
-    assert!(source.contains("FILE_FLAG_OPEN_REPARSE_POINT"));
+    let state_source =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/state.rs")).unwrap();
+    assert!(jobs_source.contains("struct AuthorizedScope"));
+    assert!(jobs_source.contains("libc::openat("));
+    assert!(jobs_source.contains("windows_nt_open_relative"));
+    assert!(jobs_source.contains("root_directory"));
+    assert!(!jobs_source.contains("MoveFileExW"));
+    assert!(state_source.contains("NtCreateFile"));
+    assert!(state_source.contains("RootDirectory"));
+    assert!(state_source.contains("SetFileInformationByHandle"));
 }
 
 #[test]
@@ -198,8 +204,8 @@ fn windows_private_storage_has_explicit_owner_and_protected_user_only_dacl_proof
     let source = fs::read_to_string(manifest.join("src/jobs.rs")).unwrap();
     let cargo = fs::read_to_string(manifest.join("Cargo.toml")).unwrap();
     for api in [
-        "SetFileSecurityW",
-        "GetFileSecurityW",
+        "SetKernelObjectSecurity",
+        "GetKernelObjectSecurity",
         "SetSecurityDescriptorOwner",
         "SetSecurityDescriptorDacl",
         "PROTECTED_DACL_SECURITY_INFORMATION",

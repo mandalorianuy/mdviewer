@@ -140,7 +140,9 @@ fn save_publication_uses_atomic_compare_and_swap_primitives() {
     assert!(source.contains("RENAME_EXCHANGE"));
     assert!(source.contains("renameatx_np"));
     assert!(source.contains("RENAME_SWAP"));
-    assert!(source.contains("ReplaceFileW"));
+    assert!(source.contains("NtCreateFile"));
+    assert!(source.contains("RootDirectory"));
+    assert!(source.contains("SetFileInformationByHandle"));
 }
 
 #[cfg(unix)]

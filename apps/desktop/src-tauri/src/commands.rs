@@ -29,6 +29,7 @@ impl CommandError {
             "invalid_selection" => "selected path is no longer valid",
             "source_changed" => "selected source changed after authorization",
             "scope_changed" => "selected destination changed after authorization",
+            "recovery_required" => "publication rollback requires private artifact recovery",
             "invalid_operation_id" => "conversion ID is invalid",
             "conversion_already_running" => "conversion is already running",
             "conversion_not_running" => "conversion is not running",
@@ -207,7 +208,14 @@ pub fn warning_codes(state: &AppState, operation_id: &str) -> Result<Vec<String>
 
 pub fn claim_print_job(state: &AppState, id: &str) -> Result<ClaimedPrintJob, CommandError> {
     let id = PrintJobId::parse(id)?;
-    let job = state.jobs().claim(id)?;
+    let job = match state.jobs().claim(id) {
+        Ok(job) => job,
+        Err(JobError::AlreadyClaimed) => {
+            state.dequeue_print_job(id)?;
+            return Err(JobError::AlreadyClaimed.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     state.dequeue_print_job(id)?;
     Ok(ClaimedPrintJob {
         id: job.id.to_string(),

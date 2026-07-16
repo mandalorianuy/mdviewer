@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
@@ -7,6 +8,9 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::ffi::OsStr;
 
 use mdconvert_core::ConversionLimits;
 use serde::{Deserialize, Serialize};
@@ -152,6 +156,8 @@ impl JobError {
 #[derive(Debug, Clone)]
 pub struct PrintJobStore {
     root: PathBuf,
+    #[cfg(windows)]
+    root_directory: Arc<File>,
     authorized_scopes: Vec<AuthorizedScope>,
 }
 
@@ -183,6 +189,8 @@ impl PrintJobStore {
         create_private_directory(requested_root)?;
         let root = fs::canonicalize(requested_root).map_err(JobError::Io)?;
         validate_private_directory(&root, true)?;
+        #[cfg(windows)]
+        let root_directory = Arc::new(open_job_root_directory(&root).map_err(JobError::Io)?);
 
         let mut scopes = Vec::new();
         for scope in authorized_scopes {
@@ -214,6 +222,8 @@ impl PrintJobStore {
 
         Ok(Self {
             root,
+            #[cfg(windows)]
+            root_directory,
             authorized_scopes: scopes,
         })
     }
@@ -245,12 +255,23 @@ impl PrintJobStore {
 
         let id = PrintJobId::new();
         let nonce = Uuid::new_v4();
-        let temporary = self.root.join(format!(".stage-{id}-{nonce}"));
+        let temporary_name = OsString::from(format!(".stage-{id}-{nonce}"));
+        #[cfg(not(windows))]
+        let temporary = self.root.join(&temporary_name);
         let final_path = self.job_path(id, JobState::Staged);
+        #[cfg(windows)]
+        let temporary_directory =
+            create_private_windows_directory_relative(&self.root_directory, &temporary_name)?;
+        #[cfg(not(windows))]
         create_private_directory_new(&temporary)?;
 
         let result = (|| {
+            #[cfg(not(windows))]
             let input_pdf = temporary.join(INPUT_NAME);
+            #[cfg(windows)]
+            let mut staged =
+                create_private_windows_file_relative(&temporary_directory, OsStr::new(INPUT_NAME))?;
+            #[cfg(not(windows))]
             let mut staged = create_private_file(&input_pdf)?;
             let copied = io::copy(
                 &mut Read::by_ref(&mut source_file).take(max_bytes + 1),
@@ -278,15 +299,43 @@ impl PrintJobStore {
             };
             let mut bytes = serde_json::to_vec(&metadata).map_err(|_| JobError::InvalidMetadata)?;
             bytes.push(b'\n');
+            #[cfg(windows)]
+            let mut metadata_file = create_private_windows_file_relative(
+                &temporary_directory,
+                OsStr::new(METADATA_NAME),
+            )?;
+            #[cfg(not(windows))]
             let mut metadata_file = create_private_file(&temporary.join(METADATA_NAME))?;
             metadata_file.write_all(&bytes).map_err(JobError::Io)?;
             metadata_file.sync_all().map_err(JobError::Io)?;
-            sync_directory(&temporary)?;
-            rename_noreplace(&temporary, &final_path)?;
-            sync_directory(&self.root)?;
+            #[cfg(windows)]
+            {
+                temporary_directory.sync_all().map_err(JobError::Io)?;
+                crate::state::windows_rename_open_handle(
+                    &temporary_directory,
+                    &self.root_directory,
+                    final_path.file_name().ok_or(JobError::UnsafePath)?,
+                )
+                .map_err(JobError::Io)?;
+                self.root_directory.sync_all().map_err(JobError::Io)?;
+            }
+            #[cfg(not(windows))]
+            {
+                sync_directory(&temporary)?;
+                rename_noreplace(&temporary, &final_path)?;
+                sync_directory(&self.root)?;
+            }
             self.load_job(id, JobState::Staged)
         })();
 
+        #[cfg(windows)]
+        {
+            if result.is_err() {
+                let _ = remove_known_windows_directory(&temporary_directory);
+            }
+            drop(temporary_directory);
+        }
+        #[cfg(not(windows))]
         if result.is_err() && temporary.exists() {
             let _ = remove_known_directory(&temporary);
         }
@@ -305,8 +354,26 @@ impl PrintJobStore {
             return Err(JobError::NotFound);
         }
         self.load_job(id, JobState::Staged)?;
-        rename_noreplace(&staged, &claimed)?;
-        sync_directory(&self.root)?;
+        #[cfg(windows)]
+        {
+            let staged_directory = crate::state::windows_open_relative_for_mutation(
+                &self.root_directory,
+                staged.file_name().ok_or(JobError::UnsafePath)?,
+            )
+            .map_err(JobError::Io)?;
+            crate::state::windows_rename_open_handle(
+                &staged_directory,
+                &self.root_directory,
+                claimed.file_name().ok_or(JobError::UnsafePath)?,
+            )
+            .map_err(JobError::Io)?;
+            self.root_directory.sync_all().map_err(JobError::Io)?;
+        }
+        #[cfg(not(windows))]
+        {
+            rename_noreplace(&staged, &claimed)?;
+            sync_directory(&self.root)?;
+        }
         self.load_job(id, JobState::Claimed)
     }
 
@@ -452,6 +519,22 @@ impl PrintJobStore {
 
     fn load_job(&self, id: PrintJobId, state: JobState) -> Result<PrintJob, JobError> {
         let directory = self.job_path(id, state);
+        #[cfg(windows)]
+        let directory_handle = crate::state::windows_open_relative_for_mutation(
+            &self.root_directory,
+            directory.file_name().ok_or(JobError::UnsafePath)?,
+        )
+        .map_err(|_| JobError::UnsafePath)?;
+        #[cfg(windows)]
+        {
+            let metadata = directory_handle.metadata().map_err(JobError::Io)?;
+            if !metadata.is_dir() || is_reparse_or_symlink(&metadata) {
+                return Err(JobError::UnsafePath);
+            }
+            validate_private_windows_security_handle(&directory_handle, true)
+                .map_err(|_| JobError::UnsafePath)?;
+        }
+        #[cfg(not(windows))]
         validate_job_directory(&self.root, &directory)?;
 
         let mut entry_names = fs::read_dir(&directory)
@@ -476,6 +559,19 @@ impl PrintJobStore {
         }
 
         let input_pdf = directory.join(INPUT_NAME);
+        #[cfg(windows)]
+        let mut input =
+            open_private_windows_file_relative(&directory_handle, OsStr::new(INPUT_NAME)).map_err(
+                |error| match error {
+                    JobError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
+                        JobError::MissingInput
+                    }
+                    other => other,
+                },
+            )?;
+        #[cfg(windows)]
+        let input_metadata = input.metadata().map_err(JobError::Io)?;
+        #[cfg(not(windows))]
         let input_metadata = fs::symlink_metadata(&input_pdf).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 JobError::MissingInput
@@ -484,7 +580,9 @@ impl PrintJobStore {
             }
         })?;
         validate_regular_single_link_file(&input_metadata)?;
+        #[cfg(not(windows))]
         validate_private_file_permissions(&input_pdf, &input_metadata)?;
+        #[cfg(not(windows))]
         let mut input = open_read_no_follow(&input_pdf).map_err(JobError::Io)?;
         validate_open_file_links(&input)?;
         let mut signature = [0_u8; 5];
@@ -498,14 +596,25 @@ impl PrintJobStore {
         }
 
         let metadata_path = directory.join(METADATA_NAME);
+        #[cfg(windows)]
+        let metadata_file =
+            open_private_windows_file_relative(&directory_handle, OsStr::new(METADATA_NAME))
+                .map_err(|_| JobError::InvalidMetadata)?;
+        #[cfg(windows)]
+        let file_metadata = metadata_file
+            .metadata()
+            .map_err(|_| JobError::InvalidMetadata)?;
+        #[cfg(not(windows))]
         let file_metadata =
             fs::symlink_metadata(&metadata_path).map_err(|_| JobError::InvalidMetadata)?;
         validate_regular_single_link_file(&file_metadata).map_err(|_| JobError::InvalidMetadata)?;
+        #[cfg(not(windows))]
         validate_private_file_permissions(&metadata_path, &file_metadata)
             .map_err(|_| JobError::InvalidMetadata)?;
         if file_metadata.len() > MAX_METADATA_BYTES {
             return Err(JobError::InvalidMetadata);
         }
+        #[cfg(not(windows))]
         let metadata_file =
             open_read_no_follow(&metadata_path).map_err(|_| JobError::InvalidMetadata)?;
         validate_open_file_links(&metadata_file).map_err(|_| JobError::InvalidMetadata)?;
@@ -686,13 +795,48 @@ fn current_user_sid() -> Result<OwnedSid, JobError> {
 
 #[cfg(windows)]
 pub(crate) fn apply_private_windows_security(path: &Path, directory: bool) -> Result<(), JobError> {
-    use std::{mem::size_of, os::windows::ffi::OsStrExt};
+    let file = open_windows_security_handle(path, directory, true)?;
+    apply_private_windows_security_to_handle(&file, directory)
+}
+
+#[cfg(windows)]
+fn open_windows_security_handle(
+    path: &Path,
+    directory: bool,
+    write_security: bool,
+) -> Result<File, JobError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    };
+    let mut options = OpenOptions::new();
+    let mut access = READ_CONTROL;
+    if write_security {
+        access |= WRITE_DAC | WRITE_OWNER;
+    }
+    options
+        .access_mode(access)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    if directory {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    options.open(path).map_err(JobError::Io)
+}
+
+#[cfg(windows)]
+pub(crate) fn apply_private_windows_security_to_handle(
+    file: &File,
+    directory: bool,
+) -> Result<(), JobError> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
     use windows_sys::Win32::{
         Security::{
             ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE,
             DACL_SECURITY_INFORMATION, InitializeAcl, InitializeSecurityDescriptor,
             OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-            SECURITY_DESCRIPTOR, SetFileSecurityW, SetSecurityDescriptorDacl,
+            SECURITY_DESCRIPTOR, SetKernelObjectSecurity, SetSecurityDescriptorDacl,
             SetSecurityDescriptorOwner,
         },
         Storage::FileSystem::FILE_ALL_ACCESS,
@@ -728,18 +872,20 @@ pub(crate) fn apply_private_windows_security(path: &Path, directory: bool) -> Re
     {
         return Err(JobError::Io(io::Error::last_os_error()));
     }
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
     let information = OWNER_SECURITY_INFORMATION
         | DACL_SECURITY_INFORMATION
         | PROTECTED_DACL_SECURITY_INFORMATION;
-    if unsafe { SetFileSecurityW(wide.as_ptr(), information, (&raw mut descriptor).cast()) } == 0 {
+    if unsafe {
+        SetKernelObjectSecurity(
+            file.as_raw_handle().cast(),
+            information,
+            (&raw mut descriptor).cast(),
+        )
+    } == 0
+    {
         return Err(JobError::Io(io::Error::last_os_error()));
     }
-    validate_private_windows_security(path, directory)
+    validate_private_windows_security_handle(file, directory)
 }
 
 #[cfg(windows)]
@@ -747,12 +893,21 @@ pub(crate) fn validate_private_windows_security(
     path: &Path,
     directory: bool,
 ) -> Result<(), JobError> {
-    use std::{mem::size_of, os::windows::ffi::OsStrExt, ptr};
+    let file = open_windows_security_handle(path, directory, false)?;
+    validate_private_windows_security_handle(&file, directory)
+}
+
+#[cfg(windows)]
+pub(crate) fn validate_private_windows_security_handle(
+    file: &File,
+    directory: bool,
+) -> Result<(), JobError> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle, ptr};
     use windows_sys::Win32::{
         Security::{
             ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
             CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
-            GetFileSecurityW, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+            GetKernelObjectSecurity, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
             GetSecurityDescriptorOwner, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSID,
             SE_DACL_PROTECTED,
         },
@@ -761,22 +916,31 @@ pub(crate) fn validate_private_windows_security(
     };
 
     let sid = current_user_sid()?;
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
     let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
     let mut needed = 0_u32;
     unsafe {
-        GetFileSecurityW(wide.as_ptr(), information, ptr::null_mut(), 0, &mut needed);
+        GetKernelObjectSecurity(
+            file.as_raw_handle().cast(),
+            information,
+            ptr::null_mut(),
+            0,
+            &mut needed,
+        );
     }
     if needed == 0 {
         return Err(JobError::Io(io::Error::last_os_error()));
     }
     let mut descriptor_storage = vec![0_usize; (needed as usize).div_ceil(size_of::<usize>())];
     let descriptor = descriptor_storage.as_mut_ptr().cast();
-    if unsafe { GetFileSecurityW(wide.as_ptr(), information, descriptor, needed, &mut needed) } == 0
+    if unsafe {
+        GetKernelObjectSecurity(
+            file.as_raw_handle().cast(),
+            information,
+            descriptor,
+            needed,
+            &mut needed,
+        )
+    } == 0
     {
         return Err(JobError::Io(io::Error::last_os_error()));
     }
@@ -897,6 +1061,7 @@ fn validate_job_directory(root: &Path, directory: &Path) -> Result<(), JobError>
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn create_private_file(path: &Path) -> Result<File, JobError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -918,6 +1083,117 @@ fn create_private_file(path: &Path) -> Result<File, JobError> {
     #[cfg(windows)]
     apply_private_windows_security(path, false)?;
     Ok(file)
+}
+
+#[cfg(windows)]
+fn open_job_root_directory(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn create_private_windows_directory_relative(
+    parent: &File,
+    name: &OsStr,
+) -> Result<File, JobError> {
+    use windows_sys::{
+        Wdk::Storage::FileSystem::FILE_CREATE,
+        Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+            WRITE_OWNER,
+        },
+    };
+    let directory = crate::state::windows_nt_open_relative(
+        parent,
+        name,
+        FILE_GENERIC_READ
+            | FILE_GENERIC_WRITE
+            | DELETE
+            | SYNCHRONIZE
+            | READ_CONTROL
+            | WRITE_DAC
+            | WRITE_OWNER,
+        FILE_CREATE,
+        Some(true),
+    )
+    .map_err(JobError::Io)?;
+    if let Err(error) = apply_private_windows_security_to_handle(&directory, true) {
+        let _ = crate::state::windows_delete_open_handle(&directory);
+        return Err(error);
+    }
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn create_private_windows_file_relative(parent: &File, name: &OsStr) -> Result<File, JobError> {
+    use windows_sys::{
+        Wdk::Storage::FileSystem::FILE_CREATE,
+        Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+            WRITE_OWNER,
+        },
+    };
+    let file = crate::state::windows_nt_open_relative(
+        parent,
+        name,
+        FILE_GENERIC_READ
+            | FILE_GENERIC_WRITE
+            | DELETE
+            | SYNCHRONIZE
+            | READ_CONTROL
+            | WRITE_DAC
+            | WRITE_OWNER,
+        FILE_CREATE,
+        Some(false),
+    )
+    .map_err(JobError::Io)?;
+    if let Err(error) = apply_private_windows_security_to_handle(&file, false) {
+        let _ = crate::state::windows_delete_open_handle(&file);
+        return Err(error);
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_private_windows_file_relative(parent: &File, name: &OsStr) -> Result<File, JobError> {
+    use windows_sys::{
+        Wdk::Storage::FileSystem::FILE_OPEN,
+        Win32::Storage::FileSystem::{FILE_GENERIC_READ, SYNCHRONIZE},
+    };
+    let file = crate::state::windows_nt_open_relative(
+        parent,
+        name,
+        FILE_GENERIC_READ | SYNCHRONIZE,
+        FILE_OPEN,
+        Some(false),
+    )
+    .map_err(JobError::Io)?;
+    let metadata = file.metadata().map_err(JobError::Io)?;
+    if !metadata.is_file() || is_reparse_or_symlink(&metadata) {
+        return Err(JobError::UnsafePath);
+    }
+    validate_private_windows_security_handle(&file, false)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn remove_known_windows_directory(directory: &File) -> Result<(), JobError> {
+    for name in [INPUT_NAME, METADATA_NAME] {
+        match crate::state::windows_open_relative_for_mutation(directory, OsStr::new(name)) {
+            Ok(file) => crate::state::windows_delete_open_handle(&file).map_err(JobError::Io)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(JobError::Io(error)),
+        }
+    }
+    crate::state::windows_delete_open_handle(directory).map_err(JobError::Io)
 }
 
 fn open_scope_directory(path: &Path) -> io::Result<File> {
@@ -1004,9 +1280,9 @@ fn open_source_beneath(scope: &AuthorizedScope, relative: &Path) -> Result<File,
 
 #[cfg(windows)]
 fn open_source_beneath(scope: &AuthorizedScope, relative: &Path) -> Result<File, JobError> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    use windows_sys::{
+        Wdk::Storage::FileSystem::FILE_OPEN,
+        Win32::Storage::FileSystem::{FILE_GENERIC_READ, SYNCHRONIZE},
     };
     let scope_metadata = scope.directory.metadata().map_err(JobError::Io)?;
     if !scope_metadata.is_dir() || is_reparse_or_symlink(&scope_metadata) {
@@ -1019,24 +1295,18 @@ fn open_source_beneath(scope: &AuthorizedScope, relative: &Path) -> Result<File,
             _ => Err(JobError::UnsafePath),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut path = scope.path.clone();
     let mut opened_directories = Vec::<File>::new();
     for (index, component) in components.iter().enumerate() {
-        path.push(component);
         let final_component = index + 1 == components.len();
-        let mut options = OpenOptions::new();
-        options.read(true).custom_flags(
-            FILE_FLAG_OPEN_REPARSE_POINT
-                | if final_component {
-                    0
-                } else {
-                    FILE_FLAG_BACKUP_SEMANTICS
-                },
-        );
-        if !final_component {
-            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
-        }
-        let opened = options.open(&path).map_err(|error| match error.kind() {
+        let parent = opened_directories.last().unwrap_or(&scope.directory);
+        let opened = crate::state::windows_nt_open_relative(
+            parent,
+            component,
+            FILE_GENERIC_READ | SYNCHRONIZE,
+            FILE_OPEN,
+            Some(!final_component),
+        )
+        .map_err(|error| match error.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => {
                 JobError::UnauthorizedSource
             }
@@ -1204,6 +1474,7 @@ fn remove_known_job_directory(path: &Path) -> Result<(), JobError> {
     fs::remove_dir(path).map_err(JobError::Io)
 }
 
+#[cfg(not(windows))]
 fn remove_known_directory(path: &Path) -> Result<(), JobError> {
     for name in [INPUT_NAME, METADATA_NAME] {
         let child = path.join(name);
@@ -1290,31 +1561,4 @@ fn rename_noreplace(from: &Path, to: &Path) -> Result<(), JobError> {
         )));
     }
     fs::rename(from, to).map_err(JobError::Io)
-}
-
-#[cfg(windows)]
-fn rename_noreplace(from: &Path, to: &Path) -> Result<(), JobError> {
-    use std::os::windows::ffi::OsStrExt;
-    let from = from
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let to = to
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let result = unsafe {
-        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(JobError::Io(io::Error::last_os_error()))
-    }
 }
