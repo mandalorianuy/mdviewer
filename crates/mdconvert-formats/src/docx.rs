@@ -93,7 +93,10 @@ impl Converter for DocxConverter {
             }
             index += 1;
         }
-        let metadata = core_metadata(&archive)?;
+        let mut metadata = core_metadata(&archive)?;
+        metadata
+            .properties
+            .insert("ooxml_profile".into(), "transitional_only".into());
         Ok(Document {
             metadata: DocumentMetadata {
                 source_format: Some("docx".into()),
@@ -246,9 +249,8 @@ fn append_inline_content(
         let anchor = node
             .attr_ns(Some(W_NS), "anchor")
             .map(|value| format!("#{value}"));
-        let relationship = node
-            .attr_ns(Some(R_NS), "id")
-            .and_then(|id| context.rels.get(id));
+        let relationship_id = node.attr_ns(Some(R_NS), "id");
+        let relationship = relationship_id.and_then(|id| context.rels.get(id));
         let target = anchor.or_else(|| relationship.map(|value| value.target.clone()));
         if relationship.is_some_and(|value| value.external) {
             push_warning(
@@ -264,11 +266,11 @@ fn append_inline_content(
                 content: label,
             });
         } else {
-            if target.is_some() {
+            if target.is_some() || relationship_id.is_some() {
                 push_warning(
                     context.warnings,
                     WarningCode::InvalidLinkSkipped,
-                    "Unsafe DOCX hyperlink was preserved as text".into(),
+                    "Invalid or missing DOCX hyperlink was preserved as text".into(),
                 );
             }
             output.extend(label);
@@ -284,7 +286,7 @@ fn append_inline_content(
 fn push_warning(warnings: &mut Vec<ConversionWarning>, code: WarningCode, message: String) {
     if !warnings
         .iter()
-        .any(|warning| warning.code == code && warning.message == message && warning.page.is_none())
+        .any(|warning| warning.code == code && warning.page.is_none())
     {
         warnings.push(ConversionWarning {
             code,
@@ -327,13 +329,14 @@ fn add_related_image(
 }
 
 fn safe_link(target: &str) -> bool {
-    target.starts_with('#')
-        || (!target.contains(':')
-            && !target.starts_with('/')
-            && !target
-                .replace('\\', "/")
-                .split('/')
-                .any(|part| part == ".."))
+    if target.starts_with('#') {
+        return true;
+    }
+    let normalized = target.replace('\\', "/");
+    !normalized.contains(':')
+        && !normalized.starts_with('/')
+        && !normalized.starts_with("//")
+        && !normalized.split('/').any(|part| part == "..")
 }
 
 fn build_list(paragraphs: &[Paragraph], cursor: &mut usize, level: u32) -> Block {

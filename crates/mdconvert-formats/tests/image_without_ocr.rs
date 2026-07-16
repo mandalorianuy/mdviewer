@@ -45,7 +45,7 @@ fn png(width: u32, height: u32, text: Option<(&str, &str)>) -> Vec<u8> {
     png_chunk(
         &mut output,
         b"IDAT",
-        &[0x78, 0x9c, 0x63, 0x60, 0x60, 0x60, 0, 0, 0, 5, 0, 1],
+        &[0x78, 0x9c, 0x63, 0x60, 0, 2, 0, 0, 5, 0, 1],
     );
     png_chunk(&mut output, b"IEND", &[]);
     output
@@ -62,6 +62,16 @@ fn jpeg(width: u16, height: u16) -> Vec<u8> {
     output.extend_from_slice(&width.to_be_bytes());
     output.extend_from_slice(&[3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
     output.extend_from_slice(&[0xff, 0xda, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 63, 0, 0]);
+    output.extend_from_slice(&[0xff, 0xd9]);
+    output
+}
+
+fn multiscan_jpeg() -> Vec<u8> {
+    let mut output = vec![0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1, 3];
+    output.extend_from_slice(&[1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+    for component in [1, 2, 3] {
+        output.extend_from_slice(&[0xff, 0xda, 0, 8, 1, component, 0, 0, 63, 0, 0]);
+    }
     output.extend_from_slice(&[0xff, 0xd9]);
     output
 }
@@ -112,6 +122,66 @@ fn jpeg_requires_a_frame_scan_entropy_and_terminal_eoi() {
         ImageConverter.convert(&request(truncated)),
         Err(ConversionError::CorruptInput { .. })
     ));
+}
+
+#[test]
+fn jpeg_validates_frame_components_scan_parameters_and_multiscan_state() {
+    let temp = TempDir::new().unwrap();
+    let mut cases = Vec::new();
+
+    let mut bad_components = jpeg(1, 1);
+    let sof = bad_components
+        .windows(2)
+        .position(|window| window == [0xff, 0xc0])
+        .unwrap();
+    bad_components[sof + 9] = 1;
+    cases.push(("sof-components", bad_components));
+
+    let mut bad_selector = jpeg(1, 1);
+    let sos = bad_selector
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .unwrap();
+    bad_selector[sos + 5] = 9;
+    cases.push(("sos-selector", bad_selector));
+
+    let mut bad_spectral = jpeg(1, 1);
+    let sos = bad_spectral
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .unwrap();
+    bad_spectral[sos + 12] = 62;
+    cases.push(("sos-spectral", bad_spectral));
+
+    let mut bad_fill = jpeg(1, 1);
+    let eoi = bad_fill
+        .windows(2)
+        .position(|window| window == [0xff, 0xd9])
+        .unwrap();
+    bad_fill.splice(eoi - 1..eoi, [0xff, 0xff, 0x00]);
+    cases.push(("entropy-fill-before-stuffing", bad_fill));
+
+    let progressive_refinement_without_initial = vec![
+        0xff, 0xd8, 0xff, 0xc2, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0, 0xff, 0xda, 0, 8, 1, 1, 0, 0,
+        0, 0x21, 0, 0xff, 0xd9,
+    ];
+    cases.push((
+        "progressive-refinement-without-initial-scan",
+        progressive_refinement_without_initial,
+    ));
+
+    for (name, bytes) in cases {
+        let path = temp.path().join(format!("{name}.jpg"));
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            ImageConverter.convert(&request(path)),
+            Err(ConversionError::CorruptInput { .. })
+        ));
+    }
+
+    let valid = temp.path().join("multiscan.jpg");
+    fs::write(&valid, multiscan_jpeg()).unwrap();
+    assert!(ImageConverter.convert(&request(valid)).is_ok());
 }
 
 #[test]
@@ -210,6 +280,40 @@ fn corrupt_png_crc_is_rejected() {
 
     assert!(matches!(
         ImageConverter.convert(&request(path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn png_requires_a_valid_bounded_image_data_stream() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("invalid-idat.png");
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    png_chunk(&mut bytes, b"IHDR", &ihdr);
+    png_chunk(&mut bytes, b"IDAT", b"not-a-zlib-stream");
+    png_chunk(&mut bytes, b"IEND", &[]);
+    fs::write(&path, bytes).unwrap();
+
+    assert!(matches!(
+        ImageConverter.convert(&request(path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let split = temp.path().join("noncontiguous-idat.png");
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    png_chunk(&mut bytes, b"IHDR", &ihdr);
+    let compressed = [0x78, 0x9c, 0x63, 0x60, 0, 2, 0, 0, 5, 0, 1];
+    png_chunk(&mut bytes, b"IDAT", &compressed[..6]);
+    png_chunk(&mut bytes, b"tEXt", b"Comment\0separator");
+    png_chunk(&mut bytes, b"IDAT", &compressed[6..]);
+    png_chunk(&mut bytes, b"IEND", &[]);
+    fs::write(&split, bytes).unwrap();
+    assert!(matches!(
+        ImageConverter.convert(&request(split)),
         Err(ConversionError::CorruptInput { .. })
     ));
 }

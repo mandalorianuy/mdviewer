@@ -46,6 +46,30 @@ impl ImageLimits {
     }
 }
 
+pub(crate) fn validate_embedded_image(
+    bytes: &[u8],
+    media_type: &str,
+) -> Result<&'static str, ConversionError> {
+    let limits = ImageLimits::default();
+    limits.validate()?;
+    let parsed = match media_type {
+        "image/png" => parse_png(bytes, &limits)?,
+        "image/jpeg" => parse_jpeg(bytes, &limits)?,
+        _ => {
+            return Err(corrupt_error(format!(
+                "unsupported embedded image media type {media_type:?}; local v1 accepts PNG/JPEG"
+            )));
+        }
+    };
+    if parsed.media_type != media_type {
+        return Err(corrupt_error(
+            "embedded image media type mismatches its bytes",
+        ));
+    }
+    validate_dimensions(parsed.width, parsed.height, &limits)?;
+    Ok(parsed.canonical_extension)
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ImageConverter;
 
@@ -179,6 +203,10 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
     let mut width = None;
     let mut height = None;
     let mut idat = false;
+    let mut idat_ended = false;
+    let mut idat_data = Vec::new();
+    let mut layout = None;
+    let mut palette = false;
     let mut ended = false;
     let mut metadata = BTreeMap::new();
     let mut semantic_text = false;
@@ -202,6 +230,9 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
                 String::from_utf8_lossy(kind)
             )));
         }
+        if idat && kind != b"IDAT" && kind != b"IEND" {
+            idat_ended = true;
+        }
         match kind {
             b"IHDR" => {
                 if width.is_some() || chunks != 1 || data.len() != 13 {
@@ -216,8 +247,43 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
                 if width == Some(0) || height == Some(0) {
                     return Err(corrupt_error("PNG dimensions must be nonzero"));
                 }
+                validate_dimensions(
+                    width.expect("set above"),
+                    height.expect("set above"),
+                    limits,
+                )?;
+                let bit_depth = data[8];
+                let color_type = data[9];
+                let channels = match (color_type, bit_depth) {
+                    (0, 1 | 2 | 4 | 8 | 16) => 1u8,
+                    (2, 8 | 16) => 3u8,
+                    (3, 1 | 2 | 4 | 8) => 1u8,
+                    (4, 8 | 16) => 2u8,
+                    (6, 8 | 16) => 4u8,
+                    _ => return Err(corrupt_error("unsupported PNG color type/bit depth")),
+                };
+                if data[10] != 0 || data[11] != 0 || data[12] != 0 {
+                    return Err(corrupt_error(
+                        "unsupported PNG compression, filter, or interlace method",
+                    ));
+                }
+                layout = Some((bit_depth, channels, color_type));
             }
-            b"IDAT" => idat = true,
+            b"PLTE" => {
+                if idat || data.is_empty() || data.len() > 768 || data.len() % 3 != 0 {
+                    return Err(corrupt_error("invalid PNG palette"));
+                }
+                palette = true;
+            }
+            b"IDAT" => {
+                if width.is_none() || idat_ended {
+                    return Err(corrupt_error(
+                        "PNG IDAT chunks must be contiguous after IHDR",
+                    ));
+                }
+                idat = true;
+                idat_data.extend_from_slice(data);
+            }
             b"tEXt" => {
                 add_metadata_bytes(&mut metadata_bytes, data.len(), limits)?;
                 let (key, value) = split_nul(data, "PNG tEXt")?;
@@ -311,29 +377,88 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
     if !ended || !idat {
         return Err(corrupt_error("PNG is missing IDAT or IEND"));
     }
+    let (bit_depth, channels, color_type) =
+        layout.ok_or_else(|| corrupt_error("PNG is missing IHDR layout"))?;
+    if color_type == 3 && !palette {
+        return Err(corrupt_error("indexed PNG is missing PLTE"));
+    }
+    let width_value = width.expect("validated IHDR width");
+    let height_value = height.expect("validated IHDR height");
+    let row_bits = u64::from(width_value)
+        .checked_mul(u64::from(channels))
+        .and_then(|value| value.checked_mul(u64::from(bit_depth)))
+        .ok_or_else(|| corrupt_error("PNG row size overflow"))?;
+    let row_bytes = row_bits
+        .checked_add(7)
+        .map(|value| value / 8)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| corrupt_error("PNG row size overflow"))?;
+    let expected = row_bytes
+        .checked_mul(u64::from(height_value))
+        .ok_or_else(|| corrupt_error("PNG image data size overflow"))?;
+    let mut decoder = ZlibDecoder::new(idat_data.as_slice());
+    let mut decoded = 0u64;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = decoder
+            .read(&mut buffer)
+            .map_err(|error| corrupt_error(format!("invalid PNG IDAT stream: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        decoded = decoded
+            .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
+            .ok_or_else(|| corrupt_error("PNG image data size overflow"))?;
+        if decoded > expected {
+            return Err(corrupt_error(
+                "PNG IDAT expands beyond its declared dimensions",
+            ));
+        }
+    }
+    if decoded != expected
+        || decoder.total_in() != u64::try_from(idat_data.len()).unwrap_or(u64::MAX)
+    {
+        return Err(corrupt_error(
+            "PNG IDAT size or compressed-stream boundary is invalid",
+        ));
+    }
     Ok(ParsedImage {
         format: "png",
         extensions: &["png"],
         canonical_extension: "png",
         media_type: "image/png",
-        width: width.ok_or_else(|| corrupt_error("PNG is missing IHDR"))?,
-        height: height.ok_or_else(|| corrupt_error("PNG is missing IHDR"))?,
+        width: width_value,
+        height: height_value,
         metadata,
         semantic_text,
     })
 }
 
 fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, ConversionError> {
+    #[derive(Clone)]
+    struct Frame {
+        progressive: bool,
+        components: Vec<u8>,
+    }
+
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return Err(corrupt_error("JPEG is missing SOI"));
+    }
     let mut cursor = 2usize;
     let mut segments = 0u64;
     let mut metadata_bytes = 0u64;
     let mut dimensions = None;
+    let mut frame: Option<Frame> = None;
     let mut metadata = BTreeMap::new();
     let mut comments = 0u64;
     let mut ended = false;
-    let mut saw_scan = false;
-    let mut entropy_bytes = 0u64;
+    let mut scans = 0u64;
+    let mut sequential_components = std::collections::HashSet::new();
+    let mut progressive_coefficients = std::collections::HashMap::new();
     while cursor < bytes.len() {
+        if bytes.get(cursor) != Some(&0xff) {
+            return Err(corrupt_error("JPEG marker is missing its 0xFF prefix"));
+        }
         while bytes.get(cursor) == Some(&0xff) {
             cursor += 1;
         }
@@ -342,40 +467,128 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
             .ok_or_else(|| corrupt_error("truncated JPEG marker"))?;
         cursor += 1;
         if marker == 0xd9 {
-            ended = cursor == bytes.len();
+            ended = cursor == bytes.len() && scans > 0;
             break;
         }
         if marker == 0xda {
-            if dimensions.is_none() || saw_scan {
+            let frame = frame
+                .as_ref()
+                .ok_or_else(|| corrupt_error("JPEG scan precedes its frame"))?;
+            scans = checked_counter(scans, limits.max_chunks_or_segments, "image_segments")?;
+            let length = usize::from(read_be_u16(bytes, cursor)?);
+            let data_start = checked_add(cursor, 2, "JPEG scan header")?;
+            let data_end = checked_add(cursor, length, "JPEG scan header")?;
+            let data = slice(bytes, data_start, data_end, "JPEG scan header")?;
+            let component_count = usize::from(
+                *data
+                    .first()
+                    .ok_or_else(|| corrupt_error("truncated JPEG scan header"))?,
+            );
+            if component_count == 0
+                || component_count > frame.components.len()
+                || data.len() != 4 + component_count * 2
+            {
+                return Err(corrupt_error("JPEG scan header length/components disagree"));
+            }
+            let mut selectors = std::collections::HashSet::new();
+            for component in 0..component_count {
+                let selector = data[1 + component * 2];
+                let tables = data[2 + component * 2];
+                if !frame.components.contains(&selector)
+                    || !selectors.insert(selector)
+                    || tables >> 4 > 3
+                    || tables & 0x0f > 3
+                {
+                    return Err(corrupt_error("invalid JPEG scan component/table selector"));
+                }
+            }
+            let parameters = &data[data.len() - 3..];
+            let (spectral_start, spectral_end, approximation) =
+                (parameters[0], parameters[1], parameters[2]);
+            let high = approximation >> 4;
+            let low = approximation & 0x0f;
+            if frame.progressive {
+                if spectral_start > spectral_end
+                    || spectral_end > 63
+                    || (spectral_start == 0 && spectral_end != 0)
+                    || (spectral_start > 0 && component_count != 1)
+                    || high > 13
+                    || low > 13
+                    || (high != 0 && high != low + 1)
+                {
+                    return Err(corrupt_error("invalid progressive JPEG scan parameters"));
+                }
+                for selector in &selectors {
+                    for coefficient in spectral_start..=spectral_end {
+                        let key = (*selector, coefficient);
+                        if high == 0 {
+                            if progressive_coefficients.insert(key, low).is_some() {
+                                return Err(corrupt_error(
+                                    "duplicate initial progressive JPEG coefficient scan",
+                                ));
+                            }
+                        } else if progressive_coefficients.get(&key) != Some(&high) {
+                            return Err(corrupt_error(
+                                "progressive JPEG refinement has no matching prior scan",
+                            ));
+                        } else {
+                            progressive_coefficients.insert(key, low);
+                        }
+                    }
+                }
+            } else if spectral_start != 0 || spectral_end != 63 || high != 0 || low != 0 {
+                return Err(corrupt_error("invalid sequential JPEG scan parameters"));
+            } else if selectors
+                .iter()
+                .any(|selector| !sequential_components.insert(*selector))
+            {
                 return Err(corrupt_error(
-                    "JPEG scan must follow exactly one supported frame",
+                    "sequential JPEG component appears in multiple scans",
                 ));
             }
-            saw_scan = true;
-            let length = usize::from(read_be_u16(bytes, cursor)?);
-            if length < 2 {
-                return Err(corrupt_error("invalid JPEG scan header length"));
-            }
-            cursor = checked_add(cursor, length, "JPEG scan header")?;
-            while cursor + 1 < bytes.len() {
-                if bytes[cursor] == 0xff && bytes[cursor + 1] == 0xd9 {
-                    cursor += 2;
-                    ended = cursor == bytes.len();
+            cursor = data_end;
+            let mut entropy_bytes = 0u64;
+            loop {
+                let byte = *bytes
+                    .get(cursor)
+                    .ok_or_else(|| corrupt_error("truncated JPEG entropy data"))?;
+                if byte != 0xff {
+                    entropy_bytes = entropy_bytes.saturating_add(1);
+                    cursor += 1;
+                    continue;
+                }
+                let marker_start = cursor;
+                while bytes.get(cursor) == Some(&0xff) {
+                    cursor += 1;
+                }
+                let next = *bytes
+                    .get(cursor)
+                    .ok_or_else(|| corrupt_error("truncated JPEG entropy marker"))?;
+                if next == 0x00 {
+                    if cursor - marker_start != 1 {
+                        return Err(corrupt_error(
+                            "JPEG entropy byte stuffing must be exactly 0xFF00",
+                        ));
+                    }
+                    entropy_bytes = entropy_bytes.saturating_add(1);
+                    cursor += 1;
+                } else if (0xd0..=0xd7).contains(&next) {
+                    cursor += 1;
+                } else {
+                    cursor = marker_start;
                     break;
                 }
-                if bytes[cursor] == 0xff
-                    && bytes[cursor + 1] != 0
-                    && !(0xd0..=0xd7).contains(&bytes[cursor + 1])
-                {
-                    return Err(corrupt_error("unsupported marker inside JPEG entropy data"));
-                }
-                entropy_bytes = entropy_bytes.saturating_add(1);
-                cursor += 1;
             }
-            break;
-        }
-        if matches!(marker, 0x01 | 0xd0..=0xd8) {
+            if entropy_bytes == 0 {
+                return Err(corrupt_error("JPEG scan has no entropy-coded data"));
+            }
             continue;
+        }
+        if marker == 0x01 {
+            continue;
+        }
+        if marker == 0x00 || matches!(marker, 0xd0..=0xd8) {
+            return Err(corrupt_error("invalid standalone JPEG marker position"));
         }
         segments = checked_counter(segments, limits.max_chunks_or_segments, "image_segments")?;
         let length = usize::from(read_be_u16(bytes, cursor)?);
@@ -385,19 +598,50 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
         let data_start = checked_add(cursor, 2, "JPEG segment")?;
         let data_end = checked_add(cursor, length, "JPEG segment")?;
         let data = slice(bytes, data_start, data_end, "JPEG segment")?;
-        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
-            if data.len() < 5 {
-                return Err(corrupt_error("truncated JPEG frame header"));
-            }
-            if dimensions.is_some() {
+        if matches!(marker, 0xc0 | 0xc2) {
+            if frame.is_some() {
                 return Err(corrupt_error(
                     "JPEG contains multiple supported frame headers",
                 ));
             }
-            dimensions = Some((
-                u32::from(u16::from_be_bytes([data[3], data[4]])),
-                u32::from(u16::from_be_bytes([data[1], data[2]])),
-            ));
+            let component_count = usize::from(
+                *data
+                    .get(5)
+                    .ok_or_else(|| corrupt_error("truncated JPEG frame header"))?,
+            );
+            if data.first() != Some(&8)
+                || !(1..=4).contains(&component_count)
+                || data.len() != 6 + component_count * 3
+            {
+                return Err(corrupt_error("JPEG frame length/components disagree"));
+            }
+            let height = u32::from(u16::from_be_bytes([data[1], data[2]]));
+            let width = u32::from(u16::from_be_bytes([data[3], data[4]]));
+            let mut components = Vec::with_capacity(component_count);
+            for component in 0..component_count {
+                let offset = 6 + component * 3;
+                let id = data[offset];
+                let sampling = data[offset + 1];
+                if components.contains(&id)
+                    || sampling >> 4 == 0
+                    || sampling >> 4 > 4
+                    || sampling & 0x0f == 0
+                    || sampling & 0x0f > 4
+                    || data[offset + 2] > 3
+                {
+                    return Err(corrupt_error("invalid JPEG frame component descriptor"));
+                }
+                components.push(id);
+            }
+            dimensions = Some((width, height));
+            frame = Some(Frame {
+                progressive: marker == 0xc2,
+                components,
+            });
+        } else if matches!(marker, 0xc1 | 0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+            return Err(ConversionError::UnsupportedFormat {
+                format: format!("JPEG coding marker 0x{marker:02x}"),
+            });
         } else if marker == 0xfe {
             add_metadata_bytes(&mut metadata_bytes, data.len(), limits)?;
             comments = comments.checked_add(1).ok_or_else(|| {
@@ -418,8 +662,24 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
         }
         cursor = data_end;
     }
-    if !ended || !saw_scan || entropy_bytes == 0 {
+    if !ended || scans == 0 {
         return Err(corrupt_error("JPEG is truncated or has trailing bytes"));
+    }
+    let frame = frame.expect("a scan cannot exist without a frame");
+    if frame.progressive {
+        if frame
+            .components
+            .iter()
+            .any(|component| !progressive_coefficients.contains_key(&(*component, 0)))
+        {
+            return Err(corrupt_error(
+                "progressive JPEG is missing an initial DC scan",
+            ));
+        }
+    } else if sequential_components.len() != frame.components.len() {
+        return Err(corrupt_error(
+            "sequential JPEG does not scan every frame component",
+        ));
     }
     let (width, height) =
         dimensions.ok_or_else(|| corrupt_error("JPEG contains no supported frame dimensions"))?;

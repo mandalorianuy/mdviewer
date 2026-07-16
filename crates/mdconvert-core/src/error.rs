@@ -35,6 +35,8 @@ pub enum ConversionError {
     },
     #[error("unsupported format: {format}")]
     UnsupportedFormat { format: String },
+    #[error("unsupported input: {message}")]
+    UnsupportedInput { message: String },
     #[error("corrupt input: {message}")]
     CorruptInput { message: String },
     #[error("encrypted input is not supported")]
@@ -57,6 +59,7 @@ impl ConversionError {
             Self::InvalidRequest(_) => "invalid_request",
             Self::Io { .. } => "io",
             Self::UnsupportedFormat { .. } => "unsupported_format",
+            Self::UnsupportedInput { .. } => "unsupported_input",
             Self::CorruptInput { .. } => "corrupt_input",
             Self::EncryptedInput => "encrypted_input",
             Self::LimitExceeded { .. } => "limit_exceeded",

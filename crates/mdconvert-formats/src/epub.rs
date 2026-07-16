@@ -78,7 +78,7 @@ impl EpubAssets {
                 maximum: request.limits.max_input_bytes,
             });
         }
-        let extension = epub_image_extension(media_type, &entry.data)?;
+        let extension = crate::image::validate_embedded_image(&entry.data, media_type)?;
         let id = AssetId::new(format!("epub-image-{actual:03}"))?;
         let source = format!("mdconvert-asset:epub-{actual:03}");
         self.refs.insert(source.clone(), id.clone());
@@ -91,22 +91,6 @@ impl EpubAssets {
         });
         self.total_bytes = total;
         Ok(source)
-    }
-}
-
-fn epub_image_extension(media_type: &str, bytes: &[u8]) -> Result<&'static str, ConversionError> {
-    match media_type {
-        "image/png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Ok("png"),
-        "image/jpeg" if bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]) => {
-            Ok("jpg")
-        }
-        "image/gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Ok("gif"),
-        "image/webp" if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => {
-            Ok("webp")
-        }
-        _ => Err(corrupt_error(format!(
-            "unsupported or signature-mismatched EPUB image type {media_type:?}"
-        ))),
     }
 }
 
@@ -158,6 +142,8 @@ impl Converter for EpubConverter {
             .child_ns(OPF_NS, "manifest")
             .ok_or_else(|| corrupt_error("EPUB package has no manifest"))?;
         let mut manifest = HashMap::new();
+        let mut manifest_by_path = HashMap::new();
+        let mut nav = None;
         for item in manifest_node
             .children()
             .filter(|node| node.is(OPF_NS, "item"))
@@ -169,19 +155,30 @@ impl Converter for EpubConverter {
             let href = required_attr(item, "href", "EPUB manifest item")?;
             let path = resolve_package_path(&opf_path, href)?;
             archive.entry(&path)?;
-            manifest.insert(
-                id.clone(),
-                ManifestItem {
-                    path,
-                    media_type: required_attr(item, "media-type", "EPUB manifest item")?.to_owned(),
-                    properties: item
-                        .attr_ns(None, "properties")
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .map(ToOwned::to_owned)
-                        .collect(),
-                },
-            );
+            let manifest_item = ManifestItem {
+                path: path.clone(),
+                media_type: required_attr(item, "media-type", "EPUB manifest item")?.to_owned(),
+                properties: item
+                    .attr_ns(None, "properties")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .map(ToOwned::to_owned)
+                    .collect(),
+            };
+            if manifest_by_path
+                .insert(path.clone(), manifest_item.clone())
+                .is_some()
+            {
+                return Err(corrupt_error(format!(
+                    "duplicate EPUB manifest path {path:?}"
+                )));
+            }
+            if manifest_item.properties.contains("nav")
+                && nav.replace(manifest_item.clone()).is_some()
+            {
+                return Err(corrupt_error("EPUB manifest contains multiple nav items"));
+            }
+            manifest.insert(id, manifest_item);
         }
         let spine_node = package
             .child_ns(OPF_NS, "spine")
@@ -217,20 +214,19 @@ impl Converter for EpubConverter {
         let mut blocks = Vec::new();
         let mut assets = EpubAssets::new();
         let mut warnings = Vec::new();
-        if let Some(nav) = manifest
-            .values()
-            .find(|item| item.properties.contains("nav"))
-        {
+        if let Some(nav) = nav.as_ref() {
             blocks.push(Block::Heading {
                 level: 2,
                 content: vec![Inline::Text("Navigation".into())],
             });
-            let mut converted = convert_xhtml(&archive, nav, &manifest, request, &mut assets)?;
+            let mut converted =
+                convert_xhtml(&archive, nav, &manifest_by_path, request, &mut assets)?;
             blocks.append(&mut converted.blocks);
             warnings.append(&mut converted.warnings);
         }
         for item in &spine {
-            let mut converted = convert_xhtml(&archive, item, &manifest, request, &mut assets)?;
+            let mut converted =
+                convert_xhtml(&archive, item, &manifest_by_path, request, &mut assets)?;
             blocks.append(&mut converted.blocks);
             warnings.append(&mut converted.warnings);
         }
@@ -279,7 +275,14 @@ fn convert_xhtml(
             }
         })?,
     );
-    HtmlConverter.convert_bytes_with_asset_refs(&sanitized, &embedded_request, &assets.refs)
+    let converted =
+        HtmlConverter.convert_bytes_with_asset_refs(&sanitized, &embedded_request, &assets.refs)?;
+    if !converted.assets.is_empty() {
+        return Err(corrupt_error(
+            "EPUB XHTML created an unauthenticated HTML-owned asset",
+        ));
+    }
+    Ok(converted)
 }
 
 fn only_xhtml_elements(node: &XmlNode) -> bool {
@@ -366,19 +369,21 @@ fn sanitize_start(
             value
         } else if local == "img" && key_local == "src" {
             if external_reference(&value) {
-                value
-            } else {
-                let path = resolve_package_path(part, value.split('#').next().unwrap_or(""))?;
-                let item = manifest
-                    .values()
-                    .find(|item| item.path == path)
-                    .ok_or_else(|| {
-                        corrupt_error(format!(
-                            "EPUB image {path:?} is not authenticated by the manifest"
-                        ))
-                    })?;
-                assets.reference(archive, &path, &item.media_type, request)?
+                return Err(corrupt_error(format!(
+                    "EPUB image source {value:?} is not a package-local reference"
+                )));
             }
+            let raw_path = value.split('#').next().unwrap_or("");
+            if raw_path.trim().is_empty() {
+                return Err(corrupt_error("EPUB image source has no package part"));
+            }
+            let path = resolve_package_path(part, raw_path)?;
+            let item = manifest.get(&path).ok_or_else(|| {
+                corrupt_error(format!(
+                    "EPUB image {path:?} is not authenticated by the manifest"
+                ))
+            })?;
+            assets.reference(archive, &path, &item.media_type, request)?
         } else {
             value
         };

@@ -23,7 +23,9 @@ Markdown strings.
   using physical local-record order, resolves namespace-authenticated
   `container.xml`, OPF manifest/spine/navigation, and local assets inside the
   package, validates XHTML as strict XML, and passes direct bounded asset
-  references to the HTML byte converter without data-URL round trips.
+  references to the HTML byte converter without data-URL round trips. Image
+  sources accept only manifest-authenticated normalized package paths; authored
+  schemes and the private internal reference namespace fail closed.
 - DOCX: reads relationships, metadata, styles with `basedOn` inheritance,
   bounded iterative `basedOn` inheritance, numbering, headings, every
   successive nested-list run, paragraphs, bold/italic runs, tables, safe local
@@ -36,12 +38,16 @@ Markdown strings.
   strings, percentage display styles, and emits formulas as code alongside
   cached displayed values. A1 references, row/cell ordering, dimensions, sparse
   allocation, and external-data parts/relationships fail closed. Formula
-  contents are never evaluated.
+  contents are never evaluated; external-workbook and DDE references in cell
+  formulas or defined names are rejected before emission. The complete
+  materialized table rectangle is checked against the cell budget.
 - PNG/JPEG: preserves original local image assets, dimensions, and bounded
-  document-semantic metadata without decoding pixels. Width, height, and pixel
-  count are checked before allocation; JPEG requires a frame, scan, entropy,
-  and terminal EOI. Technical-only metadata does not suppress `OcrDeferred`;
-  Task 10 never invokes or requires OCR.
+  document-semantic metadata without raster rendering. Width, height, and pixel
+  count are checked before allocation. PNG validates chunk order, CRCs, bounded
+  image-data expansion, and exact stream boundaries. JPEG validates frame
+  components, scan selectors/parameters, stuffing/restarts, multiscan state,
+  entropy, and terminal EOI. Technical-only metadata does not suppress
+  `OcrDeferred`; Task 10 never invokes or requires OCR.
 
 The HTML crate gained a bounded `convert_bytes` entry point so EPUB and ZIP can
 reuse its semantic conversion without writing package members to disk.
@@ -61,9 +67,13 @@ package paths. Expanded XML names authenticate EPUB/OOXML envelopes,
 relationships, content types, main parts, and supported content. EPUB asset
 limits are cumulative across spine items and deduplicate only repeated part
 references. OOXML images require declared media types and matching binary
-signatures; SVG and external images fail closed. External links are never
-fetched. XLSX external links, connections, queries, and any external
-relationship fail closed.
+structural validation; local v1 accepts PNG/JPEG only, while GIF/BMP/WebP/SVG
+and external images fail closed. Relationship `TargetMode` is a closed enum,
+and missing/unsafe hyperlinks preserve text with deduplicated scoped warnings.
+External links are never fetched. XLSX external links, connections, queries,
+external formulas, and any external relationship fail closed. OOXML Strict
+namespace/relationship families return typed `unsupported_input`; successful
+OOXML metadata reports `ooxml_profile=transitional_only`.
 
 The production dependency graph passes:
 
@@ -101,6 +111,15 @@ and external relationships; oversized image dimensions, malformed JPEG scans,
 and technical-only metadata; PPTX shape order, warning scope/deduplication, and
 ambiguous notes. Each is now covered by a passing regression.
 
+Second-review RED cases reproduced the materialized XLSX rectangle allocation,
+external-workbook/DDE formulas and defined names, EPUB authored schemes/private
+asset aliases/deduplicated manifest paths, header-only and invalid-stream
+embedded images, malformed JPEG SOF/SOS/stuffing/multiscan state, unknown
+relationship modes, backslash UNC and missing hyperlinks, partial OOXML Strict
+acceptance, and a signatureless ZIP descriptor whose CRC equals the optional
+signature magic. Each test failed for the reported behavior before its focused
+production change and is now GREEN.
+
 Final focused ZIP GREEN:
 
 ```text
@@ -112,7 +131,7 @@ Result: 1 passed, 0 failed.
 
 ## Final validation
 
-- `cargo test -p mdconvert-formats`: 67 passed, 0 failed (32 container, 8 image,
+- `cargo test -p mdconvert-formats`: 78 passed, 0 failed (41 container, 10 image,
   27 structured-format tests).
 - `cargo test -p mdconvert-core`: 63 passed, 0 failed.
 - `cargo test -p mdconvert-html`: 18 passed, 0 failed.
@@ -120,7 +139,7 @@ Result: 1 passed, 0 failed.
 - `cargo fmt --all -- --check`: passed.
 - Network dependency gate above: passed.
 - `PDFIUM_DYNAMIC_LIB_PATH="$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib" ./scripts/verify-workspace.sh`:
-  passed, including 209 Rust tests, doc tests, TypeScript checking, 3 frontend
+  passed, including 220 Rust tests, doc tests, TypeScript checking, 3 frontend
   tests, and the production frontend build.
 - `./scripts/verify-legacy-swift.sh`: 90 executed, 0 failures.
 - `git diff --check`: passed.
@@ -132,11 +151,11 @@ Portable authored fixtures:
 | File | SHA-256 |
 | --- | --- |
 | `bounded.zip` | `788aae8ff3a1f48853876d132d8b2b4d24314291ce315783deb1e2831b420cb1` |
-| `semantic.docx` | `9efd96a953f356ee200b5cefdfe6c2c0f78003817697579594b2ef9fab25810d` |
+| `semantic.docx` | `419dc2b660126552c6db381c9967549dcc53112bf2444b4991ceaf1cc306ec31` |
 | `ordered.pptx` | `34117f8143fcae8f8090bdbe1e867240225170cffe29ad137db4a2dd05016cb7` |
 | `displayed.xlsx` | `f6fcf0b389320a861993e9207905886429349b6bf349553e2d67a0dad5a5aa77` |
-| `spine.epub` | `a81fd9e379a9673cb00ce5ab18f6f6554b369010e0c1e1aa7f1cacaa861cea09` |
-| `metadata.png` | `f04e818d291f20fbe6dec8ec1ad52452a7c810a9caa944d35478b57ba40bfbc9` |
+| `spine.epub` | `97e4b332f5a7013f5b4ff3bc97501a932c6624ff1bc952f3e5414111343e097e` |
+| `metadata.png` | `71dc4d61468db9840d56618e134e80e5d0ab3754668b8ec19e479f29df516fab` |
 | `metadata.jpg` | `14f7a5e76f7cb0210ae140c4fbcd2ad77a9605bdc281a0557fd00dbb6024ad31` |
 
 Shared-emitter goldens:
@@ -158,9 +177,12 @@ Shared-emitter goldens:
 - EPUB XHTML is intentionally stricter than permissive browser HTML because it
   is validated as XML before semantic conversion.
 - OOXML support targets the Task 10 semantic subset, not full rendering parity
-  with Office applications. Unsupported layout/style detail is not invented.
+  with Office applications. Local v1 is explicitly Transitional-only; ISO
+  Strict packages return typed `unsupported_input`. Unsupported layout/style
+  detail is not invented.
 - XLSX cached values are trusted only as package data and formulas are not
   recalculated.
-- Image v1 supports PNG/JPEG dimensions and bounded embedded metadata only;
-  there is no pixel OCR or general EXIF rendering pipeline.
+- Image v1 supports structurally validated PNG/JPEG plus bounded embedded
+  metadata only; GIF/BMP/WebP/SVG are rejected and there is no pixel OCR or
+  general EXIF rendering pipeline.
 - The unavailable advisory scanner is the only validation gap recorded above.

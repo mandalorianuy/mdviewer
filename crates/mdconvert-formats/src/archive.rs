@@ -455,13 +455,20 @@ pub(crate) fn relationships(
         if !ids.insert(id.to_owned()) {
             return corrupt(format!("duplicate relationship ID {id:?} in {path}"));
         }
+        let external = match node.attr_ns(None, "TargetMode") {
+            None | Some("Internal") => false,
+            Some("External") => true,
+            Some(value) => {
+                return corrupt(format!(
+                    "unknown relationship TargetMode {value:?} in {path}"
+                ));
+            }
+        };
         output.push(Relationship {
             id: id.to_owned(),
             kind: required_attr(node, "Type", path)?.to_owned(),
             target: required_attr(node, "Target", path)?.to_owned(),
-            external: node
-                .attr_ns(None, "TargetMode")
-                .is_some_and(|value| value.eq_ignore_ascii_case("external")),
+            external,
         });
     }
     Ok(output)
@@ -505,6 +512,18 @@ pub(crate) fn authenticate_ooxml(
     expected_main_part: &str,
     expected_main_content_type: &str,
 ) -> Result<ContentTypes, ConversionError> {
+    if archive.entries.iter().any(|entry| {
+        entry
+            .data
+            .windows(b"http://purl.oclc.org/ooxml/".len())
+            .any(|window| window == b"http://purl.oclc.org/ooxml/")
+    }) {
+        return Err(ConversionError::UnsupportedInput {
+            message:
+                "OOXML Strict is unsupported in local v1; only Transitional packages are accepted"
+                    .into(),
+        });
+    }
     let entry = archive.entry("[Content_Types].xml")?;
     let parsed = parse_xml_bytes(&entry.data, "[Content_Types].xml")?;
     let root = parsed
@@ -669,24 +688,27 @@ impl AssetSink {
             ));
         }
         let entry = archive.entry(part)?;
-        let extension = safe_extension(part)
-            .ok_or_else(|| corrupt_error(format!("unsupported embedded image type in {part:?}")))?;
         let declared = content_types.media_type(part).ok_or_else(|| {
             corrupt_error(format!(
                 "embedded image {part:?} has no declared content type"
             ))
         })?;
-        let expected_media = media_type(extension);
-        if declared != expected_media || !valid_image_signature(expected_media, &entry.data) {
-            return corrupt(format!(
-                "embedded image {part:?} content type or signature is invalid"
-            ));
+        let extension = crate::image::validate_embedded_image(&entry.data, declared)?;
+        let declared_extension = part
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase())
+            .ok_or_else(|| corrupt_error(format!("embedded image {part:?} has no extension")))?;
+        if !matches!(
+            (extension, declared_extension.as_str()),
+            ("png", "png") | ("jpg", "jpg" | "jpeg")
+        ) {
+            return corrupt(format!("embedded image {part:?} extension is invalid"));
         }
         let id = AssetId::new(format!("asset-{actual:03}"))?;
         self.assets.push(Asset {
             id: id.clone(),
             file_name: format!("image-{actual:03}-{}", file_leaf(part)),
-            media_type: media_type(extension).into(),
+            media_type: declared.into(),
             data: entry.data.clone(),
         });
         self.by_part.insert(part.to_owned(), id.clone());
@@ -700,39 +722,6 @@ impl AssetSink {
 
 fn file_leaf(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or("image.bin")
-}
-
-fn safe_extension(path: &str) -> Option<&str> {
-    match path.rsplit_once('.')?.1.to_ascii_lowercase().as_str() {
-        "png" => Some("png"),
-        "jpg" | "jpeg" => Some("jpg"),
-        "gif" => Some("gif"),
-        "webp" => Some("webp"),
-        "bmp" => Some("bmp"),
-        _ => None,
-    }
-}
-
-fn media_type(extension: &str) -> &'static str {
-    match extension {
-        "png" => "image/png",
-        "jpg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        _ => "application/octet-stream",
-    }
-}
-
-fn valid_image_signature(media_type: &str, bytes: &[u8]) -> bool {
-    match media_type {
-        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]),
-        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-        "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
-        "image/bmp" => bytes.starts_with(b"BM"),
-        _ => false,
-    }
 }
 
 struct Descriptor {
@@ -952,29 +941,31 @@ fn extract(
     let compressed = slice(bytes, extra_end, data_end, "entry data")?;
     let record_end = if flags & (1 << 3) != 0 {
         let first = read_u32(bytes, data_end)?;
-        let (values, end) = if first == 0x0807_4b50 {
-            (
-                data_end
-                    .checked_add(4)
-                    .ok_or_else(|| corrupt_error("ZIP data descriptor offset overflow"))?,
-                checked_add(data_end, 16, "ZIP data descriptor")?,
-            )
+        let without_signature = descriptor_layout_matches(bytes, data_end, descriptor)?;
+        let with_signature = if first == 0x0807_4b50 {
+            descriptor_layout_matches(
+                bytes,
+                checked_add(data_end, 4, "ZIP data descriptor signature")?,
+                descriptor,
+            )?
         } else {
-            (data_end, checked_add(data_end, 12, "ZIP data descriptor")?)
+            None
         };
-        let crc = read_u32(bytes, values)?;
-        let compressed = u64::from(read_u32(bytes, values + 4)?);
-        let uncompressed = u64::from(read_u32(bytes, values + 8)?);
-        if crc != descriptor.crc
-            || compressed != descriptor.compressed
-            || uncompressed != descriptor.uncompressed
-        {
-            return corrupt(format!(
-                "ZIP data descriptor disagrees with the central record for {}",
-                descriptor.name
-            ));
+        match (without_signature, with_signature) {
+            (Some(end), None) | (None, Some(end)) => end,
+            (Some(_), Some(_)) => {
+                return corrupt(format!(
+                    "ambiguous ZIP data descriptor layout for {}",
+                    descriptor.name
+                ));
+            }
+            (None, None) => {
+                return corrupt(format!(
+                    "ZIP data descriptor disagrees with the central record for {}",
+                    descriptor.name
+                ));
+            }
         }
-        end
     } else {
         data_end
     };
@@ -1032,6 +1023,24 @@ fn extract(
         end: record_end,
         is_dir: descriptor.is_dir,
     })
+}
+
+fn descriptor_layout_matches(
+    bytes: &[u8],
+    values: usize,
+    descriptor: &Descriptor,
+) -> Result<Option<usize>, ConversionError> {
+    let end = checked_add(values, 12, "ZIP data descriptor")?;
+    if end > bytes.len() {
+        return Ok(None);
+    }
+    let crc = read_u32(bytes, values)?;
+    let compressed = u64::from(read_u32(bytes, values + 4)?);
+    let uncompressed = u64::from(read_u32(bytes, values + 8)?);
+    Ok((crc == descriptor.crc
+        && compressed == descriptor.compressed
+        && uncompressed == descriptor.uncompressed)
+        .then_some(end))
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, ConversionError> {

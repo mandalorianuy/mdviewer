@@ -103,6 +103,9 @@ impl Converter for PptxConverter {
             metadata: DocumentMetadata {
                 source_format: Some("pptx".into()),
                 page_count: Some(u32::try_from(slide_paths.len()).unwrap_or(u32::MAX)),
+                properties: [("ooxml_profile".into(), "transitional_only".into())]
+                    .into_iter()
+                    .collect(),
                 ..DocumentMetadata::default()
             },
             blocks,
@@ -351,11 +354,11 @@ fn shape_inlines(
             if text.is_empty() {
                 continue;
             }
-            let relationship = run
+            let relationship_id = run
                 .descendants_ns(A_NS, "hlinkClick")
                 .next()
-                .and_then(|link| link.attr_ns(Some(R_NS), "id"))
-                .and_then(|id| rels.get(id));
+                .and_then(|link| link.attr_ns(Some(R_NS), "id"));
+            let relationship = relationship_id.and_then(|id| rels.get(id));
             if let Some(relationship) = relationship {
                 if relationship.external || !safe_local_link(&relationship.target) {
                     let code = if relationship.external {
@@ -381,6 +384,14 @@ fn shape_inlines(
                     });
                 }
             } else {
+                if relationship_id.is_some() {
+                    push_warning(
+                        warnings,
+                        WarningCode::InvalidLinkSkipped,
+                        "Missing PPTX hyperlink relationship was preserved as text".into(),
+                        Some(page),
+                    );
+                }
                 output.push(Inline::Text(text));
             }
         }
@@ -389,13 +400,13 @@ fn shape_inlines(
 }
 
 fn safe_local_link(target: &str) -> bool {
-    target.starts_with('#')
-        || (!target.contains(':')
-            && !target.starts_with('/')
-            && !target
-                .replace('\\', "/")
-                .split('/')
-                .any(|part| part == ".."))
+    if target.starts_with('#') {
+        return true;
+    }
+    let normalized = target.replace('\\', "/");
+    !normalized.contains(':')
+        && !normalized.starts_with('/')
+        && !normalized.split('/').any(|part| part == "..")
 }
 
 fn text_lines(text: &str) -> Vec<Inline> {
@@ -435,7 +446,7 @@ fn push_warning(
 ) {
     if !warnings
         .iter()
-        .any(|warning| warning.code == code && warning.message == message && warning.page == page)
+        .any(|warning| warning.code == code && warning.page == page)
     {
         warnings.push(ConversionWarning {
             code,

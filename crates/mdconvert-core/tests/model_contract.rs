@@ -413,6 +413,12 @@ fn conversion_errors_expose_stable_codes() {
             "unsupported_format",
         ),
         (
+            ConversionError::UnsupportedInput {
+                message: "OOXML Strict is not supported".into(),
+            },
+            "unsupported_input",
+        ),
+        (
             ConversionError::CorruptInput {
                 message: "invalid header".into(),
             },

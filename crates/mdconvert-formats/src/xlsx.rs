@@ -57,6 +57,7 @@ impl Converter for XlsxConverter {
                 "XLSX workbook root has the wrong expanded name",
             ));
         }
+        reject_external_formulas(workbook_root)?;
         for sheet in workbook_root.descendants_ns(S_NS, "sheet") {
             let name = sheet
                 .attr_ns(None, "name")
@@ -105,10 +106,13 @@ impl Converter for XlsxConverter {
             metadata: DocumentMetadata {
                 source_format: Some("xlsx".into()),
                 page_count: Some(u32::try_from(sheets.len()).unwrap_or(u32::MAX)),
-                properties: [(
-                    "formula_policy".into(),
-                    "never_execute_use_cached_value".into(),
-                )]
+                properties: [
+                    (
+                        "formula_policy".into(),
+                        "never_execute_use_cached_value".into(),
+                    ),
+                    ("ooxml_profile".into(), "transitional_only".into()),
+                ]
                 .into_iter()
                 .collect(),
                 ..DocumentMetadata::default()
@@ -233,6 +237,7 @@ fn worksheet_table(
             "XLSX worksheet root has the wrong expanded name",
         ));
     }
+    reject_external_formulas(root)?;
     validate_dimension(root)?;
     let sheet_data = root
         .child_ns(S_NS, "sheetData")
@@ -303,6 +308,16 @@ fn worksheet_table(
         maximum_columns = 1;
     }
     let maximum_row = sparse_rows.last().map_or(1, |(row, _)| *row);
+    let materialized_cells = maximum_row
+        .checked_mul(u64::try_from(maximum_columns).unwrap_or(u64::MAX))
+        .ok_or_else(|| limit("worksheet_cells", u64::MAX, MAX_WORKSHEET_CELLS))?;
+    if materialized_cells > MAX_WORKSHEET_CELLS {
+        return Err(limit(
+            "worksheet_cells",
+            materialized_cells,
+            MAX_WORKSHEET_CELLS,
+        ));
+    }
     let row_count = usize::try_from(maximum_row).map_err(|_| ConversionError::LimitExceeded {
         limit: "worksheet_rows",
         actual: maximum_row,
@@ -394,6 +409,7 @@ fn cell_value(
         .map(XmlNode::text)
         .filter(|value| !value.is_empty())
     {
+        reject_external_formula(&formula)?;
         let mut output = vec![Inline::Code(format!("={formula}"))];
         if !display.is_empty() {
             output.push(Inline::Text(format!(" ({display})")));
@@ -404,6 +420,67 @@ fn cell_value(
     } else {
         Ok(vec![Inline::Text(display)])
     }
+}
+
+fn reject_external_formula(formula: &str) -> Result<(), ConversionError> {
+    let mut lexical = String::with_capacity(formula.len());
+    let mut characters = formula.chars().peekable();
+    let mut quoted_string = false;
+    while let Some(character) = characters.next() {
+        if character == '"' {
+            if quoted_string && characters.peek() == Some(&'"') {
+                characters.next();
+                continue;
+            }
+            quoted_string = !quoted_string;
+            continue;
+        }
+        if !quoted_string {
+            lexical.push(character);
+        }
+    }
+    if quoted_string {
+        return Err(corrupt_error(
+            "XLSX formula has an unterminated string literal",
+        ));
+    }
+    if lexical.contains('|') {
+        return Err(corrupt_error("XLSX DDE formula references are unsupported"));
+    }
+    for (bang, _) in lexical.match_indices('!') {
+        let prefix = lexical[..bang].trim_end();
+        let token = if let Some(without_quote) = prefix.strip_suffix('\'') {
+            without_quote
+                .rfind('\'')
+                .map_or(prefix, |start| &prefix[start..])
+        } else {
+            prefix
+                .rsplit(|character: char| {
+                    character.is_whitespace() || "+-*/^&,=(><:".contains(character)
+                })
+                .next()
+                .unwrap_or_default()
+        };
+        if token.contains('[') && token.contains(']') {
+            return Err(corrupt_error(
+                "XLSX external-workbook formula references are unsupported",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_external_formulas(root: &XmlNode) -> Result<(), ConversionError> {
+    for node in root
+        .descendants_ns(S_NS, "f")
+        .chain(root.descendants_ns(S_NS, "definedName"))
+    {
+        let formula = node.text();
+        if !formula.is_empty() {
+            reject_external_formula(&formula)?;
+        }
+    }
+    Ok(())
 }
 
 fn format_display(raw: &str, cell: &XmlNode, styles: &Styles) -> String {

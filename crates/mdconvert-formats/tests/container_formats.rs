@@ -425,6 +425,16 @@ fn portable_container_and_image_fixtures_match_shared_emitter_goldens() {
                 "tests/fixtures/formats/{name}"
             ))))
             .unwrap();
+        if matches!(name, "semantic.docx" | "ordered.pptx" | "displayed.xlsx") {
+            assert_eq!(
+                document
+                    .metadata
+                    .properties
+                    .get("ooxml_profile")
+                    .map(String::as_str),
+                Some("transitional_only")
+            );
+        }
         assert_eq!(
             emitted(&document),
             fs::read_to_string(workspace_path(&format!("tests/golden/formats/{name}.md"))).unwrap(),
@@ -820,6 +830,26 @@ fn zip_requires_complete_ordered_local_records_and_valid_data_descriptors() {
 }
 
 #[test]
+fn zip_accepts_signatureless_descriptor_when_crc_equals_the_signature_magic() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("descriptor-magic-crc.zip");
+    let data = [0xac, 0x0a, 0x7a, 0xd5];
+    assert_eq!(crc32(&data), 0x0807_4b50);
+    let mut bytes = descriptor_zip(
+        "data.bin",
+        &data,
+        Some((false, 0x0807_4b50, 0, u32::try_from(data.len()).unwrap())),
+    );
+    let central = central_offset(&bytes);
+    let compressed = u32::from_le_bytes(bytes[central + 20..central + 24].try_into().unwrap());
+    let descriptor = central - 12;
+    bytes[descriptor + 4..descriptor + 8].copy_from_slice(&compressed.to_le_bytes());
+    fs::write(&path, bytes).unwrap();
+
+    assert!(ZipConverter.convert(&request(path)).is_ok());
+}
+
+#[test]
 fn epub_mimetype_order_is_authenticated_from_physical_local_records() {
     let temp = TempDir::new().unwrap();
     let entries = [
@@ -924,6 +954,120 @@ fn package_queries_require_the_expected_expanded_namespaces() {
 }
 
 #[test]
+fn relationships_reject_unknown_target_modes() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("unknown-target-mode.docx");
+    let entries = [
+        TestEntry::file(
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+        ),
+        TestEntry::file(
+            "_rels/.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="root" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml" TargetMode="RemoteMaybe"/></Relationships>"#,
+        ),
+        TestEntry::file(
+            "word/document.xml",
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:body></w:document>"#,
+        ),
+    ];
+    fs::write(&path, stored_zip(&entries)).unwrap();
+    assert!(matches!(
+        DocxConverter.convert(&request(path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn ooxml_strict_is_explicitly_typed_unsupported_not_corrupt() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("strict.docx");
+    let entries = [
+        TestEntry::file(
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://purl.oclc.org/ooxml/package/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+        ),
+        TestEntry::file(
+            "_rels/.rels",
+            br#"<Relationships xmlns="http://purl.oclc.org/ooxml/package/relationships"><Relationship Id="root" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+        ),
+        TestEntry::file(
+            "word/document.xml",
+            br#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"><w:body><w:p><w:r><w:t>Strict</w:t></w:r></w:p></w:body></w:document>"#,
+        ),
+    ];
+    fs::write(&path, stored_zip(&entries)).unwrap();
+    assert!(matches!(
+        DocxConverter.convert(&request(path)),
+        Err(ConversionError::UnsupportedInput { .. })
+    ));
+}
+
+#[test]
+fn missing_and_unsafe_ooxml_hyperlinks_preserve_text_and_warn_once() {
+    let temp = TempDir::new().unwrap();
+    let docx = temp.path().join("missing-links.docx");
+    write_zip(
+        &docx,
+        &[
+            TestEntry::file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="unc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="\\server\share"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:hyperlink r:id="missing"><w:r><w:t>Missing</w:t></w:r></w:hyperlink><w:hyperlink r:id="unc"><w:r><w:t>UNC</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#,
+            ),
+        ],
+    );
+    let document = DocxConverter.convert(&request(docx)).unwrap();
+    let markdown = emitted(&document);
+    assert!(markdown.contains("Missing"));
+    assert!(markdown.contains("UNC"));
+    assert!(!markdown.contains("server"));
+    assert_eq!(
+        document
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == WarningCode::InvalidLinkSkipped)
+            .count(),
+        1
+    );
+
+    let pptx = temp.path().join("missing-links.pptx");
+    write_zip(
+        &pptx,
+        &[
+            TestEntry::file(
+                "ppt/presentation.xml",
+                br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="slide"/></p:sldIdLst></p:presentation>"#,
+            ),
+            TestEntry::file(
+                "ppt/_rels/presentation.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "ppt/slides/slide1.xml",
+                br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:rPr><a:hlinkClick r:id="missing"/></a:rPr><a:t>Missing</a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="unc"/></a:rPr><a:t>UNC</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            ),
+            TestEntry::file(
+                "ppt/slides/_rels/slide1.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="unc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="\\server\share"/></Relationships>"#,
+            ),
+        ],
+    );
+    let document = PptxConverter.convert(&request(pptx)).unwrap();
+    assert!(emitted(&document).contains("MissingUNC"));
+    let warnings = document
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == WarningCode::InvalidLinkSkipped)
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].page, Some(1));
+}
+
+#[test]
 fn ooxml_requires_authenticated_package_envelope_and_real_image_parts() {
     let temp = TempDir::new().unwrap();
     let missing_envelope = temp.path().join("missing-envelope.docx");
@@ -957,6 +1101,26 @@ fn ooxml_requires_authenticated_package_envelope_and_real_image_parts() {
     );
     assert!(matches!(
         DocxConverter.convert(&request(bogus_image)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let header_only_image = temp.path().join("header-only-image.docx");
+    write_zip(
+        &header_only_image,
+        &[
+            TestEntry::file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/pixel.png"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:blip r:embed="img"/></w:drawing></w:r></w:p></w:body></w:document>"#,
+            ),
+            TestEntry::file("word/media/pixel.png", b"\x89PNG\r\n\x1a\nheader-only"),
+        ],
+    );
+    assert!(matches!(
+        DocxConverter.convert(&request(header_only_image)),
         Err(ConversionError::CorruptInput { .. })
     ));
 
@@ -1517,6 +1681,96 @@ fn xlsx_requires_strict_ordered_a1_references_and_bounds_sparse_rows() {
 }
 
 #[test]
+fn xlsx_bounds_the_materialized_rectangle_without_trusting_dimension() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wide-sparse.xlsx");
+    write_zip(
+        &path,
+        &[
+            TestEntry::file(
+                "xl/workbook.xml",
+                br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" r:id="r1"/></sheets></workbook>"#,
+            ),
+            TestEntry::file(
+                "xl/_rels/workbook.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:A1"/><sheetData><row r="100000"><c r="XFD100000"><v>one</v></c></row></sheetData></worksheet>"#,
+            ),
+        ],
+    );
+
+    assert!(matches!(
+        XlsxConverter.convert(&request(path)),
+        Err(ConversionError::LimitExceeded {
+            limit: "worksheet_cells",
+            actual: 1_638_400_000,
+            maximum: 1_000_000,
+        })
+    ));
+}
+
+#[test]
+fn xlsx_rejects_external_workbook_and_dde_formulas_but_keeps_local_references() {
+    let temp = TempDir::new().unwrap();
+    let workbook = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" r:id="r1"/></sheets></workbook>"#;
+    let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let cases = [
+        ("external-book", "[Book.xlsx]Sheet1!A1", true),
+        ("quoted-external-book", "'[Book.xlsx]Sheet 1'!A1", true),
+        ("dde", "cmd|' /C calc'!A0", true),
+        ("quoted-local-sheet", "'Sheet 2'!A1", false),
+        ("structured-local", "Table1[Column]", false),
+    ];
+    for (name, formula, rejected) in cases {
+        let path = temp.path().join(format!("{name}.xlsx"));
+        let worksheet = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>{formula}</f><v>1</v></c></row></sheetData></worksheet>"#
+        );
+        write_zip(
+            &path,
+            &[
+                TestEntry::file("xl/workbook.xml", workbook),
+                TestEntry::file("xl/_rels/workbook.xml.rels", rels),
+                TestEntry::file("xl/worksheets/sheet1.xml", worksheet.as_bytes()),
+            ],
+        );
+        let result = XlsxConverter.convert(&request(path));
+        if rejected {
+            assert!(
+                matches!(result, Err(ConversionError::CorruptInput { .. })),
+                "{name}"
+            );
+        } else {
+            let markdown = emitted(&result.unwrap());
+            assert!(markdown.contains(formula), "{name}");
+        }
+    }
+
+    let named = temp.path().join("external-defined-name.xlsx");
+    write_zip(
+        &named,
+        &[
+            TestEntry::file(
+                "xl/workbook.xml",
+                br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><definedNames><definedName name="Bad">[Book.xlsx]Sheet1!A1</definedName></definedNames><sheets><sheet name="Sheet" r:id="r1"/></sheets></workbook>"#,
+            ),
+            TestEntry::file("xl/_rels/workbook.xml.rels", rels),
+            TestEntry::file(
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#,
+            ),
+        ],
+    );
+    assert!(matches!(
+        XlsxConverter.convert(&request(named)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
 fn xlsx_rejects_connections_query_and_any_external_relationships() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.xlsx");
@@ -1631,6 +1885,130 @@ fn epub_rejects_invalid_mimetype_and_escaping_manifest_targets() {
     );
     assert!(matches!(
         EpubConverter.convert(&request(escaping)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn epub_images_accept_only_authenticated_package_parts_and_private_refs() {
+    let temp = TempDir::new().unwrap();
+    let image = include_bytes!("../../../tests/fixtures/formats/metadata.png");
+    let sources = [
+        "data:image/png;base64,iVBORw0KGgo=",
+        "mdconvert-asset:epub-999",
+        "http://example.invalid/pixel.png",
+        "file:///tmp/pixel.png",
+    ];
+    for (index, source) in sources.into_iter().enumerate() {
+        let path = temp.path().join(format!("scheme-{index}.epub"));
+        let chapter = format!(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="{source}" alt="probe"/></body></html>"#
+        );
+        write_zip(
+            &path,
+            &[
+                TestEntry::file("mimetype", b"application/epub+zip"),
+                TestEntry::file(
+                    "META-INF/container.xml",
+                    br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+                ),
+                TestEntry::file(
+                    "content.opf",
+                    br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="pic" href="pixel.png" media-type="image/png"/></manifest><spine><itemref idref="chapter"/></spine></package>"#,
+                ),
+                TestEntry::file("chapter.xhtml", chapter.as_bytes()),
+                TestEntry::file("pixel.png", image),
+            ],
+        );
+        assert!(matches!(
+            EpubConverter.convert(&request(path)),
+            Err(ConversionError::CorruptInput { .. })
+        ));
+    }
+
+    let forged = temp.path().join("predictable-alias.epub");
+    write_zip(
+        &forged,
+        &[
+            TestEntry::file("mimetype", b"application/epub+zip"),
+            TestEntry::file(
+                "META-INF/container.xml",
+                br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+            ),
+            TestEntry::file(
+                "content.opf",
+                br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="pic" href="pixel.png" media-type="image/png"/></manifest><spine><itemref idref="chapter"/></spine></package>"#,
+            ),
+            TestEntry::file(
+                "chapter.xhtml",
+                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="pixel.png" alt="real"/><img src="mdconvert-asset:epub-001" alt="forged"/></body></html>"#,
+            ),
+            TestEntry::file("pixel.png", image),
+        ],
+    );
+    assert!(matches!(
+        EpubConverter.convert(&request(forged)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn epub_manifest_rejects_duplicate_normalized_part_aliases() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("duplicate-part.epub");
+    write_zip(
+        &path,
+        &[
+            TestEntry::file("mimetype", b"application/epub+zip"),
+            TestEntry::file(
+                "META-INF/container.xml",
+                br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+            ),
+            TestEntry::file(
+                "content.opf",
+                br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="a" href="images/./pic.png" media-type="image/png"/><item id="b" href="images/pic.png" media-type="image/jpeg"/></manifest><spine><itemref idref="chapter"/></spine></package>"#,
+            ),
+            TestEntry::file(
+                "chapter.xhtml",
+                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body>chapter</body></html>"#,
+            ),
+            TestEntry::file(
+                "images/pic.png",
+                include_bytes!("../../../tests/fixtures/formats/metadata.png"),
+            ),
+        ],
+    );
+    assert!(matches!(
+        EpubConverter.convert(&request(path)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn epub_embedded_images_require_full_bounded_structural_validation() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("header-only.epub");
+    write_zip(
+        &path,
+        &[
+            TestEntry::file("mimetype", b"application/epub+zip"),
+            TestEntry::file(
+                "META-INF/container.xml",
+                br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+            ),
+            TestEntry::file(
+                "content.opf",
+                br#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="pic" href="pixel.png" media-type="image/png"/></manifest><spine><itemref idref="chapter"/></spine></package>"#,
+            ),
+            TestEntry::file(
+                "chapter.xhtml",
+                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="pixel.png" alt="probe"/></body></html>"#,
+            ),
+            TestEntry::file("pixel.png", b"\x89PNG\r\n\x1a\nheader-only"),
+        ],
+    );
+    assert!(matches!(
+        EpubConverter.convert(&request(path)),
         Err(ConversionError::CorruptInput { .. })
     ));
 }
