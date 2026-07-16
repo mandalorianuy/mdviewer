@@ -76,6 +76,29 @@ fn png_with_chunks(
     output
 }
 
+fn truecolor_png_with_palette_and_transparency(palette_first: bool) -> Vec<u8> {
+    let mut output = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    png_chunk(&mut output, b"IHDR", &ihdr);
+    if palette_first {
+        png_chunk(&mut output, b"PLTE", &[0, 0, 0]);
+        png_chunk(&mut output, b"tRNS", &[0, 0, 0, 0, 0, 0]);
+    } else {
+        png_chunk(&mut output, b"tRNS", &[0, 0, 0, 0, 0, 0]);
+        png_chunk(&mut output, b"PLTE", &[0, 0, 0]);
+    }
+    png_chunk(
+        &mut output,
+        b"IDAT",
+        &[0x78, 0x9c, 0x63, 0x60, 0x60, 0x60, 0, 0, 0, 4, 0, 1],
+    );
+    png_chunk(&mut output, b"IEND", &[]);
+    output
+}
+
 fn jpeg(width: u16, height: u16) -> Vec<u8> {
     let mut output = vec![0xff, 0xd8];
     let comment = b"Description from JPEG";
@@ -114,6 +137,24 @@ fn jpeg_with_restarts() -> Vec<u8> {
         .unwrap();
     bytes.splice(eoi - 1..eoi, [0, 0xff, 0xd0, 0, 0xff, 0xd1, 0]);
     bytes
+}
+
+fn multiscan_jpeg_with_redefined_dri(restart_after_disable: bool) -> Vec<u8> {
+    let mut output = vec![0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 8, 0, 24, 3];
+    output.extend_from_slice(&[1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+    output.extend_from_slice(&[0xff, 0xdd, 0, 4, 0, 1]);
+    output.extend_from_slice(&[
+        0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0, 0xff, 0xd0, 0, 0xff, 0xd1, 0,
+    ]);
+    output.extend_from_slice(&[0xff, 0xdd, 0, 4, 0, 2]);
+    output.extend_from_slice(&[0xff, 0xda, 0, 8, 1, 2, 0, 0, 63, 0, 0, 0, 0xff, 0xd0, 0]);
+    output.extend_from_slice(&[0xff, 0xdd, 0, 4, 0, 0]);
+    output.extend_from_slice(&[0xff, 0xda, 0, 8, 1, 3, 0, 0, 63, 0, 0]);
+    if restart_after_disable {
+        output.extend_from_slice(&[0xff, 0xd0, 0]);
+    }
+    output.extend_from_slice(&[0xff, 0xd9]);
+    output
 }
 
 #[test]
@@ -226,13 +267,18 @@ fn jpeg_validates_frame_components_scan_parameters_and_multiscan_state() {
     malformed_dri.splice(sos..sos, [0xff, 0xdd, 0, 3, 1]);
     cases.push(("malformed-dri", malformed_dri));
 
-    let mut duplicate_dri = jpeg(1, 1);
-    let sos = duplicate_dri
+    cases.push((
+        "restart-after-dri-disable",
+        multiscan_jpeg_with_redefined_dri(true),
+    ));
+
+    let mut dri_inside_entropy = jpeg(1, 1);
+    let eoi = dri_inside_entropy
         .windows(2)
-        .position(|window| window == [0xff, 0xda])
+        .position(|window| window == [0xff, 0xd9])
         .unwrap();
-    duplicate_dri.splice(sos..sos, [0xff, 0xdd, 0, 4, 0, 1, 0xff, 0xdd, 0, 4, 0, 1]);
-    cases.push(("duplicate-dri", duplicate_dri));
+    dri_inside_entropy.splice(eoi..eoi, [0xff, 0xdd, 0, 4, 0, 1, 0]);
+    cases.push(("dri-inside-entropy", dri_inside_entropy));
 
     for (name, bytes) in cases {
         let path = temp.path().join(format!("{name}.jpg"));
@@ -250,6 +296,20 @@ fn jpeg_validates_frame_components_scan_parameters_and_multiscan_state() {
     let valid_restarts = temp.path().join("restarts.jpg");
     fs::write(&valid_restarts, jpeg_with_restarts()).unwrap();
     assert!(ImageConverter.convert(&request(valid_restarts)).is_ok());
+
+    let mut disabled = jpeg(1, 1);
+    let sos = disabled
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .unwrap();
+    disabled.splice(sos..sos, [0xff, 0xdd, 0, 4, 0, 0]);
+    let valid_disabled = temp.path().join("dri-disabled.jpg");
+    fs::write(&valid_disabled, disabled).unwrap();
+    assert!(ImageConverter.convert(&request(valid_disabled)).is_ok());
+
+    let valid_redefined = temp.path().join("dri-redefined-between-scans.jpg");
+    fs::write(&valid_redefined, multiscan_jpeg_with_redefined_dri(false)).unwrap();
+    assert!(ImageConverter.convert(&request(valid_redefined)).is_ok());
 }
 
 #[test]
@@ -430,6 +490,21 @@ fn png_validates_filters_palette_and_noninterlaced_profile() {
         ImageConverter.convert(&request(adam7)),
         Err(ConversionError::UnsupportedInput { .. })
     ));
+}
+
+#[test]
+fn png_requires_palette_before_transparency_when_both_are_present() {
+    let temp = TempDir::new().unwrap();
+    let invalid = temp.path().join("palette-after-transparency.png");
+    fs::write(&invalid, truecolor_png_with_palette_and_transparency(false)).unwrap();
+    assert!(matches!(
+        ImageConverter.convert(&request(invalid)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let valid = temp.path().join("palette-before-transparency.png");
+    fs::write(&valid, truecolor_png_with_palette_and_transparency(true)).unwrap();
+    assert!(ImageConverter.convert(&request(valid)).is_ok());
 }
 
 #[test]

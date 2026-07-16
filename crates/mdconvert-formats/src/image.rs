@@ -284,6 +284,7 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
                     layout.ok_or_else(|| corrupt_error("PNG PLTE precedes IHDR"))?;
                 let entries = data.len() / 3;
                 if palette
+                    || transparency
                     || idat
                     || data.is_empty()
                     || data.len() > 768
@@ -501,7 +502,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
     let mut scans = 0u64;
     let mut sequential_components = std::collections::HashSet::new();
     let mut progressive_coefficients = std::collections::HashMap::new();
-    let mut restart_interval = None;
+    let mut restart_interval = 0u16;
     while cursor < bytes.len() {
         if bytes.get(cursor) != Some(&0xff) {
             return Err(corrupt_error("JPEG marker is missing its 0xFF prefix"));
@@ -596,6 +597,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
             cursor = data_end;
             let mut entropy_bytes = 0u64;
             let mut expected_restart = 0u8;
+            let scan_restart_interval = restart_interval;
             loop {
                 let byte = *bytes
                     .get(cursor)
@@ -621,7 +623,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
                     entropy_bytes = entropy_bytes.saturating_add(1);
                     cursor += 1;
                 } else if (0xd0..=0xd7).contains(&next) {
-                    if restart_interval.is_none() || next != 0xd0 + expected_restart {
+                    if scan_restart_interval == 0 || next != 0xd0 + expected_restart {
                         return Err(corrupt_error(
                             "JPEG restart marker is missing DRI or out of sequence",
                         ));
@@ -653,14 +655,10 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
         let data_end = checked_add(cursor, length, "JPEG segment")?;
         let data = slice(bytes, data_start, data_end, "JPEG segment")?;
         if marker == 0xdd {
-            if data.len() != 2 || restart_interval.is_some() || scans > 0 {
-                return Err(corrupt_error("invalid or duplicate JPEG DRI segment"));
+            if data.len() != 2 {
+                return Err(corrupt_error("invalid JPEG DRI segment"));
             }
-            let interval = u16::from_be_bytes([data[0], data[1]]);
-            if interval == 0 {
-                return Err(corrupt_error("JPEG DRI interval must be nonzero"));
-            }
-            restart_interval = Some(interval);
+            restart_interval = u16::from_be_bytes([data[0], data[1]]);
         } else if matches!(marker, 0xc0 | 0xc2) {
             if frame.is_some() {
                 return Err(corrupt_error(

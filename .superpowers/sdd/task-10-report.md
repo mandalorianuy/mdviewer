@@ -44,19 +44,23 @@ Markdown strings.
   contents are never evaluated; external-workbook and DDE references in cell
   formulas or defined names are rejected before emission. The quote-aware
   formula tokenizer handles doubled apostrophes in quoted sheet names, ignores
-  string literals, and rejects external-data functions despite casing or
-  whitespace variations. The complete materialized table rectangle is checked
+  string literals, recognizes DDE pipes only in executable formula text, and
+  rejects the network/external-data functions WEBSERVICE, RTD, IMAGE, and
+  STOCKHISTORY despite casing or whitespace variations. Pure local FILTERXML
+  remains supported. The complete materialized table rectangle is checked
   against the cell budget.
 - PNG/JPEG: preserves original local image assets, dimensions, and bounded
   document-semantic metadata without raster rendering. Width, height, and pixel
   count are checked before allocation. PNG validates chunk order, CRCs, bounded
   image-data expansion, exact stream boundaries, scanline filter bytes, and
-  color-type-specific PLTE/tRNS rules. Adam7 returns typed `UnsupportedInput`;
+  color-type-specific PLTE/tRNS rules, including the required PLTE-before-tRNS
+  order whenever both chunks are present. Adam7 returns typed `UnsupportedInput`;
   successful PNG metadata reports
   `png.interlace_profile=non_interlaced_only`. JPEG validates frame components,
-  scan selectors/parameters, stuffing, DRI structure, restart-marker sequence,
-  multiscan state, entropy, and terminal EOI. Technical-only metadata does not
-  suppress `OcrDeferred`; Task 10 never invokes or requires OCR.
+  scan selectors/parameters, stuffing, DRI structure, per-scan restart-marker
+  sequence, legal DRI redefinition between scans, and Ri=0 restart disabling,
+  plus multiscan state, entropy, and terminal EOI. Technical-only metadata does
+  not suppress `OcrDeferred`; Task 10 never invokes or requires OCR.
 
 The HTML crate gained a bounded `convert_bytes` entry point so EPUB and ZIP can
 reuse its semantic conversion without writing package members to disk.
@@ -144,6 +148,17 @@ bypassing checks through quoted workbook names with escaped apostrophes or
 function casing/whitespace. All six focused regressions are now GREEN, including
 an embedded OOXML PNG with an invalid filter byte.
 
+Fourth-review RED cases reproduced three P1 gaps: (1) a truecolor PNG with
+tRNS before an optional PLTE was accepted both standalone and as an embedded
+OOXML image; (2) valid JPEG DRI Ri=0 and legal interval redefinition/disabling
+between scans were rejected, while restart state needed to follow the interval
+active for each scan; and (3) XLSX treated pipes inside quoted local sheet names
+as DDE, rejected local FILTERXML, and accepted network-backed IMAGE. The focused
+tests failed for those exact behaviors before production changes and are now
+GREEN. Valid PLTE-before-tRNS, DRI=0 without RST, DRI changes between scans,
+FILTERXML, string literals, and `'A|B'!A1` remain accepted; RST after disable,
+true DDE, and case/whitespace variants of WEBSERVICE, RTD, and IMAGE fail closed.
+
 Final focused ZIP GREEN:
 
 ```text
@@ -155,7 +170,7 @@ Result: 1 passed, 0 failed.
 
 ## Final validation
 
-- `cargo test -p mdconvert-formats`: 79 passed, 0 failed (41 container, 11 image,
+- `cargo test -p mdconvert-formats`: 80 passed, 0 failed (41 container, 12 image,
   27 structured-format tests).
 - `cargo test -p mdconvert-core`: 63 passed, 0 failed.
 - `cargo test -p mdconvert-html`: 18 passed, 0 failed.
@@ -163,7 +178,7 @@ Result: 1 passed, 0 failed.
 - `cargo fmt --all -- --check`: passed.
 - Network dependency gate above: passed.
 - `PDFIUM_DYNAMIC_LIB_PATH="$PWD/.cache/pdfium/chromium-7947/lib/libpdfium.dylib" ./scripts/verify-workspace.sh`:
-  passed, including 221 Rust tests, doc tests, TypeScript checking, 3 frontend
+  passed, including 222 Rust tests, doc tests, TypeScript checking, 3 frontend
   tests, and the production frontend build.
 - `./scripts/verify-legacy-swift.sh`: 90 executed, 0 failures.
 - `git diff --check`: passed.

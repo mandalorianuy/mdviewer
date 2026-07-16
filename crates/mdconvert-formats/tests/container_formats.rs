@@ -172,6 +172,33 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
+fn png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    output.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+    output.extend_from_slice(kind);
+    output.extend_from_slice(data);
+    let mut crc_input = kind.to_vec();
+    crc_input.extend_from_slice(data);
+    output.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+}
+
+fn truecolor_png_with_palette_after_transparency() -> Vec<u8> {
+    let mut output = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    png_chunk(&mut output, b"IHDR", &ihdr);
+    png_chunk(&mut output, b"tRNS", &[0, 0, 0, 0, 0, 0]);
+    png_chunk(&mut output, b"PLTE", &[0, 0, 0]);
+    png_chunk(
+        &mut output,
+        b"IDAT",
+        &[0x78, 0x9c, 0x63, 0x60, 0x60, 0x60, 0, 0, 0, 4, 0, 1],
+    );
+    png_chunk(&mut output, b"IEND", &[]);
+    output
+}
+
 fn deflated_zip_with_trailing_data(name: &str, data: &[u8]) -> Vec<u8> {
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data).unwrap();
@@ -1184,6 +1211,27 @@ fn ooxml_requires_authenticated_package_envelope_and_real_image_parts() {
         Err(ConversionError::CorruptInput { .. })
     ));
 
+    let bad_order_image = temp.path().join("bad-png-order.docx");
+    let bad_order_png = truecolor_png_with_palette_after_transparency();
+    write_zip(
+        &bad_order_image,
+        &[
+            TestEntry::file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/pixel.png"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:blip r:embed="img"/></w:drawing></w:r></w:p></w:body></w:document>"#,
+            ),
+            TestEntry::file("word/media/pixel.png", &bad_order_png),
+        ],
+    );
+    assert!(matches!(
+        DocxConverter.convert(&request(bad_order_image)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
     let wrong_image_type = temp.path().join("wrong-image-type.docx");
     write_zip(
         &wrong_image_type,
@@ -1788,11 +1836,14 @@ fn xlsx_rejects_external_workbook_and_dde_formulas_but_keeps_local_references() 
         ("dde", "cmd|' /C calc'!A0", true),
         ("webservice", "WEBSERVICE ( \"https://invalid\" )", true),
         ("rtd", "rTd(\"server\",,\"topic\")", true),
-        ("filterxml", "FILTERXML(\"&lt;x/&gt;\",\"/x\")", true),
+        ("image", "ImAgE ( \"https://invalid\" )", true),
+        ("filterxml", "FILTERXML(A1,\"/root\")", false),
         ("quoted-local-sheet", "'Sheet 2'!A1", false),
         ("quoted-local-apostrophe", "'O''Brien'!A1", false),
+        ("quoted-local-pipe", "'A|B'!A1", false),
         ("function-looking-sheet", "'WEBSERVICE('!A1", false),
         ("structured-local", "Table1[Column]", false),
+        ("local-pipe-string", "\"A|B\"", false),
         (
             "external-looking-string",
             "\"WEBSERVICE([Book.xlsx]Sheet!A1)\"",
@@ -1820,7 +1871,8 @@ fn xlsx_rejects_external_workbook_and_dde_formulas_but_keeps_local_references() 
             );
         } else {
             let markdown = emitted(&result.unwrap());
-            assert!(markdown.contains(formula), "{name}");
+            let emitted_formula = formula.replace('|', "\\|");
+            assert!(markdown.contains(&emitted_formula), "{name}");
         }
     }
 

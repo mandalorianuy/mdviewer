@@ -444,9 +444,6 @@ fn reject_external_formula(formula: &str) -> Result<(), ConversionError> {
             "XLSX formula has an unterminated string literal",
         ));
     }
-    if lexical.contains('|') {
-        return Err(corrupt_error("XLSX DDE formula references are unsupported"));
-    }
     let mut function_lexical = String::with_capacity(lexical.len());
     let mut characters = lexical.chars().peekable();
     let mut quoted_sheet = false;
@@ -468,12 +465,15 @@ fn reject_external_formula(formula: &str) -> Result<(), ConversionError> {
             "XLSX formula has an unterminated quoted sheet token",
         ));
     }
+    if function_lexical.contains('|') {
+        return Err(corrupt_error("XLSX DDE formula references are unsupported"));
+    }
     let compact = function_lexical
         .chars()
         .filter(|character| !character.is_ascii_whitespace())
         .collect::<String>()
         .to_ascii_uppercase();
-    for function in ["WEBSERVICE", "RTD", "FILTERXML", "STOCKHISTORY"] {
+    for function in ["WEBSERVICE", "RTD", "IMAGE", "STOCKHISTORY"] {
         let needle = format!("{function}(");
         if compact.match_indices(&needle).any(|(start, _)| {
             compact[..start]
