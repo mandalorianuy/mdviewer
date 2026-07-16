@@ -26,11 +26,7 @@ verify_pdfium_receipt "$ROOT"
 
 if [ "$mode" = "signed" ]; then
   verify_clean_release_tree "$ROOT"
-  : "${CODESIGN_IDENTITY:?CODESIGN_IDENTITY must name a Developer ID Application identity}"
-  printf '%s\n' "$CODESIGN_IDENTITY" | grep -q '^Developer ID Application:' ||
-    release_die "CODESIGN_IDENTITY must be a Developer ID Application identity"
-  security find-identity -v -p codesigning | grep -Fq "\"$CODESIGN_IDENTITY\"" ||
-    release_die "CODESIGN_IDENTITY is unavailable in the active keychains"
+  verify_production_signing_identity "${CODESIGN_IDENTITY:-}"
 else
   printf '%s\n' 'UNSIGNED SMOKE ONLY: no Developer ID signature or notarization is claimed.'
   if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]; then

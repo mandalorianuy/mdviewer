@@ -165,6 +165,58 @@ verify_clean_release_tree() {
   fi
 }
 
+verify_production_signing_identity() {
+  local identity="${1:-}"
+  local identities
+
+  case "$identity" in
+    'Developer ID Application: '?*) ;;
+    *) release_die "CODESIGN_IDENTITY must name a Developer ID Application identity"; return 1 ;;
+  esac
+  case "$identity" in
+    *$'\n'*|*$'\r'*|*'"'*)
+      release_die "CODESIGN_IDENTITY contains invalid characters"
+      return 1
+      ;;
+  esac
+  require_command security || return 1
+  identities="$(security find-identity -v -p codesigning 2>/dev/null)" || {
+    release_die "available code-signing identities could not be inspected"
+    return 1
+  }
+  printf '%s\n' "$identities" | grep -Fq "\"$identity\"" || {
+    release_die "CODESIGN_IDENTITY is unavailable in the active keychains"
+    return 1
+  }
+}
+
+verify_notarization_credentials() {
+  local identity="${1:-}"
+  local key_id="${2:-}"
+  local issuer="${3:-}"
+  local key_path="${4:-}"
+
+  verify_production_signing_identity "$identity" || return 1
+  printf '%s\n' "$key_id" | grep -Eq '^[A-Z0-9]{10}$' || {
+    release_die "APPLE_API_KEY must be exactly 10 uppercase alphanumeric characters"
+    return 1
+  }
+  printf '%s\n' "$issuer" |
+    grep -Eq '^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$' || {
+      release_die "APPLE_API_ISSUER must be a UUID"
+      return 1
+    }
+  test -n "$key_path" && test -f "$key_path" && test -r "$key_path" && test ! -L "$key_path" || {
+    release_die "APPLE_API_KEY_PATH must be a readable regular non-symlink file"
+    return 1
+  }
+  if ! grep -q '^-----BEGIN PRIVATE KEY-----$' "$key_path" ||
+     ! grep -q '^-----END PRIVATE KEY-----$' "$key_path"; then
+    release_die "APPLE_API_KEY_PATH does not contain a PEM private key"
+    return 1
+  fi
+}
+
 verify_developer_id_app() {
   app="$1"
   test -d "$app" || release_die "application bundle is missing: $app" || return 1

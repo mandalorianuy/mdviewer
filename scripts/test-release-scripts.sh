@@ -194,6 +194,129 @@ verify_then_publish_release "$release_root" "$release_receipt" "$release_app" "$
 verify_package_receipt "$release_root" "$release_receipt" signed "$release_app" "$release_dmg" true true
 expect_failure "already published receipt rerun" verify_then_publish_release "$release_root" "$release_receipt" "$release_app" "$release_dmg" pass_release_gates
 
+notary_root="$tmp/notary-root"
+notary_fake_bin="$tmp/notary-fake-bin"
+notary_sentinel="$tmp/notary-submit-reached"
+mkdir -p "$notary_root/scripts" "$notary_root/apps/desktop/src-tauri" "$notary_fake_bin"
+cp "$ROOT/scripts/release-common.sh" "$notary_root/scripts/release-common.sh"
+cp "$ROOT/scripts/notarize-macos.sh" "$notary_root/scripts/notarize-macos.sh"
+cat >"$notary_root/apps/desktop/src-tauri/tauri.conf.json" <<'EOF'
+{"version":"0.1.0"}
+EOF
+printf 'dist/\n' >"$notary_root/.gitignore"
+git -C "$notary_root" init -q
+git -C "$notary_root" config user.email test@example.invalid
+git -C "$notary_root" config user.name Test
+git -C "$notary_root" add .gitignore apps scripts
+git -C "$notary_root" commit -qm initial
+notary_app="$notary_root/dist/macos-arm64/MDViewer.app"
+notary_dmg="$notary_root/dist/macos-arm64/MDViewer-0.1.0-arm64.dmg"
+notary_receipt="$notary_root/dist/macos-arm64/package-receipt.json"
+mkdir -p "$notary_app/Contents/MacOS" "$notary_app/Contents/Resources/lib"
+printf 'fixture executable\n' >"$notary_app/Contents/MacOS/mdviewer-desktop"
+printf 'fixture pdfium\n' >"$notary_app/Contents/Resources/lib/libpdfium.dylib"
+printf 'fixture dmg\n' >"$notary_dmg"
+node - "$notary_root" "$notary_app" "$notary_dmg" "$notary_receipt" <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const { execFileSync } = require('node:child_process');
+const [root, app, dmg, receipt] = process.argv.slice(2);
+const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+fs.writeFileSync(receipt, `${JSON.stringify({
+  schemaVersion: 1,
+  mode: 'signed',
+  publishable: false,
+  signed: true,
+  notarized: false,
+  target: 'aarch64-apple-darwin',
+  commit: execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+  artifacts: {
+    executableSha256: sha256(`${app}/Contents/MacOS/mdviewer-desktop`),
+    pdfiumSha256: sha256(`${app}/Contents/Resources/lib/libpdfium.dylib`),
+    dmgSha256: sha256(dmg),
+  },
+}, null, 2)}\n`);
+NODE
+cat >"$notary_fake_bin/codesign" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-dv" ]; then
+  printf '%s\n' \
+    'Authority=Developer ID Application: Fixture (ABCDEFGHIJ)' \
+    'TeamIdentifier=ABCDEFGHIJ' \
+    'flags=0x10000(runtime)' >&2
+fi
+exit 0
+EOF
+cat >"$notary_fake_bin/security" <<'EOF'
+#!/usr/bin/env bash
+printf '  1) FAKEHASH "%s"\n' "${FAKE_IDENTITIES:-}"
+EOF
+cat >"$notary_fake_bin/ditto" <<'EOF'
+#!/usr/bin/env bash
+touch "${@: -1}"
+EOF
+cat >"$notary_fake_bin/xcrun" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "notarytool" ] && [ "${2:-}" = "submit" ]; then
+  : >"$NOTARY_SUBMIT_SENTINEL"
+  exit 99
+fi
+exit 0
+EOF
+chmod +x "$notary_fake_bin/codesign" "$notary_fake_bin/security" \
+  "$notary_fake_bin/ditto" "$notary_fake_bin/xcrun"
+valid_identity='Developer ID Application: Fixture (ABCDEFGHIJ)'
+valid_key_id='A1B2C3D4E5'
+valid_issuer='11111111-2222-3333-4444-555555555555'
+valid_key_path="$tmp/AuthKey-valid.p8"
+cat >"$valid_key_path" <<'EOF'
+-----BEGIN PRIVATE KEY-----
+fixture
+-----END PRIVATE KEY-----
+EOF
+
+expect_notary_preflight_failure() {
+  local label="$1"
+  local identity="$2"
+  local key_id="$3"
+  local issuer="$4"
+  local key_path="$5"
+  local identities="$6"
+  rm -f "$notary_sentinel"
+  expect_failure "$label" env \
+    PATH="$notary_fake_bin:$PATH" \
+    NOTARY_SUBMIT_SENTINEL="$notary_sentinel" \
+    FAKE_IDENTITIES="$identities" \
+    CODESIGN_IDENTITY="$identity" \
+    APPLE_API_KEY="$key_id" \
+    APPLE_API_ISSUER="$issuer" \
+    APPLE_API_KEY_PATH="$key_path" \
+    "$notary_root/scripts/notarize-macos.sh"
+  test ! -e "$notary_sentinel" || fail "$label reached external notarytool submit"
+}
+
+expect_notary_preflight_failure "mistyped signing identity" \
+  'Developer ID Applicatio: Fixture (ABCDEFGHIJ)' "$valid_key_id" "$valid_issuer" "$valid_key_path" "$valid_identity"
+expect_notary_preflight_failure "non-Developer-ID signing identity" \
+  'Apple Development: Fixture (ABCDEFGHIJ)' "$valid_key_id" "$valid_issuer" "$valid_key_path" "$valid_identity"
+expect_notary_preflight_failure "unavailable signing identity" \
+  "$valid_identity" "$valid_key_id" "$valid_issuer" "$valid_key_path" 'Developer ID Application: Other (ABCDEFGHIJ)'
+expect_notary_preflight_failure "invalid notary key ID" \
+  "$valid_identity" 'TOO-SHORT' "$valid_issuer" "$valid_key_path" "$valid_identity"
+expect_notary_preflight_failure "invalid notary issuer" \
+  "$valid_identity" "$valid_key_id" 'not-a-uuid' "$valid_key_path" "$valid_identity"
+ln -s "$valid_key_path" "$tmp/AuthKey-link.p8"
+expect_notary_preflight_failure "symlinked notary private key" \
+  "$valid_identity" "$valid_key_id" "$valid_issuer" "$tmp/AuthKey-link.p8" "$valid_identity"
+printf 'not a private key\n' >"$tmp/AuthKey-invalid.p8"
+expect_notary_preflight_failure "invalid notary private key content" \
+  "$valid_identity" "$valid_key_id" "$valid_issuer" "$tmp/AuthKey-invalid.p8" "$valid_identity"
+
+FAKE_IDENTITIES="$valid_identity" PATH="$notary_fake_bin:$PATH" \
+  verify_production_signing_identity "$valid_identity"
+FAKE_IDENTITIES="$valid_identity" PATH="$notary_fake_bin:$PATH" \
+  verify_notarization_credentials "$valid_identity" "$valid_key_id" "$valid_issuer" "$valid_key_path"
+
 test -f "$ROOT/.github/workflows/ci.yml" || fail "CI workflow is missing"
 test -f "$ROOT/.github/workflows/release-macos.yml" || fail "macOS release workflow is missing"
 grep -q 'actions/checkout@v7' "$ROOT/.github/workflows/ci.yml" || fail "CI must use checkout v7"
@@ -236,6 +359,12 @@ if grep -q 'publishable = true' "$ROOT/scripts/notarize-macos.sh"; then
 fi
 grep -q 'verify_then_publish_release' "$ROOT/scripts/verify-release.sh" ||
   fail "production verification must own the final publishable transition"
+grep -q 'verify_production_signing_identity' "$ROOT/scripts/package-macos-arm64.sh" ||
+  fail "package and notarization must share the production signing identity preflight"
+notary_preflight_line="$(grep -n 'verify_notarization_credentials' "$ROOT/scripts/notarize-macos.sh" | head -n 1 | cut -d: -f1)"
+notary_zip_line="$(grep -n 'notarization.zip' "$ROOT/scripts/notarize-macos.sh" | head -n 1 | cut -d: -f1)"
+test -n "$notary_preflight_line" && test -n "$notary_zip_line" && test "$notary_preflight_line" -lt "$notary_zip_line" ||
+  fail "notarization credential preflight must run before ZIP creation and external submission"
 grep -q 'actions/upload-artifact@v7' "$ROOT/.github/workflows/release-macos.yml" ||
   fail "release workflow must use upload-artifact v7"
 grep -q 'signed_application_uses_its_bundled_pdfium_without_environment_configuration' \

@@ -38,11 +38,11 @@ case "$receipt_state" in
     ;;
 esac
 
-: "${APPLE_API_KEY_PATH:?APPLE_API_KEY_PATH is required}"
-: "${APPLE_API_KEY:?APPLE_API_KEY is required}"
-: "${APPLE_API_ISSUER:?APPLE_API_ISSUER is required}"
-: "${CODESIGN_IDENTITY:?CODESIGN_IDENTITY is required to recreate the DMG}"
-test -f "$APPLE_API_KEY_PATH" || release_die "APPLE_API_KEY_PATH does not point to a file"
+verify_notarization_credentials \
+  "${CODESIGN_IDENTITY:-}" \
+  "${APPLE_API_KEY:-}" \
+  "${APPLE_API_ISSUER:-}" \
+  "${APPLE_API_KEY_PATH:-}"
 
 zip="$ROOT/dist/macos-arm64/MDViewer-$version-notarization.zip"
 rm -f "$zip"
