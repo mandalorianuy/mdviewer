@@ -4,9 +4,11 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt as WindowsOsStrExt;
 #[cfg(target_os = "macos")]
 use std::process::Command;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
 use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
 use serde::Serialize;
@@ -211,7 +213,9 @@ impl ApplicationAlias for NativeApplicationAlias {
 }
 
 pub struct IntegrationManager<A, V> {
+    home: PathBuf,
     target: PathBuf,
+    retained: PathBuf,
     artifact: ApplicationArtifact,
     alias: A,
     verifier: V,
@@ -242,7 +246,10 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             return Err(IntegrationError::UnsafeTarget);
         }
         Ok(Self {
+            home: home.to_path_buf(),
             target: home.join("Library/PDF Services").join(WORKFLOW_NAME),
+            retained: home
+                .join("Library/Application Support/com.mdviewer.desktop/Retired PDF Services"),
             artifact,
             alias,
             verifier,
@@ -288,7 +295,7 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
         let quarantine = self.quarantine_validated_target(
             inspected.identity.ok_or(IntegrationError::UnsafeTarget)?,
         )?;
-        fs::remove_file(quarantine).map_err(|_| IntegrationError::Io)?;
+        self.retain_or_restore(quarantine)?;
         sync_parent(&self.target)
     }
 
@@ -387,11 +394,11 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             }
             if let Some(expected) = replace {
                 let quarantine = self.quarantine_validated_target(expected)?;
+                let retained = self.retain_or_restore(quarantine)?;
                 if move_no_replace(&temporary, &self.target).is_err() {
-                    let _ = move_no_replace(&quarantine, &self.target);
+                    let _ = move_no_replace(&retained, &self.target);
                     return Err(IntegrationError::UnsafeTarget);
                 }
-                fs::remove_file(quarantine).map_err(|_| IntegrationError::Io)?;
             } else {
                 move_no_replace(&temporary, &self.target).map_err(|error| {
                     if error.kind() == io::ErrorKind::AlreadyExists {
@@ -404,7 +411,7 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             sync_parent(&self.target)
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+            let _ = self.retain_path(&temporary);
         }
         result
     }
@@ -438,6 +445,34 @@ impl<A: ApplicationAlias, V: CodeSignatureVerifier> IntegrationManager<A, V> {
             return Err(IntegrationError::UnsafeTarget);
         }
         Ok(quarantine)
+    }
+
+    fn retain_or_restore(&self, quarantine: PathBuf) -> Result<PathBuf, IntegrationError> {
+        match self.retain_path(&quarantine) {
+            Ok(retained) => Ok(retained),
+            Err(error) => {
+                let _ = move_no_replace(&quarantine, &self.target);
+                Err(error)
+            }
+        }
+    }
+
+    fn retain_path(&self, source: &Path) -> Result<PathBuf, IntegrationError> {
+        match fs::symlink_metadata(source) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(IntegrationError::UnsafeTarget);
+            }
+            Err(_) => return Err(IntegrationError::Io),
+        }
+        ensure_safe_descendant_directories(&self.home, &self.retained)?;
+        let retained = self
+            .retained
+            .join(format!("{WORKFLOW_NAME}-{}.retained", Uuid::new_v4()));
+        move_no_replace(source, &retained).map_err(|_| IntegrationError::UnsafeTarget)?;
+        sync_parent(source)?;
+        sync_parent(&retained)?;
+        Ok(retained)
     }
 }
 
@@ -479,10 +514,109 @@ fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::hard_link(source, destination)?;
-    fs::remove_file(source)
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid source path"))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid destination path"))?;
+    // SAFETY: both C strings are alive for the call and contain no interior NUL bytes.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both UTF-16 strings are NUL-terminated and alive for the call. Flags are zero, so
+    // MoveFileExW refuses an existing destination instead of replacing it.
+    let result = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows"
+)))]
+fn move_no_replace(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "exclusive rename is not implemented on this platform",
+    ))
+}
+
+fn ensure_safe_descendant_directories(
+    ancestor: &Path,
+    directory: &Path,
+) -> Result<(), IntegrationError> {
+    let relative = directory
+        .strip_prefix(ancestor)
+        .map_err(|_| IntegrationError::UnsafeTarget)?;
+    ensure_safe_directory(ancestor)?;
+    let mut current = ancestor.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(IntegrationError::UnsafeTarget);
+        };
+        current.push(component);
+        ensure_safe_directory(&current)?;
+    }
+    Ok(())
+}
+
+fn ensure_safe_directory(directory: &Path) -> Result<(), IntegrationError> {
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(IntegrationError::UnsafeTarget);
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(IntegrationError::Io),
+            }
+            let metadata = fs::symlink_metadata(directory).map_err(|_| IntegrationError::Io)?;
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(IntegrationError::UnsafeTarget);
+            }
+            sync_parent(directory)?;
+        }
+        Err(_) => return Err(IntegrationError::Io),
+    }
+    Ok(())
 }
 
 fn ensure_safe_parent(parent: &Path) -> Result<(), IntegrationError> {

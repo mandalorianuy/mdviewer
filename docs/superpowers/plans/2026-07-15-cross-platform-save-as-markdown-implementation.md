@@ -748,7 +748,10 @@ executable SHA-256 before reporting `installed`. Replace an owned outdated alias
 Uninstall only a current or verifiably outdated alias; never recursively remove
 `~/Library/PDF Services` and never replace an invalid/unrelated item. For repair and uninstall,
 move the observed target exclusively to a UUID quarantine, revalidate its filesystem identity and
-owned-alias checks there, and publish or restore only with no-overwrite operations.
+owned-alias checks there, then move it exclusively into the retained tombstone directory under
+`~/Library/Application Support/com.mdviewer.desktop/Retired PDF Services`. Publish or restore only
+with no-overwrite operations. Never unlink the quarantine, tombstone or an abandoned UUID temporary
+by pathname; retain uncertain objects. Task 14 performs no automatic tombstone cleanup.
 
 - [x] **Step 4: Connect Preferences → Integrations**
 

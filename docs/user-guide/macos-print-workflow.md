@@ -12,11 +12,19 @@ La integración se instala como un alias nativo a la aplicación firmada en:
 MDViewer resuelve el alias sin mostrar interfaz y comprueba el bundle ID, el Team ID, la firma de
 código y el SHA-256 del ejecutable de la aplicación antes de mostrarlo como `installed`. Un alias a
 una versión anterior firmada aparece como `outdated` y ofrece **Repair**. Un elemento `invalid` se
-preserva sin ofrecer una acción destructiva. **Uninstall** requiere confirmación y elimina solamente
+preserva sin ofrecer una acción destructiva. **Uninstall** requiere confirmación y retira solamente
 el alias exacto administrado por MDViewer; nunca elimina `PDF Services` ni otros workflows. Antes
 de reparar o desinstalar, MDViewer mueve el objeto observado a una cuarentena única sin sobrescribir,
-vuelve a comprobar su identidad y contenido, y aborta restaurándolo si el destino cambió durante la
-operación.
+vuelve a comprobar su identidad y contenido, y lo retira con otro movimiento sin sobrescribir a:
+
+```text
+~/Library/Application Support/com.mdviewer.desktop/Retired PDF Services/
+```
+
+El tombstone es un alias pequeño que se conserva: MDViewer no ejecuta un borrado final por nombre,
+porque el contenido podría haber cambiado después de validarlo. Reparar publica el alias nuevo exacto
+y desinstalar deja `PDF Services` sin el item. Si el almacenamiento de retiro fue interferido, la
+operación intenta restaurar el workflow sin sobrescribir y falla de forma segura.
 
 ## Uso
 
@@ -50,3 +58,7 @@ requiere instalar una biblioteca aparte ni configurar variables de entorno.
   después de instalar la integración.
 - Si la reparación o desinstalación falla, verificá que el destino siga siendo el alias nativo
   firmado que instaló MDViewer. Los enlaces simbólicos y archivos ajenos nunca se siguen ni borran.
+- Cada reparación o desinstalación conserva un tombstone pequeño. Esta versión no hace limpieza
+  automática: una futura limpieza segura deberá volver a validar y retirar exclusivamente el objeto
+  retenido, sin borrar por pathname compartido. No elimines un tombstone manualmente si su contenido
+  no es reconocible.

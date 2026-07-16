@@ -215,8 +215,13 @@ resuelve el alias sin UI y verifica bundle ID, Team ID, firma y checksum del
 ejecutable. Después de una actualización, MDViewer ofrece reparar atómicamente un
 alias que apunte a una versión firmada anterior. Un elemento ajeno o no verificable
 se preserva. Reparar y desinstalar usan un movimiento exclusivo a cuarentena y
-revalidan la identidad de filesystem y el alias ya movido antes de publicar o borrar;
-si hubo un intercambio concurrente, restauran sin sobrescribir y fallan de forma segura.
+revalidan la identidad de filesystem y el alias ya movido antes de publicar o retirar;
+después lo mueven exclusivamente a un tombstone UUID bajo Application Support y lo
+conservan. No existe un `unlink` final por pathname. Si hubo interferencia concurrente,
+restauran sin sobrescribir o preservan el último objeto alcanzado y fallan de forma segura.
+Los tombstones son pequeños y no tienen limpieza automática; cualquier política futura
+de cleanup debe volver a verificar el objeto y usar movimientos exclusivos, nunca borrado
+por un nombre compartido.
 
 ### 6.2 Recepción del trabajo
 
