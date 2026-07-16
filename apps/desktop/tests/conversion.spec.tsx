@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../src/App";
+import { confirmReplacement, type DocumentState } from "../src/features/documents/document";
 import type { Backend } from "../src/lib/tauri";
 
 function deferred<T>() {
@@ -68,6 +69,8 @@ describe("conversion behavior", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Convertir archivo" }));
     expect(await screen.findByRole("progressbar", { name: "Conversión en curso" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abrir Markdown" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Guardar como" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Cancelar conversión" }));
     const cancelling = screen.getByRole("button", { name: "Cancelando conversión" });
     expect(cancelling).toBeDisabled();
@@ -114,6 +117,36 @@ describe("conversion behavior", () => {
     expect(api.openDocument).toHaveBeenCalledWith("markdown-token");
     expect(screen.getByRole("textbox", { name: "Editor Markdown" })).toHaveValue("# Converted");
   });
+
+  it.each([false, true])(
+    "reconfirms conversion replacement when clean document identity changes and acceptance is %s",
+    (accept) => {
+      const snapshot = { generation: 1, content: "A clean" };
+      const currentB: DocumentState = {
+        generation: 2,
+        name: "b.md",
+        content: "B clean",
+        savedContent: "B clean",
+        writeToken: "write-b",
+      };
+      const convertedDocument: DocumentState = {
+        generation: 3,
+        name: "report.md",
+        content: "# Converted",
+        savedContent: "# Converted",
+        writeToken: "converted-write-token",
+      };
+      const confirm = vi.fn().mockReturnValue(accept);
+
+      const shouldReplace = confirmReplacement(currentB, snapshot, false, confirm);
+      const result = shouldReplace ? convertedDocument : currentB;
+
+      expect(confirm).toHaveBeenCalledWith(
+        "El documento cambió mientras se convertía. ¿Reemplazarlo con la conversión?",
+      );
+      expect(result).toBe(accept ? convertedDocument : currentB);
+    },
+  );
 
   it("finishes a claimed print job when dirty replacement is rejected", async () => {
     const api = backend();
@@ -184,5 +217,28 @@ describe("conversion behavior", () => {
     api.emitPrintJob("second-job");
     await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledWith("second-job"));
     expect(await screen.findByRole("alert")).toHaveTextContent("No se pudo completar la conversión.");
+  });
+
+  it("surfaces failed print-job finish and retries only the durable terminal step", async () => {
+    const api = backend();
+    api.selectSaveDocument.mockResolvedValue(null);
+    api.finishPrintJob
+      .mockRejectedValueOnce(new Error("temporary cleanup failure"))
+      .mockResolvedValueOnce(undefined);
+    render(<App backend={api} />);
+    await waitFor(() => expect(api.onPrintJobRequested).toHaveBeenCalled());
+
+    api.emitPrintJob("job-id");
+    await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "No se pudo finalizar el trabajo de impresión. Volvé a intentarlo.",
+    );
+
+    api.emitPrintJob("job-id");
+    await waitFor(() => expect(api.finishPrintJob).toHaveBeenCalledTimes(2));
+    expect(api.claimPrintJob).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText(
+      "No se pudo finalizar el trabajo de impresión. Volvé a intentarlo.",
+    )).toBeNull());
   });
 });

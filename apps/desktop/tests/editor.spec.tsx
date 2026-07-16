@@ -3,7 +3,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../src/App";
-import { markdownName } from "../src/features/documents/document";
+import {
+  applySaveCompletion,
+  markdownName,
+  type DocumentState,
+  type SaveCompletion,
+} from "../src/features/documents/document";
 import type { Backend, CloseRequestEvent } from "../src/lib/tauri";
 
 function deferred<T>() {
@@ -92,6 +97,8 @@ describe("viewer and editor behavior", () => {
     await waitFor(() => expect(api.saveDocument).toHaveBeenCalledWith("write-token", "submitted"));
     expect(screen.getByRole("button", { name: "Guardar", exact: true })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Guardar como" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Abrir Markdown" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Convertir archivo" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Guardar como" }));
     expect(api.selectSaveDocument).not.toHaveBeenCalled();
     expect(api.saveDocument).toHaveBeenCalledTimes(1);
@@ -101,6 +108,8 @@ describe("viewer and editor behavior", () => {
 
     expect(editor).toHaveValue("edited while saving");
     expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Guardar", exact: true }));
+    await waitFor(() => expect(api.saveDocument).toHaveBeenLastCalledWith("renewed", "edited while saving"));
   });
 
   it("keeps edits made while Save As is pending dirty and retains the selected name", async () => {
@@ -112,6 +121,8 @@ describe("viewer and editor behavior", () => {
     fireEvent.change(editor, { target: { value: "submitted as copy" } });
     fireEvent.click(screen.getByRole("button", { name: "Guardar como" }));
     await waitFor(() => expect(api.saveDocument).toHaveBeenCalledWith("copy-token", "submitted as copy"));
+    expect(screen.getByRole("button", { name: "Abrir Markdown" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Convertir archivo" })).toBeDisabled();
 
     fireEvent.change(editor, { target: { value: "edited during save as" } });
     await act(() => pending.resolve({ saved: true, writeToken: "copy-renewed" }));
@@ -119,6 +130,57 @@ describe("viewer and editor behavior", () => {
     expect(screen.getByText("copy.md")).toBeInTheDocument();
     expect(editor).toHaveValue("edited during save as");
     expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
+  });
+
+  it("keeps opened or converted document B consistent for both stale save completion orders", () => {
+    const documentA: DocumentState = {
+      generation: 1,
+      name: "a.md",
+      content: "A submitted",
+      savedContent: "A",
+      writeToken: "write-a",
+    };
+    const completions: SaveCompletion[] = [
+      {
+        generation: documentA.generation,
+        savedContent: documentA.content,
+        writeToken: "renewed-a",
+      },
+      {
+        generation: documentA.generation,
+        name: "copy-a.md",
+        savedContent: documentA.content,
+        writeToken: "renewed-copy-a",
+      },
+    ];
+
+    for (const replacementKind of ["opened", "converted"] as const) {
+      const documentB: DocumentState = {
+        generation: 2,
+        name: replacementKind === "opened" ? "b.md" : "converted-b.md",
+        content: replacementKind === "opened" ? "B" : "# Converted B",
+        savedContent: replacementKind === "opened" ? "B" : "# Converted B",
+        writeToken: replacementKind === "opened" ? "write-b" : "converted-write-b",
+      };
+
+      for (const completion of completions) {
+        const replacementFirst = applySaveCompletion(documentB, completion);
+        const saveFirst = documentB;
+        expect(replacementFirst).toBe(documentB);
+        expect(saveFirst).toEqual(documentB);
+        expect(replacementFirst).toMatchObject({
+          name: documentB.name,
+          content: documentB.content,
+          savedContent: documentB.savedContent,
+          writeToken: documentB.writeToken,
+        });
+        expect(applySaveCompletion(documentA, completion)).toMatchObject({
+          name: completion.name ?? "a.md",
+          savedContent: "A submitted",
+          writeToken: completion.writeToken,
+        });
+      }
+    }
   });
 
   it("intercepts rejected dirty close and allows the confirmed close branch", async () => {
@@ -156,6 +218,23 @@ describe("viewer and editor behavior", () => {
     expect(editor.selectionStart).toBe(11);
     fireEvent.click(screen.getByRole("button", { name: "Coincidencia anterior" }));
     expect(editor.selectionStart).toBe(0);
+  });
+
+  it("keeps original UTF-16 selection offsets when case folding expands Unicode", async () => {
+    const api = backend();
+    render(<App backend={api} />);
+    const editor = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Editor Markdown" });
+    fireEvent.change(editor, { target: { value: "İstanbul İ" } });
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    const search = await screen.findByRole("searchbox", { name: "Buscar en el documento" });
+    fireEvent.change(search, { target: { value: "i" } });
+
+    expect(screen.getByText("1 de 2 coincidencias")).toBeInTheDocument();
+    expect(editor.selectionStart).toBe(0);
+    expect(editor.selectionEnd).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Siguiente coincidencia" }));
+    expect(editor.selectionStart).toBe(9);
+    expect(editor.selectionEnd).toBe(10);
   });
 
   it("renders a real GFM AST while disabling raw HTML and unsafe navigation", async () => {

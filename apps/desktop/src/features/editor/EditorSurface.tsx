@@ -9,6 +9,47 @@ interface EditorSurfaceProps {
   onFindClose(): void;
 }
 
+interface FindMatch {
+  start: number;
+  end: number;
+}
+
+function foldWithOriginalOffsets(value: string) {
+  let folded = "";
+  const starts: number[] = [];
+  const ends: number[] = [];
+  let originalOffset = 0;
+  for (const symbol of value) {
+    const foldedSymbol = symbol.toLocaleLowerCase();
+    for (let index = 0; index < foldedSymbol.length; index += 1) {
+      starts.push(originalOffset);
+      ends.push(originalOffset + symbol.length);
+    }
+    folded += foldedSymbol;
+    originalOffset += symbol.length;
+  }
+  return { folded, starts, ends };
+}
+
+function findMatches(content: string, query: string): FindMatch[] {
+  if (!query) return [];
+  const source = foldWithOriginalOffsets(content);
+  const needle = foldWithOriginalOffsets(query).folded;
+  if (!needle) return [];
+  const matches: FindMatch[] = [];
+  let offset = 0;
+  while (offset <= source.folded.length - needle.length) {
+    const position = source.folded.indexOf(needle, offset);
+    if (position < 0) break;
+    matches.push({
+      start: source.starts[position],
+      end: source.ends[position + needle.length - 1],
+    });
+    offset = position + needle.length;
+  }
+  return matches;
+}
+
 export function EditorSurface({
   content,
   findOpen,
@@ -25,18 +66,7 @@ export function EditorSurface({
   }, [findOpen]);
 
   const matches = useMemo(() => {
-    if (!findQuery) return [];
-    const positions: number[] = [];
-    const source = content.toLocaleLowerCase();
-    const query = findQuery.toLocaleLowerCase();
-    let offset = 0;
-    while (offset <= source.length - query.length) {
-      const position = source.indexOf(query, offset);
-      if (position < 0) break;
-      positions.push(position);
-      offset = position + Math.max(query.length, 1);
-    }
-    return positions;
+    return findMatches(content, findQuery);
   }, [content, findQuery]);
 
   useEffect(() => setCurrentMatch(0), [findQuery]);
@@ -44,7 +74,7 @@ export function EditorSurface({
   useEffect(() => {
     if (matches.length === 0) return;
     const index = Math.min(currentMatch, matches.length - 1);
-    editorRef.current?.setSelectionRange(matches[index], matches[index] + findQuery.length);
+    editorRef.current?.setSelectionRange(matches[index].start, matches[index].end);
     if (index !== currentMatch) setCurrentMatch(index);
   }, [currentMatch, findQuery, matches]);
 

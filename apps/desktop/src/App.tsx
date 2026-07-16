@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { warningMessage } from "./features/conversion/warnings";
-import { markdownName, untitledDocument, type DocumentState } from "./features/documents/document";
+import {
+  applySaveCompletion,
+  confirmReplacement,
+  markdownName,
+  untitledDocument,
+  type DocumentSnapshot,
+  type DocumentState,
+} from "./features/documents/document";
 import { EditorSurface } from "./features/editor/EditorSurface";
 import { MarkdownPreview } from "./features/preview/MarkdownPreview";
 import { ThemeSelect, type ThemePreference } from "./features/settings/ThemeSelect";
@@ -29,16 +36,22 @@ export default function App({ backend = tauriBackend }: AppProps) {
   const [activeOperation, setActiveOperation] = useState<string>();
   const [cancellingOperation, setCancellingOperation] = useState<string>();
   const [conversionNotice, setConversionNotice] = useState<string>();
+  const [openBusy, setOpenBusy] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [workflowBusy, setWorkflowBusy] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string>();
+  const [jobCleanupError, setJobCleanupError] = useState<string>();
   const dirty = currentDocument.content !== currentDocument.savedContent;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const documentRef = useRef(currentDocument);
   documentRef.current = currentDocument;
-  const handledJobs = useRef(new Set<string>());
+  const documentGeneration = useRef(1);
+  const openBusyRef = useRef(false);
+  const inFlightJobs = useRef(new Set<string>());
+  const pendingJobFinishes = useRef(new Set<string>());
+  const terminalJobs = useRef(new Set<string>());
   const saveBusyRef = useRef(false);
   const workflowTail = useRef<Promise<void>>(Promise.resolve());
   const workflowCount = useRef(0);
@@ -85,15 +98,36 @@ export default function App({ backend = tauriBackend }: AppProps) {
     return () => { alive = false; unlisten(); };
   }, [backend]);
 
+  const replaceDocument = useCallback((name: string, content: string, writeToken?: string) => {
+    const replacement = {
+      generation: documentGeneration.current,
+      name,
+      content,
+      savedContent: content,
+      writeToken,
+    };
+    documentGeneration.current += 1;
+    documentRef.current = replacement;
+    setDocument(replacement);
+  }, []);
+
   const openFromToken = useCallback(async (token: string, name: string, writeToken?: string) => {
     const opened = await backend.openDocument(token);
-    setDocument({ name, content: opened.content, savedContent: opened.content, writeToken });
-  }, [backend]);
+    replaceDocument(name, opened.content, writeToken);
+  }, [backend, replaceDocument]);
 
   const openMarkdown = async () => {
-    if (dirty && !window.confirm("Hay cambios sin guardar. ¿Abrir otro documento?")) return;
-    const selection = await backend.selectOpenDocument();
-    if (selection) await openFromToken(selection.readToken, selection.name, selection.writeToken);
+    if (openBusyRef.current) return;
+    openBusyRef.current = true;
+    setOpenBusy(true);
+    try {
+      if (dirtyRef.current && !window.confirm("Hay cambios sin guardar. ¿Abrir otro documento?")) return;
+      const selection = await backend.selectOpenDocument();
+      if (selection) await openFromToken(selection.readToken, selection.name, selection.writeToken);
+    } finally {
+      openBusyRef.current = false;
+      setOpenBusy(false);
+    }
   };
 
   const withSaveLock = useCallback(async <T,>(task: () => Promise<T>): Promise<T | undefined> => {
@@ -109,13 +143,19 @@ export default function App({ backend = tauriBackend }: AppProps) {
   }, []);
 
   const saveAsUnlocked = useCallback(async () => {
-    const selection = await backend.selectSaveDocument(currentDocument.name);
+    const submittedDocument = documentRef.current;
+    const selection = await backend.selectSaveDocument(submittedDocument.name);
     if (!selection) return false;
-    const submittedContent = currentDocument.content;
+    const submittedContent = submittedDocument.content;
     const saved = await backend.saveDocument(selection.writeToken, submittedContent);
-    setDocument((current) => ({ ...current, name: selection.name, savedContent: submittedContent, writeToken: saved.writeToken }));
+    setDocument((current) => applySaveCompletion(current, {
+      generation: submittedDocument.generation,
+      name: selection.name,
+      savedContent: submittedContent,
+      writeToken: saved.writeToken,
+    }));
     return true;
-  }, [backend, currentDocument.content, currentDocument.name]);
+  }, [backend]);
 
   const saveAs = useCallback(
     () => withSaveLock(saveAsUnlocked),
@@ -123,23 +163,23 @@ export default function App({ backend = tauriBackend }: AppProps) {
   );
 
   const save = useCallback(() => withSaveLock(async () => {
-    if (!currentDocument.writeToken) return saveAsUnlocked();
-    const submittedContent = currentDocument.content;
-    const saved = await backend.saveDocument(currentDocument.writeToken, submittedContent);
-    setDocument((current) => ({ ...current, savedContent: submittedContent, writeToken: saved.writeToken }));
+    const submittedDocument = documentRef.current;
+    if (!submittedDocument.writeToken) return saveAsUnlocked();
+    const submittedContent = submittedDocument.content;
+    const saved = await backend.saveDocument(submittedDocument.writeToken, submittedContent);
+    setDocument((current) => applySaveCompletion(current, {
+      generation: submittedDocument.generation,
+      savedContent: submittedContent,
+      writeToken: saved.writeToken,
+    }));
     return true;
-  }), [backend, currentDocument.content, currentDocument.writeToken, saveAsUnlocked, withSaveLock]);
-
-  const finishConversion = useCallback(async (result: ConversionResult, name: string) => {
-    setWarnings(result.warningCodes);
-    await openFromToken(result.markdownToken, name, result.writeToken);
-  }, [openFromToken]);
+  }), [backend, saveAsUnlocked, withSaveLock]);
 
   const convert = useCallback(async (
     sourceToken: string,
     outputToken: string,
     outputName: string,
-    replacementSnapshot: string,
+    replacementSnapshot: DocumentSnapshot,
   ) => {
     const id = operationId();
     setError(undefined);
@@ -148,14 +188,17 @@ export default function App({ backend = tauriBackend }: AppProps) {
     setActiveOperation(id);
     try {
       const result = await backend.convertDocument({ operationId: id, sourceToken, outputToken });
-      if (
-        dirtyRef.current
-        && documentRef.current.content !== replacementSnapshot
-        && !window.confirm("Hay cambios sin guardar. ¿Reemplazar el documento con la conversión?")
-      ) {
+      const opened = await backend.openDocument(result.markdownToken);
+      if (!confirmReplacement(
+        documentRef.current,
+        replacementSnapshot,
+        dirtyRef.current,
+        (message) => window.confirm(message),
+      )) {
         return false;
       }
-      await finishConversion(result, outputName);
+      setWarnings(result.warningCodes);
+      replaceDocument(outputName, opened.content, result.writeToken);
       return true;
     } catch (reason) {
       if (
@@ -174,11 +217,14 @@ export default function App({ backend = tauriBackend }: AppProps) {
       setActiveOperation(undefined);
       setCancellingOperation(undefined);
     }
-  }, [backend, finishConversion]);
+  }, [backend, replaceDocument]);
 
   const convertDirectly = useCallback(async () => {
     if (dirtyRef.current && !window.confirm("Hay cambios sin guardar. ¿Reemplazar el documento con la conversión?")) return;
-    const replacementSnapshot = documentRef.current.content;
+    const replacementSnapshot = {
+      generation: documentRef.current.generation,
+      content: documentRef.current.content,
+    };
     const source = await backend.selectConversionSource();
     if (!source) return;
     const output = await backend.selectSaveDocument(markdownName(source.name.replace(/\.[^.]+$/, "")));
@@ -186,28 +232,57 @@ export default function App({ backend = tauriBackend }: AppProps) {
     await convert(source.readToken, output.writeToken, output.name, replacementSnapshot);
   }, [backend, convert]);
 
-  const handlePrintJob = useCallback(async (id: string) => {
+  const handlePrintJob = useCallback(async (id: string, finishOnly: boolean) => {
     let claimedId: string | undefined;
+    if (finishOnly) {
+      claimedId = id;
+    } else {
+      try {
+        await backend.activateWindow();
+        const job = await backend.claimPrintJob(id);
+        claimedId = job.id;
+        if (dirtyRef.current && !window.confirm("Hay cambios sin guardar. ¿Reemplazar el documento con la conversión?")) {
+          // The durable terminal finish below still applies to a rejected replacement.
+        } else {
+          const replacementSnapshot = {
+            generation: documentRef.current.generation,
+            content: documentRef.current.content,
+          };
+          const output = await backend.selectSaveDocument(markdownName(job.title));
+          if (output) {
+            await convert(job.sourceToken, output.writeToken, output.name, replacementSnapshot);
+          }
+        }
+      } catch {
+        setError("No se pudo completar la conversión.");
+      }
+    }
+
+    if (!claimedId) return "retryable" as const;
     try {
-      await backend.activateWindow();
-      const job = await backend.claimPrintJob(id);
-      claimedId = job.id;
-      if (dirtyRef.current && !window.confirm("Hay cambios sin guardar. ¿Reemplazar el documento con la conversión?")) return;
-      const replacementSnapshot = documentRef.current.content;
-      const output = await backend.selectSaveDocument(markdownName(job.title));
-      if (!output) return;
-      await convert(job.sourceToken, output.writeToken, output.name, replacementSnapshot);
+      await backend.finishPrintJob(claimedId);
+      setJobCleanupError(undefined);
+      return "terminal" as const;
     } catch {
-      setError("No se pudo completar la conversión.");
-    } finally {
-      if (claimedId) await backend.finishPrintJob(claimedId).catch(() => undefined);
+      setJobCleanupError("No se pudo finalizar el trabajo de impresión. Volvé a intentarlo.");
+      return "finish-pending" as const;
     }
   }, [backend, convert]);
 
   const queuePrintJob = useCallback((id: string) => {
-    if (handledJobs.current.has(id)) return;
-    handledJobs.current.add(id);
-    enqueueWorkflow(() => handlePrintJob(id));
+    if (terminalJobs.current.has(id) || inFlightJobs.current.has(id)) return;
+    const finishOnly = pendingJobFinishes.current.has(id);
+    inFlightJobs.current.add(id);
+    enqueueWorkflow(async () => {
+      const result = await handlePrintJob(id, finishOnly);
+      inFlightJobs.current.delete(id);
+      if (result === "terminal") {
+        pendingJobFinishes.current.delete(id);
+        terminalJobs.current.add(id);
+      } else if (result === "finish-pending") {
+        pendingJobFinishes.current.add(id);
+      }
+    });
   }, [enqueueWorkflow, handlePrintJob]);
 
   useEffect(() => {
@@ -245,15 +320,15 @@ export default function App({ backend = tauriBackend }: AppProps) {
         <ThemeSelect value={theme} onChange={setTheme} />
       </header>
       <nav className="toolbar" aria-label="Documento">
-        <button type="button" onClick={() => void openMarkdown()}>Abrir Markdown</button>
-        <button type="button" onClick={() => void save()} disabled={!dirty || saveBusy}>Guardar</button>
-        <button type="button" className="quiet" onClick={() => void saveAs()} disabled={saveBusy}>Guardar como</button>
+        <button type="button" onClick={() => void openMarkdown()} disabled={openBusy || saveBusy || workflowBusy}>Abrir Markdown</button>
+        <button type="button" onClick={() => void save()} disabled={!dirty || openBusy || saveBusy || workflowBusy}>Guardar</button>
+        <button type="button" className="quiet" onClick={() => void saveAs()} disabled={openBusy || saveBusy || workflowBusy}>Guardar como</button>
         <span className="toolbar-separator" />
         <button type="button" className="quiet" onClick={() => setFindOpen(true)}>Buscar</button>
         <button
           type="button"
           className="accent"
-          disabled={workflowBusy}
+          disabled={openBusy || saveBusy || workflowBusy}
           onClick={() => enqueueWorkflow(convertDirectly)}
         >
           Convertir archivo
@@ -280,6 +355,7 @@ export default function App({ backend = tauriBackend }: AppProps) {
       )}
       {conversionNotice && <div className="conversion-notice" role="status">{conversionNotice}</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
+      {jobCleanupError && <div className="error-banner" role="alert">{jobCleanupError}</div>}
       {warnings.length > 0 && <aside className="warning-list" aria-label="Advertencias"><strong>Conversión completada con observaciones</strong><ul>{warnings.map((code, index) => <li key={`${code}-${index}`}>{warningMessage(code)}</li>)}</ul></aside>}
       <div className="workspace">
         <EditorSurface content={currentDocument.content} findOpen={findOpen} findQuery={findQuery} onChange={(content) => setDocument((current) => ({ ...current, content }))} onFindChange={setFindQuery} onFindClose={() => setFindOpen(false)} />
