@@ -1,0 +1,646 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+struct TestDir(PathBuf);
+
+impl TestDir {
+    fn new() -> Self {
+        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "mdconvert-cli-test-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).expect("test directory should be created");
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn binary() -> &'static str {
+    env!("CARGO_BIN_EXE_mdconvert")
+}
+
+fn fixture(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .join(relative)
+}
+
+fn command() -> Command {
+    Command::new(binary())
+}
+
+fn json_value(bytes: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(bytes).expect("stream should contain a JSON envelope")
+}
+
+fn assert_failed_json(output: &std::process::Output, code: &str, exit_code: i32) {
+    assert_eq!(output.status.code(), Some(exit_code));
+    assert!(
+        output.stdout.is_empty(),
+        "JSON failures must leave stdout empty"
+    );
+    let value = json_value(&output.stderr);
+    assert_eq!(value["schema_version"], "mdviewer.convert/v1");
+    assert_eq!(value["status"], "failed");
+    assert!(value["markdown_path"].is_null());
+    assert!(value["assets_path"].is_null());
+    assert_eq!(value["metadata"], serde_json::json!({}));
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert_eq!(value["error"]["code"], code);
+    assert_eq!(value.as_object().unwrap().len(), 7);
+}
+
+fn png_without_semantic_metadata() -> Vec<u8> {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+            }
+        }
+        !crc
+    }
+    fn chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        output.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        output.extend_from_slice(kind);
+        output.extend_from_slice(data);
+        let mut crc_input = kind.to_vec();
+        crc_input.extend_from_slice(data);
+        output.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+    }
+
+    let mut output = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&1_u32.to_be_bytes());
+    ihdr.extend_from_slice(&1_u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    chunk(&mut output, b"IHDR", &ihdr);
+    chunk(
+        &mut output,
+        b"IDAT",
+        &[0x78, 0x9c, 0x63, 0x60, 0, 2, 0, 0, 5, 0, 1],
+    );
+    chunk(&mut output, b"IEND", &[]);
+    output
+}
+
+#[test]
+fn converts_html_and_prints_the_versioned_json_result() {
+    let temp = TestDir::new();
+    let output_path = temp.path().join("document.md");
+
+    let output = command()
+        .args(["convert"])
+        .arg(fixture("html/semantic.html"))
+        .args(["--output"])
+        .arg(&output_path)
+        .arg("--json")
+        .output()
+        .expect("mdconvert should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(value["schema_version"], "mdviewer.convert/v1");
+    assert_eq!(value["status"], "succeeded");
+    assert_eq!(
+        value["markdown_path"],
+        fs::canonicalize(&output_path)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert!(value["assets_path"].is_null());
+    assert_eq!(value["metadata"]["source_format"], "html");
+    assert_eq!(value["warnings"][0]["code"], "external_asset_skipped");
+    assert_eq!(value.as_object().unwrap().len(), 6);
+    assert!(output.stderr.is_empty());
+    assert!(output_path.is_file());
+    assert!(!temp.path().join("document.assets").exists());
+}
+
+#[test]
+fn human_mode_reports_paths_without_document_contents() {
+    let temp = TestDir::new();
+    let input = temp.path().join("private.csv");
+    let output_path = temp.path().join("human.md");
+    fs::write(&input, "name,value\nTOP-SECRET-CONTENT,7\n").unwrap();
+
+    let output = command()
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stdout.starts_with("Converted to "));
+    assert!(stdout.contains(output_path.file_name().unwrap().to_str().unwrap()));
+    assert!(!stdout.contains("TOP-SECRET-CONTENT"));
+    assert!(!stderr.contains("TOP-SECRET-CONTENT"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn human_warning_diagnostics_do_not_echo_authored_urls() {
+    let temp = TestDir::new();
+    let input = temp.path().join("warning.html");
+    let output_path = temp.path().join("warning.md");
+    let secret = "DO-NOT-LOG-SECRET-URL-TOKEN";
+    fs::write(
+        &input,
+        format!("<!doctype html><img src=\"https://example.test/{secret}\" alt=\"image\">"),
+    )
+    .unwrap();
+
+    let output = command()
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stdout.contains(secret));
+    assert!(!stderr.contains(secret));
+    assert_eq!(stderr, "warning[external_asset_skipped]\n");
+}
+
+#[test]
+fn dispatches_every_local_v1_registry_format() {
+    let fixtures = [
+        ("pdf/digital-basic.pdf", "pdf"),
+        ("html/semantic.html", "html"),
+        ("formats/sample.csv", "csv"),
+        ("formats/sample.json", "json"),
+        ("formats/sample.xml", "xml"),
+        ("formats/bounded.zip", "zip"),
+        ("formats/spine.epub", "epub"),
+        ("formats/semantic.docx", "docx"),
+        ("formats/ordered.pptx", "pptx"),
+        ("formats/displayed.xlsx", "xlsx"),
+        ("formats/metadata.png", "png"),
+        ("formats/metadata.jpg", "jpeg"),
+    ];
+    let temp = TestDir::new();
+    for (index, (input, expected_format)) in fixtures.iter().enumerate() {
+        let output_path = temp.path().join(format!("format-{index}.md"));
+        let output = command()
+            .args(["convert"])
+            .arg(fixture(input))
+            .args(["--output"])
+            .arg(&output_path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{input} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value = json_value(&output.stdout);
+        assert_eq!(value["metadata"]["source_format"], *expected_format);
+        assert!(output_path.is_file());
+    }
+}
+
+#[test]
+fn image_success_publishes_required_assets_and_ocr_deferred_warning() {
+    let temp = TestDir::new();
+    let input = temp.path().join("pixel.png");
+    fs::write(&input, png_without_semantic_metadata()).unwrap();
+    let output_path = temp.path().join("image.md");
+    let assets_path = temp.path().join("image.assets");
+
+    let output = command()
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output_path)
+        .args(["--assets"])
+        .arg(&assets_path)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = json_value(&output.stdout);
+    assert_eq!(
+        value["assets_path"],
+        fs::canonicalize(&assets_path)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(value["warnings"][0]["code"], "ocr_deferred");
+    assert!(assets_path.join("image-001.png").is_file());
+    assert!(assets_path.join(".mdviewer-assets.json").is_file());
+}
+
+#[test]
+fn explicit_assets_must_match_the_transactional_derived_path() {
+    let temp = TestDir::new();
+    let output_path = temp.path().join("image.md");
+    let unrelated_assets = temp.path().join("somewhere-else");
+
+    let output = command()
+        .args(["convert"])
+        .arg(fixture("formats/metadata.png"))
+        .args(["--output"])
+        .arg(&output_path)
+        .args(["--assets"])
+        .arg(&unrelated_assets)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert_failed_json(&output, "invalid_assets_path", 2);
+    assert!(!output_path.exists());
+    assert!(!unrelated_assets.exists());
+}
+
+#[test]
+fn valid_explicit_assets_path_is_not_created_when_document_has_no_assets() {
+    let temp = TestDir::new();
+    let input = temp.path().join("fragment.html");
+    let output_path = temp.path().join("fragment.md");
+    let assets_path = temp.path().join("fragment.assets");
+    fs::write(&input, "<p>A valid HTML fragment</p>").unwrap();
+
+    let output = command()
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output_path)
+        .args(["--assets"])
+        .arg(&assets_path)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = json_value(&output.stdout);
+    assert!(value["assets_path"].is_null());
+    assert!(output_path.is_file());
+    assert!(!assets_path.exists());
+}
+
+#[test]
+fn unknown_ambiguous_and_conflicting_formats_are_typed() {
+    let temp = TestDir::new();
+    let unknown = temp.path().join("unknown.bin");
+    fs::write(&unknown, "not a recognized local format").unwrap();
+    let unknown_output = command()
+        .args(["convert"])
+        .arg(&unknown)
+        .args(["--output"])
+        .arg(temp.path().join("unknown.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&unknown_output, "unknown_format", 3);
+
+    let ambiguous = temp.path().join("package.bin");
+    fs::copy(fixture("formats/bounded.zip"), &ambiguous).unwrap();
+    let ambiguous_output = command()
+        .args(["convert"])
+        .arg(&ambiguous)
+        .args(["--output"])
+        .arg(temp.path().join("ambiguous.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&ambiguous_output, "ambiguous_format", 3);
+
+    let conflict = temp.path().join("conflict.json");
+    fs::copy(fixture("formats/sample.xml"), &conflict).unwrap();
+    let conflict_output = command()
+        .args(["convert"])
+        .arg(&conflict)
+        .args(["--output"])
+        .arg(temp.path().join("conflict.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&conflict_output, "format_conflict", 3);
+}
+
+#[test]
+fn missing_input_and_invalid_arguments_are_stable_json_failures() {
+    let temp = TestDir::new();
+    let missing = command()
+        .args(["convert"])
+        .arg(temp.path().join("missing.html"))
+        .args(["--output"])
+        .arg(temp.path().join("missing.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&missing, "input_not_found", 3);
+
+    let invalid = command().args(["convert", "--json"]).output().unwrap();
+    assert_failed_json(&invalid, "invalid_arguments", 2);
+}
+
+#[test]
+fn oversized_input_is_rejected_before_detection_or_publication() {
+    let temp = TestDir::new();
+    let input = temp.path().join("oversized.pdf");
+    let file = fs::File::create(&input).unwrap();
+    file.set_len(500 * 1024 * 1024 + 1).unwrap();
+    let markdown = temp.path().join("oversized.md");
+
+    let output = command()
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(&markdown)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert_failed_json(&output, "limit_exceeded", 4);
+    assert!(!markdown.exists());
+}
+
+#[test]
+fn refuses_existing_markdown_or_assets_without_modifying_them() {
+    let temp = TestDir::new();
+    let markdown = temp.path().join("existing.md");
+    fs::write(&markdown, "KEEP MARKDOWN").unwrap();
+    let output = command()
+        .args(["convert"])
+        .arg(fixture("html/semantic.html"))
+        .args(["--output"])
+        .arg(&markdown)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&output, "output_exists", 5);
+    assert_eq!(fs::read_to_string(&markdown).unwrap(), "KEEP MARKDOWN");
+
+    let markdown = temp.path().join("assets-collision.md");
+    let assets = temp.path().join("assets-collision.assets");
+    fs::create_dir(&assets).unwrap();
+    fs::write(assets.join("personal.txt"), "KEEP ASSET").unwrap();
+    let output = command()
+        .args(["convert"])
+        .arg(fixture("html/semantic.html"))
+        .args(["--output"])
+        .arg(&markdown)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&output, "output_exists", 5);
+    assert!(!markdown.exists());
+    assert_eq!(
+        fs::read_to_string(assets.join("personal.txt")).unwrap(),
+        "KEEP ASSET"
+    );
+}
+
+#[test]
+fn concurrent_no_clobber_publications_allow_only_one_winner() {
+    let temp = TestDir::new();
+    let markdown = temp.path().join("race.md");
+    let mut first = command();
+    first
+        .args(["convert"])
+        .arg(fixture("formats/metadata.png"))
+        .args(["--output"])
+        .arg(&markdown)
+        .arg("--json");
+    let mut second = command();
+    second
+        .args(["convert"])
+        .arg(fixture("formats/metadata.png"))
+        .args(["--output"])
+        .arg(&markdown)
+        .arg("--json");
+
+    first.stdout(Stdio::piped()).stderr(Stdio::piped());
+    second.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let first = first.spawn().unwrap();
+    let second = second.spawn().unwrap();
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+
+    let codes = [first.status.code(), second.status.code()];
+    assert!(codes.contains(&Some(0)));
+    assert!(codes.contains(&Some(5)));
+    assert!(markdown.is_file());
+    assert!(
+        temp.path()
+            .join("race.assets/.mdviewer-assets.json")
+            .is_file()
+    );
+}
+
+#[test]
+fn preexisting_cancel_file_stops_before_conversion_and_leaves_no_partials() {
+    let temp = TestDir::new();
+    let markdown = temp.path().join("cancelled.md");
+    let cancel = temp.path().join("cancel.now");
+    fs::write(&cancel, "cancel").unwrap();
+
+    let output = command()
+        .args(["convert"])
+        .arg(fixture("formats/metadata.png"))
+        .args(["--output"])
+        .arg(&markdown)
+        .args(["--cancel-file"])
+        .arg(&cancel)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert_failed_json(&output, "cancelled", 6);
+    assert!(!markdown.exists());
+    assert!(!temp.path().join("cancelled.assets").exists());
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn scanned_pdf_returns_ocr_required_without_outputs() {
+    let temp = TestDir::new();
+    let markdown = temp.path().join("scanned.md");
+    let output = command()
+        .args(["convert"])
+        .arg(fixture("pdf/scanned.pdf"))
+        .args(["--output"])
+        .arg(&markdown)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert_failed_json(&output, "ocr_required", 4);
+    assert!(!markdown.exists());
+    assert!(!temp.path().join("scanned.assets").exists());
+}
+
+#[test]
+fn absent_pdfium_is_a_typed_failure() {
+    let temp = TestDir::new();
+    let markdown = temp.path().join("pdf.md");
+    let output = command()
+        .env_remove("PDFIUM_DYNAMIC_LIB_PATH")
+        .args(["convert"])
+        .arg(fixture("pdf/digital-basic.pdf"))
+        .args(["--output"])
+        .arg(&markdown)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert_failed_json(&output, "pdfium_unavailable", 4);
+    assert!(!markdown.exists());
+}
+
+#[test]
+fn unicode_input_and_output_paths_round_trip_as_absolute_json_paths() {
+    let temp = TestDir::new();
+    let input = temp.path().join("résumé-文件.json");
+    let markdown = temp.path().join("salida-ñ-文件.md");
+    fs::write(&input, r#"{"saludo":"hola"}"#).unwrap();
+
+    let output = command()
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(&markdown)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = json_value(&output.stdout);
+    assert_eq!(
+        value["markdown_path"],
+        fs::canonicalize(&markdown)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+}
+
+#[test]
+fn failures_never_echo_hostile_document_contents() {
+    let temp = TestDir::new();
+    let input = temp.path().join("corrupt.pdf");
+    let secret = "DO-NOT-LOG-THIS-DOCUMENT-SECRET";
+    fs::write(&input, format!("%PDF-1.7\n{secret}\nnot actually a PDF")).unwrap();
+    let output = command()
+        .env_remove("PDFIUM_DYNAMIC_LIB_PATH")
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(temp.path().join("corrupt.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+}
+
+#[test]
+fn local_only_interface_rejects_urls() {
+    let temp = TestDir::new();
+    let output = command()
+        .args([
+            "convert",
+            "https://example.test/private-document",
+            "--output",
+        ])
+        .arg(temp.path().join("network.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&output, "network_input_unsupported", 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlink_nonregular_and_source_inside_assets_inputs() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TestDir::new();
+    let real = temp.path().join("real.html");
+    let link = temp.path().join("link.html");
+    fs::write(&real, "<!doctype html><p>local</p>").unwrap();
+    symlink(&real, &link).unwrap();
+    let output = command()
+        .args(["convert"])
+        .arg(&link)
+        .args(["--output"])
+        .arg(temp.path().join("link.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&output, "input_symlink", 3);
+
+    let directory = temp.path().join("directory.html");
+    fs::create_dir(&directory).unwrap();
+    let output = command()
+        .args(["convert"])
+        .arg(&directory)
+        .args(["--output"])
+        .arg(temp.path().join("directory.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&output, "input_not_regular", 3);
+
+    let assets = temp.path().join("alias.assets");
+    fs::create_dir(&assets).unwrap();
+    let nested_input = assets.join("source.html");
+    fs::write(&nested_input, "<!doctype html><p>nested</p>").unwrap();
+    let output = command()
+        .args(["convert"])
+        .arg(&nested_input)
+        .args(["--output"])
+        .arg(temp.path().join("alias.md"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_failed_json(&output, "source_output_alias", 2);
+}

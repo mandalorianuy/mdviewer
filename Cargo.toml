@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/desktop/src-tauri",
+    "crates/mdconvert-cli",
     "crates/mdconvert-core",
     "crates/mdconvert-formats",
     "crates/mdconvert-html",
