@@ -25,6 +25,7 @@ pub(crate) const CONTENT_TYPES_NS: &str =
     "http://schemas.openxmlformats.org/package/2006/content-types";
 pub(crate) const OFFICE_DOCUMENT_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+const STRICT_OOXML_PREFIX: &str = "http://purl.oclc.org/ooxml/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveLimits {
@@ -512,24 +513,13 @@ pub(crate) fn authenticate_ooxml(
     expected_main_part: &str,
     expected_main_content_type: &str,
 ) -> Result<ContentTypes, ConversionError> {
-    if archive.entries.iter().any(|entry| {
-        entry
-            .data
-            .windows(b"http://purl.oclc.org/ooxml/".len())
-            .any(|window| window == b"http://purl.oclc.org/ooxml/")
-    }) {
-        return Err(ConversionError::UnsupportedInput {
-            message:
-                "OOXML Strict is unsupported in local v1; only Transitional packages are accepted"
-                    .into(),
-        });
-    }
     let entry = archive.entry("[Content_Types].xml")?;
     let parsed = parse_xml_bytes(&entry.data, "[Content_Types].xml")?;
     let root = parsed
         .roots
         .first()
         .ok_or_else(|| corrupt_error("empty content types XML"))?;
+    reject_strict_namespace(root)?;
     if !root.is(CONTENT_TYPES_NS, "Types") {
         return corrupt("[Content_Types].xml has the wrong expanded root name");
     }
@@ -579,6 +569,22 @@ pub(crate) fn authenticate_ooxml(
             "main part {expected_main_part:?} has the wrong or missing content type"
         ));
     }
+    if let Some(entry) = archive.optional("_rels/.rels") {
+        let parsed = parse_xml_bytes(&entry.data, "_rels/.rels")?;
+        let root = parsed
+            .roots
+            .first()
+            .ok_or_else(|| corrupt_error("empty relationships XML"))?;
+        reject_strict_namespace(root)?;
+        if root.children().any(|node| {
+            node.is(PACKAGE_REL_NS, "Relationship")
+                && node
+                    .attr_ns(None, "Type")
+                    .is_some_and(|kind| kind.starts_with(STRICT_OOXML_PREFIX))
+        }) {
+            return unsupported_strict_ooxml();
+        }
+    }
     let office = relationships(archive, "_rels/.rels")?
         .into_iter()
         .filter(|relationship| relationship.kind == OFFICE_DOCUMENT_REL)
@@ -592,8 +598,31 @@ pub(crate) fn authenticate_ooxml(
             "officeDocument relationship targets {target:?}, expected {expected_main_part:?}"
         ));
     }
-    archive.entry(expected_main_part)?;
+    let main = archive.entry(expected_main_part)?;
+    let parsed = parse_xml_bytes(&main.data, expected_main_part)?;
+    let root = parsed
+        .roots
+        .first()
+        .ok_or_else(|| corrupt_error(format!("empty main OOXML part {expected_main_part:?}")))?;
+    reject_strict_namespace(root)?;
     Ok(content_types)
+}
+
+fn reject_strict_namespace(root: &XmlNode) -> Result<(), ConversionError> {
+    if root
+        .namespace_uri()
+        .is_some_and(|namespace| namespace.starts_with(STRICT_OOXML_PREFIX))
+    {
+        return unsupported_strict_ooxml();
+    }
+    Ok(())
+}
+
+fn unsupported_strict_ooxml<T>() -> Result<T, ConversionError> {
+    Err(ConversionError::UnsupportedInput {
+        message: "OOXML Strict is unsupported in local v1; only Transitional packages are accepted"
+            .into(),
+    })
 }
 
 fn normalize_part_name(path: &str) -> Result<String, ConversionError> {

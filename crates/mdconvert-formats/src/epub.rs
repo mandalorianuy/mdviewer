@@ -338,7 +338,7 @@ fn sanitize_start(
 ) -> Result<BytesStart<'static>, ConversionError> {
     let name = std::str::from_utf8(start.name().as_ref())
         .map_err(|error| corrupt_error(format!("EPUB XHTML element name is not UTF-8: {error}")))?
-        .to_owned();
+        .to_ascii_lowercase();
     let local = name
         .rsplit_once(':')
         .map_or(name.as_str(), |(_, local)| local)
@@ -351,7 +351,7 @@ fn sanitize_start(
             .map_err(|error| {
                 corrupt_error(format!("EPUB XHTML attribute name is not UTF-8: {error}"))
             })?
-            .to_owned();
+            .to_ascii_lowercase();
         let value = attribute
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|error| corrupt_error(format!("invalid EPUB XHTML attribute value: {error}")))?

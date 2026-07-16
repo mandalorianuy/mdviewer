@@ -51,6 +51,31 @@ fn png(width: u32, height: u32, text: Option<(&str, &str)>) -> Vec<u8> {
     output
 }
 
+fn png_with_chunks(
+    bit_depth: u8,
+    color_type: u8,
+    interlace: u8,
+    palettes: &[&[u8]],
+    transparency: Option<&[u8]>,
+    compressed: &[u8],
+) -> Vec<u8> {
+    let mut output = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&[bit_depth, color_type, 0, 0, interlace]);
+    png_chunk(&mut output, b"IHDR", &ihdr);
+    for palette in palettes {
+        png_chunk(&mut output, b"PLTE", palette);
+    }
+    if let Some(transparency) = transparency {
+        png_chunk(&mut output, b"tRNS", transparency);
+    }
+    png_chunk(&mut output, b"IDAT", compressed);
+    png_chunk(&mut output, b"IEND", &[]);
+    output
+}
+
 fn jpeg(width: u16, height: u16) -> Vec<u8> {
     let mut output = vec![0xff, 0xd8];
     let comment = b"Description from JPEG";
@@ -74,6 +99,21 @@ fn multiscan_jpeg() -> Vec<u8> {
     }
     output.extend_from_slice(&[0xff, 0xd9]);
     output
+}
+
+fn jpeg_with_restarts() -> Vec<u8> {
+    let mut bytes = jpeg(1, 1);
+    let sos = bytes
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .unwrap();
+    bytes.splice(sos..sos, [0xff, 0xdd, 0, 4, 0, 1]);
+    let eoi = bytes
+        .windows(2)
+        .position(|window| window == [0xff, 0xd9])
+        .unwrap();
+    bytes.splice(eoi - 1..eoi, [0, 0xff, 0xd0, 0, 0xff, 0xd1, 0]);
+    bytes
 }
 
 #[test]
@@ -170,6 +210,30 @@ fn jpeg_validates_frame_components_scan_parameters_and_multiscan_state() {
         progressive_refinement_without_initial,
     ));
 
+    let mut restart_without_dri = jpeg(1, 1);
+    let eoi = restart_without_dri
+        .windows(2)
+        .position(|window| window == [0xff, 0xd9])
+        .unwrap();
+    restart_without_dri.splice(eoi - 1..eoi, [0, 0xff, 0xd0, 0]);
+    cases.push(("restart-without-dri", restart_without_dri));
+
+    let mut malformed_dri = jpeg(1, 1);
+    let sos = malformed_dri
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .unwrap();
+    malformed_dri.splice(sos..sos, [0xff, 0xdd, 0, 3, 1]);
+    cases.push(("malformed-dri", malformed_dri));
+
+    let mut duplicate_dri = jpeg(1, 1);
+    let sos = duplicate_dri
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .unwrap();
+    duplicate_dri.splice(sos..sos, [0xff, 0xdd, 0, 4, 0, 1, 0xff, 0xdd, 0, 4, 0, 1]);
+    cases.push(("duplicate-dri", duplicate_dri));
+
     for (name, bytes) in cases {
         let path = temp.path().join(format!("{name}.jpg"));
         fs::write(&path, bytes).unwrap();
@@ -182,6 +246,10 @@ fn jpeg_validates_frame_components_scan_parameters_and_multiscan_state() {
     let valid = temp.path().join("multiscan.jpg");
     fs::write(&valid, multiscan_jpeg()).unwrap();
     assert!(ImageConverter.convert(&request(valid)).is_ok());
+
+    let valid_restarts = temp.path().join("restarts.jpg");
+    fs::write(&valid_restarts, jpeg_with_restarts()).unwrap();
+    assert!(ImageConverter.convert(&request(valid_restarts)).is_ok());
 }
 
 #[test]
@@ -215,6 +283,10 @@ fn png_dimensions_and_semantic_metadata_are_preserved_without_ocr() {
     assert_eq!(
         document.metadata.properties.get("png.Title"),
         Some(&"Diagram label".into())
+    );
+    assert_eq!(
+        document.metadata.properties.get("png.interlace_profile"),
+        Some(&"non_interlaced_only".into())
     );
     assert_eq!(document.assets.len(), 1);
     assert!(matches!(document.blocks.as_slice(), [Block::Image { .. }]));
@@ -315,6 +387,48 @@ fn png_requires_a_valid_bounded_image_data_stream() {
     assert!(matches!(
         ImageConverter.convert(&request(split)),
         Err(ConversionError::CorruptInput { .. })
+    ));
+}
+
+#[test]
+fn png_validates_filters_palette_and_noninterlaced_profile() {
+    let temp = TempDir::new().unwrap();
+    let rgba = [0x78, 0x9c, 0x63, 0x60, 0, 2, 0, 0, 5, 0, 1];
+    let bad_filter = [0x78, 0x9c, 0x63, 0x65, 0, 2, 0, 0, 0x1e, 0, 6];
+    let indexed = [0x78, 0x9c, 0x63, 0x60, 0, 0, 0, 2, 0, 1];
+    let cases = [
+        ("filter", png_with_chunks(8, 6, 0, &[], None, &bad_filter)),
+        (
+            "grayscale-palette",
+            png_with_chunks(8, 0, 0, &[&[0, 0, 0]], None, &indexed),
+        ),
+        (
+            "duplicate-palette",
+            png_with_chunks(1, 3, 0, &[&[0, 0, 0], &[255, 255, 255]], None, &indexed),
+        ),
+        (
+            "oversized-palette",
+            png_with_chunks(1, 3, 0, &[&[0, 0, 0, 1, 1, 1, 2, 2, 2]], None, &indexed),
+        ),
+        (
+            "invalid-truecolor-transparency",
+            png_with_chunks(8, 6, 0, &[], Some(&[0, 0]), &rgba),
+        ),
+    ];
+    for (name, bytes) in cases {
+        let path = temp.path().join(format!("{name}.png"));
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            ImageConverter.convert(&request(path)),
+            Err(ConversionError::CorruptInput { .. })
+        ));
+    }
+
+    let adam7 = temp.path().join("adam7.png");
+    fs::write(&adam7, png_with_chunks(8, 6, 1, &[], None, &rgba)).unwrap();
+    assert!(matches!(
+        ImageConverter.convert(&request(adam7)),
+        Err(ConversionError::UnsupportedInput { .. })
     ));
 }
 

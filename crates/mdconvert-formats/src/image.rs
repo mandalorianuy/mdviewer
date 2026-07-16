@@ -129,6 +129,9 @@ fn convert(request: &ConversionRequest, limits: &ImageLimits) -> Result<Document
     properties.insert("width".into(), parsed.width.to_string());
     properties.insert("height".into(), parsed.height.to_string());
     properties.insert("ocr_policy".into(), "deferred_no_pixel_decode".into());
+    if parsed.format == "png" {
+        properties.insert("png.interlace_profile".into(), "non_interlaced_only".into());
+    }
     let id = AssetId::new("asset-001")?;
     let title = request
         .source
@@ -207,6 +210,8 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
     let mut idat_data = Vec::new();
     let mut layout = None;
     let mut palette = false;
+    let mut palette_entries = 0usize;
+    let mut transparency = false;
     let mut ended = false;
     let mut metadata = BTreeMap::new();
     let mut semantic_text = false;
@@ -262,24 +267,57 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
                     (6, 8 | 16) => 4u8,
                     _ => return Err(corrupt_error("unsupported PNG color type/bit depth")),
                 };
-                if data[10] != 0 || data[11] != 0 || data[12] != 0 {
+                if data[10] != 0 || data[11] != 0 || data[12] > 1 {
                     return Err(corrupt_error(
                         "unsupported PNG compression, filter, or interlace method",
                     ));
                 }
+                if data[12] == 1 {
+                    return Err(ConversionError::UnsupportedInput {
+                        message: "Adam7 interlaced PNG is unsupported in local v1; non-interlaced PNG is required".into(),
+                    });
+                }
                 layout = Some((bit_depth, channels, color_type));
             }
             b"PLTE" => {
-                if idat || data.is_empty() || data.len() > 768 || data.len() % 3 != 0 {
+                let (bit_depth, _, color_type) =
+                    layout.ok_or_else(|| corrupt_error("PNG PLTE precedes IHDR"))?;
+                let entries = data.len() / 3;
+                if palette
+                    || idat
+                    || data.is_empty()
+                    || data.len() > 768
+                    || data.len() % 3 != 0
+                    || matches!(color_type, 0 | 4)
+                    || (color_type == 3 && entries > (1usize << bit_depth))
+                {
                     return Err(corrupt_error("invalid PNG palette"));
                 }
                 palette = true;
+                palette_entries = entries;
+            }
+            b"tRNS" => {
+                let (_, _, color_type) =
+                    layout.ok_or_else(|| corrupt_error("PNG tRNS precedes IHDR"))?;
+                let valid = match color_type {
+                    0 => data.len() == 2,
+                    2 => data.len() == 6,
+                    3 => palette && !data.is_empty() && data.len() <= palette_entries,
+                    _ => false,
+                };
+                if transparency || idat || !valid {
+                    return Err(corrupt_error("invalid PNG tRNS chunk"));
+                }
+                transparency = true;
             }
             b"IDAT" => {
                 if width.is_none() || idat_ended {
                     return Err(corrupt_error(
                         "PNG IDAT chunks must be contiguous after IHDR",
                     ));
+                }
+                if layout.is_some_and(|(_, _, color_type)| color_type == 3) && !palette {
+                    return Err(corrupt_error("indexed PNG is missing PLTE before IDAT"));
                 }
                 idat = true;
                 idat_data.extend_from_slice(data);
@@ -406,6 +444,14 @@ fn parse_png(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Conversi
         if read == 0 {
             break;
         }
+        for (index, byte) in buffer[..read].iter().enumerate() {
+            let position = decoded
+                .checked_add(u64::try_from(index).unwrap_or(u64::MAX))
+                .ok_or_else(|| corrupt_error("PNG image data size overflow"))?;
+            if position % row_bytes == 0 && *byte > 4 {
+                return Err(corrupt_error("PNG scanline has an invalid filter byte"));
+            }
+        }
         decoded = decoded
             .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
             .ok_or_else(|| corrupt_error("PNG image data size overflow"))?;
@@ -455,6 +501,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
     let mut scans = 0u64;
     let mut sequential_components = std::collections::HashSet::new();
     let mut progressive_coefficients = std::collections::HashMap::new();
+    let mut restart_interval = None;
     while cursor < bytes.len() {
         if bytes.get(cursor) != Some(&0xff) {
             return Err(corrupt_error("JPEG marker is missing its 0xFF prefix"));
@@ -548,6 +595,7 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
             }
             cursor = data_end;
             let mut entropy_bytes = 0u64;
+            let mut expected_restart = 0u8;
             loop {
                 let byte = *bytes
                     .get(cursor)
@@ -573,6 +621,12 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
                     entropy_bytes = entropy_bytes.saturating_add(1);
                     cursor += 1;
                 } else if (0xd0..=0xd7).contains(&next) {
+                    if restart_interval.is_none() || next != 0xd0 + expected_restart {
+                        return Err(corrupt_error(
+                            "JPEG restart marker is missing DRI or out of sequence",
+                        ));
+                    }
+                    expected_restart = (expected_restart + 1) % 8;
                     cursor += 1;
                 } else {
                     cursor = marker_start;
@@ -598,7 +652,16 @@ fn parse_jpeg(bytes: &[u8], limits: &ImageLimits) -> Result<ParsedImage, Convers
         let data_start = checked_add(cursor, 2, "JPEG segment")?;
         let data_end = checked_add(cursor, length, "JPEG segment")?;
         let data = slice(bytes, data_start, data_end, "JPEG segment")?;
-        if matches!(marker, 0xc0 | 0xc2) {
+        if marker == 0xdd {
+            if data.len() != 2 || restart_interval.is_some() || scans > 0 {
+                return Err(corrupt_error("invalid or duplicate JPEG DRI segment"));
+            }
+            let interval = u16::from_be_bytes([data[0], data[1]]);
+            if interval == 0 {
+                return Err(corrupt_error("JPEG DRI interval must be nonzero"));
+            }
+            restart_interval = Some(interval);
+        } else if matches!(marker, 0xc0 | 0xc2) {
             if frame.is_some() {
                 return Err(corrupt_error(
                     "JPEG contains multiple supported frame headers",

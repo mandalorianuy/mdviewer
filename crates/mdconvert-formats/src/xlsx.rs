@@ -447,12 +447,49 @@ fn reject_external_formula(formula: &str) -> Result<(), ConversionError> {
     if lexical.contains('|') {
         return Err(corrupt_error("XLSX DDE formula references are unsupported"));
     }
+    let mut function_lexical = String::with_capacity(lexical.len());
+    let mut characters = lexical.chars().peekable();
+    let mut quoted_sheet = false;
+    while let Some(character) = characters.next() {
+        if character == '\'' {
+            if quoted_sheet && characters.peek() == Some(&'\'') {
+                characters.next();
+                continue;
+            }
+            quoted_sheet = !quoted_sheet;
+            continue;
+        }
+        if !quoted_sheet {
+            function_lexical.push(character);
+        }
+    }
+    if quoted_sheet {
+        return Err(corrupt_error(
+            "XLSX formula has an unterminated quoted sheet token",
+        ));
+    }
+    let compact = function_lexical
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    for function in ["WEBSERVICE", "RTD", "FILTERXML", "STOCKHISTORY"] {
+        let needle = format!("{function}(");
+        if compact.match_indices(&needle).any(|(start, _)| {
+            compact[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|previous| !previous.is_ascii_alphanumeric() && previous != '_')
+        }) {
+            return Err(corrupt_error(format!(
+                "XLSX external-data formula function {function} is unsupported"
+            )));
+        }
+    }
     for (bang, _) in lexical.match_indices('!') {
         let prefix = lexical[..bang].trim_end();
-        let token = if let Some(without_quote) = prefix.strip_suffix('\'') {
-            without_quote
-                .rfind('\'')
-                .map_or(prefix, |start| &prefix[start..])
+        let token = if prefix.ends_with('\'') {
+            quoted_sheet_token(prefix)?
         } else {
             prefix
                 .rsplit(|character: char| {
@@ -468,6 +505,28 @@ fn reject_external_formula(formula: &str) -> Result<(), ConversionError> {
         }
     }
     Ok(())
+}
+
+fn quoted_sheet_token(prefix: &str) -> Result<&str, ConversionError> {
+    let bytes = prefix.as_bytes();
+    let mut cursor = bytes
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| corrupt_error("XLSX formula has an empty quoted sheet token"))?;
+    while cursor > 0 {
+        cursor -= 1;
+        if bytes[cursor] != b'\'' {
+            continue;
+        }
+        if cursor > 0 && bytes[cursor - 1] == b'\'' {
+            cursor -= 1;
+            continue;
+        }
+        return Ok(&prefix[cursor..]);
+    }
+    Err(corrupt_error(
+        "XLSX formula has an unterminated quoted sheet token",
+    ))
 }
 
 fn reject_external_formulas(root: &XmlNode) -> Result<(), ConversionError> {

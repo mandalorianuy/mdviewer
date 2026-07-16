@@ -1001,6 +1001,40 @@ fn ooxml_strict_is_explicitly_typed_unsupported_not_corrupt() {
         DocxConverter.convert(&request(path)),
         Err(ConversionError::UnsupportedInput { .. })
     ));
+
+    let escaped = temp.path().join("escaped-strict.docx");
+    let entries = [
+        TestEntry::file(
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://p&#117;rl.oclc.org/ooxml/package/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+        ),
+        TestEntry::file(
+            "_rels/.rels",
+            br#"<Relationships xmlns="http://p&#117;rl.oclc.org/ooxml/package/relationships"><Relationship Id="root" Type="http://p&#117;rl.oclc.org/ooxml/officeDocument/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+        ),
+        TestEntry::file(
+            "word/document.xml",
+            br#"<w:document xmlns:w="http://p&#117;rl.oclc.org/ooxml/wordprocessingml/main"><w:body/></w:document>"#,
+        ),
+    ];
+    fs::write(&escaped, stored_zip(&entries)).unwrap();
+    assert!(matches!(
+        DocxConverter.convert(&request(escaped)),
+        Err(ConversionError::UnsupportedInput { .. })
+    ));
+
+    let literal = temp.path().join("transitional-literal.docx");
+    write_zip(
+        &literal,
+        &[
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>http://purl.oclc.org/ooxml/ is ordinary document text</w:t></w:r></w:p></w:body></w:document>"#,
+            ),
+            TestEntry::file("custom/binary.bin", b"http://purl.oclc.org/ooxml/"),
+        ],
+    );
+    assert!(DocxConverter.convert(&request(literal)).is_ok());
 }
 
 #[test]
@@ -1121,6 +1155,32 @@ fn ooxml_requires_authenticated_package_envelope_and_real_image_parts() {
     );
     assert!(matches!(
         DocxConverter.convert(&request(header_only_image)),
+        Err(ConversionError::CorruptInput { .. })
+    ));
+
+    let bad_filter_image = temp.path().join("bad-filter-image.docx");
+    let bad_filter_png: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
+        0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0b, 0x49, 0x44,
+        0x41, 0x54, 0x78, 0x9c, 0x63, 0x65, 0, 2, 0, 0, 0x1e, 0, 6, 0xbc, 0xa9, 0x7c, 0x69, 0, 0,
+        0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    write_zip(
+        &bad_filter_image,
+        &[
+            TestEntry::file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/pixel.png"/></Relationships>"#,
+            ),
+            TestEntry::file(
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:blip r:embed="img"/></w:drawing></w:r></w:p></w:body></w:document>"#,
+            ),
+            TestEntry::file("word/media/pixel.png", bad_filter_png),
+        ],
+    );
+    assert!(matches!(
+        DocxConverter.convert(&request(bad_filter_image)),
         Err(ConversionError::CorruptInput { .. })
     ));
 
@@ -1720,9 +1780,24 @@ fn xlsx_rejects_external_workbook_and_dde_formulas_but_keeps_local_references() 
     let cases = [
         ("external-book", "[Book.xlsx]Sheet1!A1", true),
         ("quoted-external-book", "'[Book.xlsx]Sheet 1'!A1", true),
+        (
+            "quoted-external-apostrophe",
+            "'[Book.xlsx]O''Brien'!A1",
+            true,
+        ),
         ("dde", "cmd|' /C calc'!A0", true),
+        ("webservice", "WEBSERVICE ( \"https://invalid\" )", true),
+        ("rtd", "rTd(\"server\",,\"topic\")", true),
+        ("filterxml", "FILTERXML(\"&lt;x/&gt;\",\"/x\")", true),
         ("quoted-local-sheet", "'Sheet 2'!A1", false),
+        ("quoted-local-apostrophe", "'O''Brien'!A1", false),
+        ("function-looking-sheet", "'WEBSERVICE('!A1", false),
         ("structured-local", "Table1[Column]", false),
+        (
+            "external-looking-string",
+            "\"WEBSERVICE([Book.xlsx]Sheet!A1)\"",
+            false,
+        ),
     ];
     for (name, formula, rejected) in cases {
         let path = temp.path().join(format!("{name}.xlsx"));
@@ -1941,7 +2016,7 @@ fn epub_images_accept_only_authenticated_package_parts_and_private_refs() {
             ),
             TestEntry::file(
                 "chapter.xhtml",
-                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="pixel.png" alt="real"/><img src="mdconvert-asset:epub-001" alt="forged"/></body></html>"#,
+                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="pixel.png" alt="real"/><IMG sRc="mdconvert-asset:epub-001" alt="forged"/></body></html>"#,
             ),
             TestEntry::file("pixel.png", image),
         ],

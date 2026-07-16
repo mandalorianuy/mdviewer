@@ -6,10 +6,14 @@ fixtures. The other Task 9 fixtures are portable authored parser cases.
 The Task 10 archives and images are portable, deterministic authored fixtures.
 Their ZIP members use fixed stored compression, zero timestamps, UTF-8 names,
 Unix regular-file modes, no platform paths, and source-order central records.
-The PNG sample contains deterministic headers and semantic metadata. The JPEG
-sample is a deterministic 1x1 image encoded with libjpeg-turbo 3.2.0 and tagged
-with `wrjpgcom`; Task 10 structurally validates compressed streams but does not
-render raster pixels or send either fixture to OCR.
+The PNG sample contains deterministic headers and semantic metadata. Local v1
+accepts only non-interlaced PNG scanlines, reports that profile as
+`png.interlace_profile=non_interlaced_only`, and returns typed
+`UnsupportedInput` for Adam7 rather than claiming validation it does not
+perform. The JPEG sample is a deterministic 1x1 image encoded with
+libjpeg-turbo 3.2.0 and tagged with `wrjpgcom`; Task 10 structurally validates
+compressed streams but does not render raster pixels or send either fixture to
+OCR.
 
 | Fixture | Provenance | SHA-256 |
 | --- | --- | --- |
