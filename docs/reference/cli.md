@@ -20,10 +20,12 @@ lookup. UNC, network, device/verbatim/globalroot, drive-relative, foreign-drive,
 On Windows, NTFS alternate data stream colons are also rejected. On Unix, a colon is a valid local
 filename character, so paths such as `report:2026.json` and `report:2026.md` remain supported.
 Windows DOS device aliases such as `CON`, `NUL`, `CONIN$`, `CONOUT$`, `COM1`, and `LPT1` are
-rejected case-insensitively in every component, including extension and trailing-dot/space
-variants. Option values cannot be another `--flag`, and duplicate, missing, or unknown options are
-`invalid_arguments`. JSON diagnostics are enabled only by a standalone `--json`, never by text
-consumed as another option's value.
+rejected with ASCII case-insensitive literal matching in every component, including extension and
+trailing-dot/space variants. Superscript `¹`, `²`, and `³` are also recognized specifically as
+COM/LPT numeric suffixes. Other Unicode compatibility characters are not folded into aliases, so
+names such as `ＣＯＮ.json` and `COM①.json` remain valid. Option values cannot be another `--flag`,
+and duplicate, missing, or unknown options are `invalid_arguments`. JSON diagnostics are enabled
+only by a standalone `--json`, never by text consumed as another option's value.
 
 The input is opened once with no-follow/reparse protection, checked as a regular file, bounded by
 the configured input limit, and read once. Detection and conversion use that same owned byte
@@ -35,6 +37,8 @@ to the source fail as `source_output_alias` before the normal no-clobber check. 
 assets directories are canonicalized and compared to canonical input ancestors by filesystem
 identity, preserving the same taxonomy for case- or Unicode-equivalent spellings on filesystems
 that treat them as aliases without conflating distinct directories on case-sensitive filesystems.
+When the derived assets directory does not exist yet, containment compares lexical components
+exactly on every platform; it does not infer case or Unicode-normalization equivalence.
 
 The local v1 registry contains PDF, HTML, CSV, JSON, XML, ZIP, EPUB, DOCX, PPTX, XLSX, PNG, and
 JPEG. Dispatch is deterministic: strong PDF/PNG/JPEG/ZIP signatures are checked first; structured

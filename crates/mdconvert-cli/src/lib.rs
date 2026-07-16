@@ -19,7 +19,6 @@ use mdconvert_formats::{
 use mdconvert_html::{HtmlConverter, detect_html};
 use mdconvert_pdf::PdfConverter;
 use result::ResultEnvelope;
-use unicode_normalization::UnicodeNormalization;
 
 pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
@@ -773,15 +772,9 @@ fn validate_output(
     Ok((output, derived_assets))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ComponentComparison {
-    Exact,
-    CaseAndNormalizationInsensitive,
-}
-
 fn input_is_within_assets(input: &Path, derived_assets: &Path) -> bool {
     if let Ok(canonical_assets) = fs::canonicalize(derived_assets) {
-        if path_starts_with_components(input, &canonical_assets, ComponentComparison::Exact) {
+        if planned_assets_contains_input(input, &canonical_assets) {
             return true;
         }
         return input
@@ -789,43 +782,16 @@ fn input_is_within_assets(input: &Path, derived_assets: &Path) -> bool {
             .any(|ancestor| same_existing_path_identity(ancestor, &canonical_assets));
     }
 
-    let comparison = if cfg!(windows) {
-        ComponentComparison::CaseAndNormalizationInsensitive
-    } else {
-        ComponentComparison::Exact
-    };
-    path_starts_with_components(input, derived_assets, comparison)
+    planned_assets_contains_input(input, derived_assets)
 }
 
-fn path_starts_with_components(
-    input: &Path,
-    container: &Path,
-    comparison: ComponentComparison,
-) -> bool {
+fn planned_assets_contains_input(input: &Path, planned_assets: &Path) -> bool {
     let mut input_components = input.components();
-    container.components().all(|container_component| {
+    planned_assets.components().all(|container_component| {
         input_components.next().is_some_and(|input_component| {
-            components_equal(
-                input_component.as_os_str(),
-                container_component.as_os_str(),
-                comparison,
-            )
+            input_component.as_os_str() == container_component.as_os_str()
         })
     })
-}
-
-fn components_equal(left: &OsStr, right: &OsStr, comparison: ComponentComparison) -> bool {
-    match comparison {
-        ComponentComparison::Exact => left == right,
-        ComponentComparison::CaseAndNormalizationInsensitive => {
-            let (Some(left), Some(right)) = (left.to_str(), right.to_str()) else {
-                return false;
-            };
-            let left: String = left.nfkc().flat_map(char::to_lowercase).collect();
-            let right: String = right.nfkc().flat_map(char::to_lowercase).collect();
-            left == right
-        }
-    }
 }
 
 fn normalize_future_path(path: &Path) -> Result<PathBuf, CliError> {
@@ -1167,32 +1133,18 @@ mod tests {
     }
 
     #[test]
-    fn containment_component_comparison_is_explicit_about_filesystem_semantics() {
+    fn planned_assets_containment_preserves_case_sensitive_windows_components() {
         let input = Path::new("/work/Alias.assets/source.html");
         let case_variant = Path::new("/work/alias.assets");
-        assert!(!path_starts_with_components(
-            input,
-            case_variant,
-            ComponentComparison::Exact
-        ));
-        assert!(path_starts_with_components(
-            input,
-            case_variant,
-            ComponentComparison::CaseAndNormalizationInsensitive
+        assert!(!planned_assets_contains_input(input, case_variant));
+        assert!(planned_assets_contains_input(
+            Path::new("/work/alias.assets/source.html"),
+            case_variant
         ));
 
         let decomposed = Path::new("/work/Cafe\u{301}.assets/source.html");
         let composed = Path::new("/work/Café.assets");
-        assert!(!path_starts_with_components(
-            decomposed,
-            composed,
-            ComponentComparison::Exact
-        ));
-        assert!(path_starts_with_components(
-            decomposed,
-            composed,
-            ComponentComparison::CaseAndNormalizationInsensitive
-        ));
+        assert!(!planned_assets_contains_input(decomposed, composed));
     }
 
     #[test]

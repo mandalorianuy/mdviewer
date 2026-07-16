@@ -1862,7 +1862,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "unicode-normalization",
  "windows-sys 0.61.2",
 ]
 

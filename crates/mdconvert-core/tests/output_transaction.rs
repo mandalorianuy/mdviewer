@@ -421,6 +421,32 @@ fn rejects_unsafe_or_duplicate_asset_file_names() {
 }
 
 #[test]
+fn accepts_compatibility_characters_that_are_not_literal_dos_aliases() {
+    let temp = TestDir::new();
+
+    for (index, file_name) in ["ＣＯＮ.json", "COM①.json", "ＣＯＭ1.json"]
+        .into_iter()
+        .enumerate()
+    {
+        let markdown_path = temp.path().join(format!("compatibility-{index}.md"));
+        let result = publish(
+            &document_with_asset(file_name, b"asset"),
+            &target(markdown_path, OverwritePolicy::Deny),
+            &NeverCancel,
+        )
+        .expect("compatibility characters must not be treated as DOS aliases");
+
+        assert!(
+            result
+                .assets_dir
+                .expect("asset directory should be written")
+                .join(file_name)
+                .is_file()
+        );
+    }
+}
+
+#[test]
 fn rejects_case_insensitive_and_unicode_normalized_duplicate_asset_names() {
     let temp = TestDir::new();
     for (index, (first, second)) in [

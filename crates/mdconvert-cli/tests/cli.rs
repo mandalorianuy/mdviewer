@@ -771,6 +771,41 @@ fn rejects_network_device_and_foreign_drive_syntax_for_every_path_argument() {
     }
 }
 
+#[test]
+fn compatibility_character_basenames_are_not_dos_device_aliases() {
+    let temp = TestDir::new();
+    let input = temp.path().join("ＣＯＮ.json");
+    let output_path = temp.path().join("COM①.md");
+    let assets = temp.path().join("COM①.assets");
+    let cancellation = temp.path().join("ＣＯＭ1.cancel");
+    fs::write(&input, r#"{"status":"local"}"#).unwrap();
+
+    let output = command()
+        .args(["convert"])
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output_path)
+        .args(["--assets"])
+        .arg(&assets)
+        .args(["--cancel-file"])
+        .arg(&cancellation)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        json_value(&output.stdout)["metadata"]["source_format"],
+        "json"
+    );
+    assert!(output_path.is_file());
+    assert!(!assets.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn local_colon_paths_are_valid_on_unix() {
