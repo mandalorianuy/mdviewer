@@ -87,5 +87,5 @@ $Receipt = [ordered]@{
         }
     }
 }
-$Receipt | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $Dist "package-receipt.json") -Encoding utf8NoBOM
+$Receipt | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $Dist "package-receipt-windows-x64.json") -Encoding utf8NoBOM
 Write-Host "WINDOWS PACKAGE COMPLETE: production verification is still required."

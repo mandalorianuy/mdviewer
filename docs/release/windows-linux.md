@@ -34,6 +34,8 @@ fixture, and launches each packaged form under Xvfb.
 
 ## Candidate workflow
 
-Run `Release Windows and Linux` manually in GitHub Actions. It never triggers automatically from a
-tag. Each verified candidate receives a GitHub/Sigstore provenance attestation and is retained as a
-workflow artifact for 14 days. Release publication is a distinct authorized step.
+Run `Release Windows and Linux` manually in GitHub Actions. The `platform` input accepts `all`,
+`windows`, or `linux`, so each platform can be proven independently while preserving `all` as the
+final release gate. It never triggers automatically from a tag. Each verified candidate receives a
+GitHub/Sigstore provenance attestation and is retained as a workflow artifact for 14 days. Release
+publication is a distinct authorized step.

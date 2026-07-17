@@ -16,12 +16,13 @@ test "$tesseract_major" = 5 || release_die "Linux packaging requires Tesseract m
 
 "$ROOT/scripts/fetch-tessdata.sh"
 export APPIMAGE_EXTRACT_AND_RUN=1
+export CARGO_TARGET_DIR="$ROOT/.cache/target-linux-x64"
 npm exec --workspace @mdviewer/desktop tauri -- build --ci \
   --bundles appimage,deb \
   --config src-tauri/tauri.linux.conf.json
 
-mapfile -t appimages < <(find "$ROOT/target/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage' -print)
-mapfile -t debs < <(find "$ROOT/target/release/bundle/deb" -maxdepth 1 -type f -name '*.deb' -print)
+mapfile -t appimages < <(find "$CARGO_TARGET_DIR/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage' -print)
+mapfile -t debs < <(find "$CARGO_TARGET_DIR/release/bundle/deb" -maxdepth 1 -type f -name '*.deb' -print)
 test "${#appimages[@]}" -eq 1 || release_die "expected exactly one AppImage"
 test "${#debs[@]}" -eq 1 || release_die "expected exactly one Debian package"
 
@@ -33,7 +34,7 @@ install -m 0755 "${appimages[0]}" "$appimage"
 install -m 0644 "${debs[0]}" "$deb"
 commit="$(git -C "$ROOT" rev-parse HEAD)"
 
-node - "$version" "$commit" "$appimage" "$deb" "$dist/package-receipt.json" <<'NODE'
+node - "$version" "$commit" "$appimage" "$deb" "$dist/package-receipt-linux-x64.json" <<'NODE'
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');

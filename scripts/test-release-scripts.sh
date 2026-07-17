@@ -409,6 +409,12 @@ multiplatform_workflow="$ROOT/.github/workflows/release-windows-linux.yml"
 test -f "$multiplatform_workflow" || fail "Windows/Linux release workflow is missing"
 grep -Eq '^[[:space:]]+workflow_dispatch:$' "$multiplatform_workflow" ||
   fail "Windows/Linux release workflow is not manually dispatchable"
+grep -q 'platform:' "$multiplatform_workflow" ||
+  fail "Windows/Linux release workflow cannot select a platform"
+grep -q "inputs.platform == 'all' || inputs.platform == 'windows'" "$multiplatform_workflow" ||
+  fail "Windows release job is not isolated behind the platform selector"
+grep -q "inputs.platform == 'all' || inputs.platform == 'linux'" "$multiplatform_workflow" ||
+  fail "Linux release job is not isolated behind the platform selector"
 if grep -Eq '^[[:space:]]+tags:$' "$multiplatform_workflow"; then
   fail "Windows/Linux release workflow must not publish automatically from a tag"
 fi
@@ -444,6 +450,12 @@ grep -q 'Get-AuthenticodeSignature' "$ROOT/scripts/verify-windows-release.ps1" |
   fail "Windows production verification must inspect Authenticode signatures"
 grep -q "publishable = \$true" "$ROOT/scripts/verify-windows-release.ps1" ||
   fail "Windows production verification must own the publishable transition"
+grep -q 'package-receipt-windows-x64.json' "$ROOT/scripts/package-windows-x64.ps1" ||
+  fail "Windows release receipt needs a globally unique asset name"
+grep -q 'package-receipt-linux-x64.json' "$ROOT/scripts/package-linux-x64.sh" ||
+  fail "Linux release receipt needs a globally unique asset name"
+grep -q 'CARGO_TARGET_DIR="$ROOT/.cache/target-linux-x64"' "$ROOT/scripts/package-linux-x64.sh" ||
+  fail "Linux release builds must not share host Cargo artifacts"
 
 node - "$ROOT" <<'NODE'
 const fs = require('node:fs');

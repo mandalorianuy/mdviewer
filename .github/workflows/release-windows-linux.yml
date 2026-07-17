@@ -2,6 +2,16 @@ name: Release Windows and Linux
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Release candidate platform to build
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - windows
+          - linux
 
 permissions:
   contents: read
@@ -11,6 +21,7 @@ permissions:
 jobs:
   windows:
     name: Signed Windows x64 NSIS
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     env:
       WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
@@ -60,7 +71,7 @@ jobs:
         with:
           subject-path: |
             dist/windows-x64/MDViewer-1.2.1-x64-setup.exe
-            dist/windows-x64/package-receipt.json
+            dist/windows-x64/package-receipt-windows-x64.json
       - uses: actions/upload-artifact@v7
         with:
           name: MDViewer-Windows-x64
@@ -78,6 +89,7 @@ jobs:
 
   linux:
     name: Linux x64 AppImage and Debian
+    if: inputs.platform == 'all' || inputs.platform == 'linux'
     runs-on: ubuntu-24.04
     container: debian:12
     steps:
@@ -134,7 +146,7 @@ jobs:
           subject-path: |
             dist/linux-x64/MDViewer-1.2.1-x86_64.AppImage
             dist/linux-x64/MDViewer-1.2.1-amd64.deb
-            dist/linux-x64/package-receipt.json
+            dist/linux-x64/package-receipt-linux-x64.json
       - uses: actions/upload-artifact@v7
         with:
           name: MDViewer-Linux-x64

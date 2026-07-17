@@ -11,7 +11,7 @@ if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
 }
 
 $Dist = Join-Path $Root "dist/windows-x64"
-$ReceiptPath = Join-Path $Dist "package-receipt.json"
+$ReceiptPath = Join-Path $Dist "package-receipt-windows-x64.json"
 $Receipt = Get-Content $ReceiptPath -Raw | ConvertFrom-Json
 if ($Receipt.schemaVersion -ne 1 -or $Receipt.platform -ne "windows" -or $Receipt.version -ne "1.2.1") {
     throw "Invalid Windows package receipt"
