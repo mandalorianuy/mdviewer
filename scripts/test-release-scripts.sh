@@ -454,7 +454,7 @@ grep -q 'package-receipt-windows-x64.json' "$ROOT/scripts/package-windows-x64.ps
   fail "Windows release receipt needs a globally unique asset name"
 grep -q 'package-receipt-linux-x64.json' "$ROOT/scripts/package-linux-x64.sh" ||
   fail "Linux release receipt needs a globally unique asset name"
-grep -q 'CARGO_TARGET_DIR="$ROOT/.cache/target-linux-x64"' "$ROOT/scripts/package-linux-x64.sh" ||
+grep -q 'CARGO_TARGET_DIR:=$ROOT/.cache/target-linux-x64' "$ROOT/scripts/package-linux-x64.sh" ||
   fail "Linux release builds must not share host Cargo artifacts"
 
 node - "$ROOT" <<'NODE'

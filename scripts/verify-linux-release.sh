@@ -9,7 +9,8 @@ test "$(uname -s)" = Linux || release_die "Linux verification requires a Linux h
 test "$(uname -m)" = x86_64 || release_die "Linux verification requires x86_64"
 verify_clean_release_tree "$ROOT"
 export APPIMAGE_EXTRACT_AND_RUN=1
-export CARGO_TARGET_DIR="$ROOT/.cache/target-linux-x64"
+: "${CARGO_TARGET_DIR:=$ROOT/.cache/target-linux-x64}"
+export CARGO_TARGET_DIR
 
 dist="$ROOT/dist/linux-x64"
 receipt="$dist/package-receipt-linux-x64.json"

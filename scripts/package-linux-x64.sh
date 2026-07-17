@@ -16,7 +16,8 @@ test "$tesseract_major" = 5 || release_die "Linux packaging requires Tesseract m
 
 "$ROOT/scripts/fetch-tessdata.sh"
 export APPIMAGE_EXTRACT_AND_RUN=1
-export CARGO_TARGET_DIR="$ROOT/.cache/target-linux-x64"
+: "${CARGO_TARGET_DIR:=$ROOT/.cache/target-linux-x64}"
+export CARGO_TARGET_DIR
 npm exec --workspace @mdviewer/desktop tauri -- build --ci \
   --bundles appimage,deb \
   --config src-tauri/tauri.linux.conf.json
