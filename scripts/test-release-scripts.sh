@@ -458,6 +458,8 @@ grep -q 'CARGO_TARGET_DIR:=$ROOT/.cache/target-linux-x64' "$ROOT/scripts/package
   fail "Linux release builds must not share host Cargo artifacts"
 grep -q 'xdg-utils' "$multiplatform_workflow" ||
   fail "Linux release workflow is missing the AppImage desktop integration tools"
+grep -q 'safe.directory.*GITHUB_WORKSPACE' "$multiplatform_workflow" ||
+  fail "Linux release workflow does not trust its container checkout explicitly"
 
 node - "$ROOT" <<'NODE'
 const fs = require('node:fs');
