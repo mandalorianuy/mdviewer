@@ -85,6 +85,15 @@ jobs:
           npm run check
           npm test -- --run
           npm run build
+      - name: Parse Windows release scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          [scriptblock]::Create((Get-Content scripts/package-windows-x64.ps1 -Raw)) | Out-Null
+          [scriptblock]::Create((Get-Content scripts/verify-windows-release.ps1 -Raw)) | Out-Null
+      - name: Release script contracts
+        if: runner.os == 'macOS'
+        run: ./scripts/test-release-scripts.sh
       - name: Portable Tauri smoke build
         run: npm exec --workspace @mdviewer/desktop tauri -- build --ci --no-bundle
       - name: PDFium extraction and golden tests

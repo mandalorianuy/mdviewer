@@ -405,4 +405,81 @@ grep -q 'signed_application_uses_its_bundled_pdfium_without_environment_configur
   "$ROOT/scripts/verify-release.sh" ||
   fail "production verification must prove nested PDFium signature and packaged conversion"
 
+multiplatform_workflow="$ROOT/.github/workflows/release-windows-linux.yml"
+test -f "$multiplatform_workflow" || fail "Windows/Linux release workflow is missing"
+grep -Eq '^[[:space:]]+workflow_dispatch:$' "$multiplatform_workflow" ||
+  fail "Windows/Linux release workflow is not manually dispatchable"
+grep -q 'platform:' "$multiplatform_workflow" ||
+  fail "Windows/Linux release workflow cannot select a platform"
+grep -q "inputs.platform == 'all' || inputs.platform == 'windows'" "$multiplatform_workflow" ||
+  fail "Windows release job is not isolated behind the platform selector"
+grep -q "inputs.platform == 'all' || inputs.platform == 'linux'" "$multiplatform_workflow" ||
+  fail "Linux release job is not isolated behind the platform selector"
+if grep -Eq '^[[:space:]]+tags:$' "$multiplatform_workflow"; then
+  fail "Windows/Linux release workflow must not publish automatically from a tag"
+fi
+grep -q 'container: debian:12' "$multiplatform_workflow" ||
+  fail "Linux release must use the Debian 12 binary baseline"
+grep -q 'WINDOWS_CERTIFICATE' "$multiplatform_workflow" ||
+  fail "Windows release does not import an Authenticode certificate"
+grep -q 'WINDOWS_CERTIFICATE_THUMBPRINT' "$multiplatform_workflow" ||
+  fail "Windows release does not bind signing to the configured certificate"
+grep -q 'actions/attest@v4' "$multiplatform_workflow" ||
+  fail "Windows/Linux artifacts must receive GitHub provenance attestations"
+grep -q 'actions/upload-artifact@v7' "$multiplatform_workflow" ||
+  fail "Windows/Linux workflow must retain verified release candidates"
+
+for script in fetch-tessdata.sh package-linux-x64.sh verify-linux-release.sh; do
+  test -x "$ROOT/scripts/$script" || fail "$script is missing or not executable"
+done
+for script in package-windows-x64.ps1 verify-windows-release.ps1; do
+  test -f "$ROOT/scripts/$script" || fail "$script is missing"
+done
+
+grep -q 'tessdata_fast/4.1.0/eng.traineddata' "$ROOT/scripts/fetch-tessdata.sh" ||
+  fail "English tessdata is not pinned to tessdata_fast 4.1.0"
+grep -q '7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2' \
+  "$ROOT/scripts/fetch-tessdata.sh" || fail "English tessdata checksum is not pinned"
+grep -q '6f2e04d02774a18f01bed44b1111f2cd7f3ba7ac9dc4373cd3f898a40ea6b464' \
+  "$ROOT/scripts/fetch-tessdata.sh" || fail "Spanish tessdata checksum is not pinned"
+grep -q 'publishable: false' "$ROOT/scripts/package-linux-x64.sh" ||
+  fail "unverified Linux package receipt must not be publishable"
+grep -q 'publishable = true' "$ROOT/scripts/verify-linux-release.sh" ||
+  fail "Linux production verification must own the publishable transition"
+grep -q 'Get-AuthenticodeSignature' "$ROOT/scripts/verify-windows-release.ps1" ||
+  fail "Windows production verification must inspect Authenticode signatures"
+grep -q "publishable = \$true" "$ROOT/scripts/verify-windows-release.ps1" ||
+  fail "Windows production verification must own the publishable transition"
+grep -q 'package-receipt-windows-x64.json' "$ROOT/scripts/package-windows-x64.ps1" ||
+  fail "Windows release receipt needs a globally unique asset name"
+grep -q 'package-receipt-linux-x64.json' "$ROOT/scripts/package-linux-x64.sh" ||
+  fail "Linux release receipt needs a globally unique asset name"
+grep -q 'CARGO_TARGET_DIR:=$ROOT/.cache/target-linux-x64' "$ROOT/scripts/package-linux-x64.sh" ||
+  fail "Linux release builds must not share host Cargo artifacts"
+grep -q 'xdg-utils' "$multiplatform_workflow" ||
+  fail "Linux release workflow is missing the AppImage desktop integration tools"
+
+node - "$ROOT" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.argv[2];
+const read = (file) => JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
+const windows = read('apps/desktop/src-tauri/tauri.windows.conf.json').bundle;
+if (JSON.stringify(windows.targets) !== JSON.stringify(['nsis'])) process.exit(1);
+if (windows.windows?.nsis?.installMode !== 'currentUser') process.exit(1);
+const linux = read('apps/desktop/src-tauri/tauri.linux.conf.json').bundle;
+if (!linux.targets?.includes('appimage') || !linux.targets?.includes('deb')) process.exit(1);
+if (!linux.linux?.appimage?.files?.['/usr/share/mdviewer/tessdata']) process.exit(1);
+for (const dependency of ['libtesseract5', 'liblept5', 'tesseract-ocr-eng', 'tesseract-ocr-spa']) {
+  if (!linux.linux?.deb?.depends?.includes(dependency)) process.exit(1);
+}
+const versions = [
+  read('apps/desktop/package.json').version,
+  read('apps/desktop/src-tauri/tauri.conf.json').version,
+];
+if (versions.some((version) => version !== '1.2.1')) process.exit(1);
+const cargo = fs.readFileSync(path.join(root, 'Cargo.toml'), 'utf8');
+if (!cargo.includes('version = "1.2.1"')) process.exit(1);
+NODE
+
 printf 'release script contract tests passed\n'

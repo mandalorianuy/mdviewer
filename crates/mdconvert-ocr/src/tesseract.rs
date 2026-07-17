@@ -1,13 +1,25 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use leptess::LepTess;
 
 use crate::{OcrError, OcrInput, OcrLine, OcrOutput, OcrRect};
 
 const LANGUAGES: &str = "eng+spa";
+const BUNDLED_TESSDATA_PATH: &str = "usr/share/mdviewer/tessdata";
 
 pub(crate) fn recognize(input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
-    let mut engine = LepTess::new(None, LANGUAGES).map_err(|_| OcrError::Unavailable)?;
+    let appdir = std::env::var_os("APPDIR");
+    let tessdata = resolve_tessdata_dir(appdir.as_deref())?;
+    let tessdata_utf8 = tessdata
+        .as_deref()
+        .map(|path| path.to_str().ok_or(OcrError::Unavailable))
+        .transpose()?;
+    let mut engine = LepTess::new(tessdata_utf8, LANGUAGES).map_err(|_| OcrError::Unavailable)?;
     engine
         .set_image_from_mem(input.bytes())
         .map_err(|_| OcrError::RecognitionFailed)?;
@@ -19,6 +31,25 @@ pub(crate) fn recognize(input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
         .get_tsv_text(0)
         .map_err(|_| OcrError::RecognitionFailed)?;
     parse_tsv(&tsv, input.width(), input.height())
+}
+
+fn resolve_tessdata_dir(appdir: Option<&OsStr>) -> Result<Option<PathBuf>, OcrError> {
+    let Some(appdir) = appdir else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(appdir).join(BUNDLED_TESSDATA_PATH);
+    for language in ["eng", "spa"] {
+        require_regular_file(&path.join(format!("{language}.traineddata")))?;
+    }
+    Ok(Some(path))
+}
+
+fn require_regular_file(path: &Path) -> Result<(), OcrError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| OcrError::Unavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(OcrError::Unavailable);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -101,6 +132,44 @@ fn parse_tsv(tsv: &str, image_width: u32, image_height: u32) -> Result<OcrOutput
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appimage_without_bundled_languages_fails_closed_before_image_decoding() {
+        let appdir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("APPDIR");
+        // SAFETY: this unit test is the only test in this process that reads APPDIR.
+        unsafe { std::env::set_var("APPDIR", appdir.path()) };
+        let input =
+            OcrInput::new(b"not-a-png", "image/png", 1, 1, crate::OcrSource::Image).unwrap();
+
+        let result = recognize(input);
+
+        match previous {
+            Some(value) => {
+                // SAFETY: restore the process state immediately after the isolated call.
+                unsafe { std::env::set_var("APPDIR", value) };
+            }
+            None => {
+                // SAFETY: restore the process state immediately after the isolated call.
+                unsafe { std::env::remove_var("APPDIR") };
+            }
+        }
+        assert_eq!(result.unwrap_err(), OcrError::Unavailable);
+    }
+
+    #[test]
+    fn appimage_uses_only_its_complete_regular_tessdata_directory() {
+        let appdir = tempfile::tempdir().unwrap();
+        let tessdata = appdir.path().join(BUNDLED_TESSDATA_PATH);
+        std::fs::create_dir_all(&tessdata).unwrap();
+        std::fs::write(tessdata.join("eng.traineddata"), b"eng").unwrap();
+        std::fs::write(tessdata.join("spa.traineddata"), b"spa").unwrap();
+
+        assert_eq!(
+            resolve_tessdata_dir(Some(appdir.path().as_os_str())).unwrap(),
+            Some(tessdata)
+        );
+    }
 
     #[test]
     fn tsv_words_are_grouped_into_lines_with_normalized_geometry_and_confidence() {
