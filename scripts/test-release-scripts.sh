@@ -456,6 +456,8 @@ grep -q 'package-receipt-linux-x64.json' "$ROOT/scripts/package-linux-x64.sh" ||
   fail "Linux release receipt needs a globally unique asset name"
 grep -q 'CARGO_TARGET_DIR:=$ROOT/.cache/target-linux-x64' "$ROOT/scripts/package-linux-x64.sh" ||
   fail "Linux release builds must not share host Cargo artifacts"
+grep -q 'xdg-utils' "$multiplatform_workflow" ||
+  fail "Linux release workflow is missing the AppImage desktop integration tools"
 
 node - "$ROOT" <<'NODE'
 const fs = require('node:fs');

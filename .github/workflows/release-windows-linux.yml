@@ -121,6 +121,7 @@ jobs:
             tesseract-ocr-spa \
             wget \
             xauth \
+            xdg-utils \
             xvfb
           test "$(tesseract --version 2>&1 | sed -n '1s/^tesseract \([0-9]*\).*/\1/p')" = 5
       - uses: actions/setup-node@v7

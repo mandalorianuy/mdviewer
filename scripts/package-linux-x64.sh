@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 test "$(uname -s)" = Linux || release_die "Linux packaging requires a Linux host"
 test "$(uname -m)" = x86_64 || release_die "Linux packaging requires x86_64"
+command -v xdg-mime >/dev/null || release_die "Linux packaging requires xdg-utils"
 verify_clean_release_tree "$ROOT"
 
 version="$(node -p "require('$ROOT/apps/desktop/package.json').version")"
