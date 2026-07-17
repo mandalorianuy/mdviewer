@@ -49,6 +49,7 @@ jobs:
             libtesseract-dev \
             librsvg2-dev \
             patchelf \
+            tesseract-ocr \
             tesseract-ocr-eng \
             tesseract-ocr-spa \
             xdg-utils
