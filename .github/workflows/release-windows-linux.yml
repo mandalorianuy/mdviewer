@@ -93,6 +93,12 @@ jobs:
     runs-on: ubuntu-24.04
     container: debian:12
     steps:
+      - name: Install Git before checkout
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates \
+            git
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -102,11 +108,9 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential \
-            ca-certificates \
             clang \
             curl \
             file \
-            git \
             libayatana-appindicator3-dev \
             libclang-dev \
             libleptonica-dev \

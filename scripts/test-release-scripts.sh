@@ -467,6 +467,18 @@ grep -Fq 'chown -R "$(id -u):$(id -g)" "$repo"' "$multiplatform_workflow" ||
 grep -q 'git -C.*repo.*rev-parse --is-inside-work-tree' "$multiplatform_workflow" ||
   fail "Linux release workflow does not verify Git access after checkout ownership setup"
 
+if ! node - "$multiplatform_workflow" <<'NODE'
+const fs = require('node:fs');
+const workflow = fs.readFileSync(process.argv[2], 'utf8');
+const linux = workflow.slice(workflow.indexOf('\n  linux:'));
+const bootstrap = linux.indexOf('- name: Install Git before checkout');
+const checkout = linux.indexOf('- uses: actions/checkout@v7');
+if (bootstrap < 0 || checkout < 0 || bootstrap > checkout) process.exit(1);
+NODE
+then
+  fail "Linux release workflow must install Git before checkout"
+fi
+
 node - "$ROOT" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
