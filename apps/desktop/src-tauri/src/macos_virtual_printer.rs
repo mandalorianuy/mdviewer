@@ -1,17 +1,10 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
 #[cfg(target_os = "macos")]
-use std::{
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
-    process::Command,
-    thread,
-    time::Duration,
-};
+use std::{io::Write, os::unix::fs::OpenOptionsExt, process::Command, thread, time::Duration};
 
 use crate::macos_integration::{IntegrationError, IntegrationStatus};
 
