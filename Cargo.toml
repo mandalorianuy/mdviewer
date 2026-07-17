@@ -6,11 +6,12 @@ members = [
     "crates/mdconvert-core",
     "crates/mdconvert-formats",
     "crates/mdconvert-html",
+    "crates/mdconvert-ocr",
     "crates/mdconvert-pdf",
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.94.0"
 license = "MIT"

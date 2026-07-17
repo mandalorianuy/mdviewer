@@ -4,11 +4,14 @@ use mdconvert_core::{
     Alignment, Asset, AssetId, Block, ConversionError, ConversionWarning, Converter, Document,
     Inline, ListItem, WarningCode,
 };
+use mdconvert_ocr::OcrEngine;
 use url::Url;
 
 use crate::{
-    HeuristicConfig, RawDocument, RawImage, RawLink, RawPage, RawRect, RawRule, RuleKind,
-    extract_pdf, extract_pdf_bytes,
+    HeuristicConfig, PdfOcrLimits, RawDocument, RawImage, RawLink, RawPage, RawRect, RawRule,
+    RuleKind, extract_pdf, extract_pdf_bytes, extract_pdf_bytes_with_ocr,
+    extract_pdf_bytes_with_ocr_cancellable, extract_pdf_bytes_with_ocr_limits,
+    extract_pdf_with_ocr,
     layout::{Line, group_page_lines, intersects, line_position_cmp},
 };
 
@@ -22,6 +25,89 @@ impl PdfConverter {
         request: &mdconvert_core::ConversionRequest,
     ) -> Result<Document, ConversionError> {
         reconstruct(extract_pdf_bytes(bytes, request)?)
+    }
+
+    pub fn convert_with_ocr(
+        &self,
+        request: &mdconvert_core::ConversionRequest,
+        engine: &dyn OcrEngine,
+    ) -> Result<Document, ConversionError> {
+        reconstruct_with_ocr_warnings(extract_pdf_with_ocr(request, engine)?)
+    }
+
+    pub fn convert_bytes_with_ocr(
+        &self,
+        bytes: &[u8],
+        request: &mdconvert_core::ConversionRequest,
+        engine: &dyn OcrEngine,
+    ) -> Result<Document, ConversionError> {
+        reconstruct_with_ocr_warnings(extract_pdf_bytes_with_ocr(bytes, request, engine)?)
+    }
+
+    pub fn convert_bytes_with_ocr_limits(
+        &self,
+        bytes: &[u8],
+        request: &mdconvert_core::ConversionRequest,
+        engine: &dyn OcrEngine,
+        limits: PdfOcrLimits,
+    ) -> Result<Document, ConversionError> {
+        reconstruct_with_ocr_warnings(extract_pdf_bytes_with_ocr_limits(
+            bytes, request, engine, limits,
+        )?)
+    }
+
+    pub fn convert_bytes_with_ocr_cancellable(
+        &self,
+        bytes: &[u8],
+        request: &mdconvert_core::ConversionRequest,
+        engine: &dyn OcrEngine,
+        cancellation: &dyn mdconvert_core::Cancellation,
+    ) -> Result<Document, ConversionError> {
+        reconstruct_with_ocr_warnings(extract_pdf_bytes_with_ocr_cancellable(
+            bytes,
+            request,
+            engine,
+            cancellation,
+        )?)
+    }
+}
+
+fn reconstruct_with_ocr_warnings(raw: RawDocument) -> Result<Document, ConversionError> {
+    let mut document = reconstruct(raw)?;
+    append_page_warnings(
+        &mut document,
+        "ocr_deferred_pages",
+        WarningCode::OcrDeferred,
+        "Local OCR is unavailable for this PDF page",
+    );
+    append_page_warnings(
+        &mut document,
+        "ocr_no_text_pages",
+        WarningCode::OcrNoTextFound,
+        "Local OCR completed but found no text on this PDF page",
+    );
+    append_page_warnings(
+        &mut document,
+        "ocr_low_confidence_pages",
+        WarningCode::OcrLowConfidence,
+        "Local OCR preserved low-confidence text on this PDF page",
+    );
+    Ok(document)
+}
+
+fn append_page_warnings(document: &mut Document, property: &str, code: WarningCode, message: &str) {
+    let Some(pages) = document.metadata.properties.get(property) else {
+        return;
+    };
+    for page in pages
+        .split(',')
+        .filter_map(|value| value.parse::<u32>().ok())
+    {
+        document.warnings.push(ConversionWarning {
+            code: code.clone(),
+            message: message.into(),
+            page: Some(page),
+        });
     }
 }
 

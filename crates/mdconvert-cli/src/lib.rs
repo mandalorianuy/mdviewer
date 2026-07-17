@@ -17,6 +17,7 @@ use mdconvert_formats::{
     local_v1_formats,
 };
 use mdconvert_html::{HtmlConverter, detect_html};
+use mdconvert_ocr::LocalOcrEngine;
 use mdconvert_pdf::PdfConverter;
 use result::ResultEnvelope;
 
@@ -96,6 +97,8 @@ fn warning_code(code: &WarningCode) -> &'static str {
         WarningCode::ExternalLinkSkipped => "external_link_skipped",
         WarningCode::AdditionalArchiveEntriesSkipped => "additional_archive_entries_skipped",
         WarningCode::OcrDeferred => "ocr_deferred",
+        WarningCode::OcrNoTextFound => "ocr_no_text_found",
+        WarningCode::OcrLowConfidence => "ocr_low_confidence",
     }
 }
 
@@ -250,7 +253,7 @@ fn execute_with_input_hook(
 
     let request = ConversionRequest::new(&input)
         .map_err(|_| CliError::new("invalid_input", "input path is invalid", EXIT_INPUT))?;
-    let document = convert(format, bytes, &request).map_err(map_conversion_error)?;
+    let document = convert(format, bytes, &request, &cancellation).map_err(map_conversion_error)?;
     drop(input_handle);
     cancellation.check()?;
     if !document.assets.is_empty() && derived_assets.exists() {
@@ -1002,9 +1005,15 @@ fn convert(
     format: LocalFormat,
     bytes: Vec<u8>,
     request: &ConversionRequest,
+    cancellation: &dyn Cancellation,
 ) -> Result<mdconvert_core::Document, ConversionError> {
     match format {
-        LocalFormat::Pdf => PdfConverter.convert_bytes(&bytes, request),
+        LocalFormat::Pdf => PdfConverter.convert_bytes_with_ocr_cancellable(
+            &bytes,
+            request,
+            &LocalOcrEngine,
+            cancellation,
+        ),
         LocalFormat::Html => HtmlConverter.convert_bytes(&bytes, request),
         LocalFormat::Csv => mdconvert_formats::CsvConverter.convert_bytes(&bytes, request),
         LocalFormat::Json => JsonConverter.convert_bytes(&bytes, request),
@@ -1014,11 +1023,14 @@ fn convert(
         LocalFormat::Docx => DocxConverter.convert_bytes(&bytes, request),
         LocalFormat::Pptx => PptxConverter.convert_bytes(&bytes, request),
         LocalFormat::Xlsx => XlsxConverter.convert_bytes(&bytes, request),
-        LocalFormat::Png | LocalFormat::Jpeg => ImageConverter.convert_owned_bytes(bytes, request),
+        LocalFormat::Png | LocalFormat::Jpeg => {
+            ImageConverter.convert_owned_bytes_with_ocr(bytes, request, &LocalOcrEngine)
+        }
     }
 }
 
 fn map_conversion_error(error: ConversionError) -> CliError {
+    let cancelled = matches!(&error, ConversionError::Cancelled);
     let (code, message) = match error {
         ConversionError::InvalidRequest(_) => ("invalid_request", "conversion request is invalid"),
         ConversionError::Io { .. } => ("input_io", "input could not be read"),
@@ -1036,13 +1048,22 @@ fn map_conversion_error(error: ConversionError) -> CliError {
             ("limit_exceeded", "input exceeds a conversion limit")
         }
         ConversionError::OcrRequired => ("ocr_required", "OCR is required to convert this input"),
+        ConversionError::Cancelled => ("cancelled", "conversion was cancelled"),
         ConversionError::PdfiumUnavailable => (
             "pdfium_unavailable",
             "the pinned PDFium runtime is unavailable",
         ),
         ConversionError::ConversionFailed { .. } => ("conversion_failed", "conversion failed"),
     };
-    CliError::new(code, message, EXIT_CONVERSION)
+    CliError::new(
+        code,
+        message,
+        if cancelled {
+            EXIT_CANCELLED
+        } else {
+            EXIT_CONVERSION
+        },
+    )
 }
 
 fn map_output_error(error: OutputError) -> CliError {

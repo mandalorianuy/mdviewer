@@ -36,12 +36,14 @@ opening, every
 local v1 converter, macOS alias lifecycle, cold/warm print delivery, native Save As, transactional
 GFM/assets and cleanup behavior to a checked-in test selector and executable suite.
 
-The only approved exclusions are:
+The remaining approved exclusion is:
 
-- OCR and reliable scanned-PDF conversion: v1.1. Digital PDFs without extractable text return the
-  stable OCR-required diagnosis.
 - YouTube and other network-backed conversion sources: post-v1 network-import design. They are not
   part of the local v1 registry.
+
+OCR graduated from this exclusion in v1.1. Its current automated evidence is recorded in the
+parity manifest and the dedicated [v1.1 release notes](v1.1.md); the historical v1 retirement
+receipts remain immutable evidence of the earlier Swift replacement gate.
 
 ## Exact macOS acceptance matrix
 

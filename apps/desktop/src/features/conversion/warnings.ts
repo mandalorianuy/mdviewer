@@ -8,7 +8,9 @@ const warningMessages: Record<string, string> = {
   external_asset_skipped: "Se omitió un recurso externo.",
   external_link_skipped: "Se omitió un enlace externo.",
   additional_archive_entries_skipped: "Se omitieron entradas adicionales del archivo.",
-  ocr_deferred: "La imagen necesita OCR, que no está disponible en esta versión.",
+  ocr_deferred: "El OCR local no está disponible en esta plataforma.",
+  ocr_no_text_found: "El OCR local terminó, pero no encontró texto.",
+  ocr_low_confidence: "Se conservó texto reconocido con baja confianza; conviene revisarlo.",
   unknown_warning: "La conversión terminó con una advertencia.",
 };
 

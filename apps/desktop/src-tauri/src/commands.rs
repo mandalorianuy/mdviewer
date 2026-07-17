@@ -487,6 +487,8 @@ fn stable_warning_code(serialized: &str) -> &'static str {
         "ExternalLinkSkipped" => "external_link_skipped",
         "AdditionalArchiveEntriesSkipped" => "additional_archive_entries_skipped",
         "OcrDeferred" => "ocr_deferred",
+        "OcrNoTextFound" => "ocr_no_text_found",
+        "OcrLowConfidence" => "ocr_low_confidence",
         _ => "unknown_warning",
     }
 }

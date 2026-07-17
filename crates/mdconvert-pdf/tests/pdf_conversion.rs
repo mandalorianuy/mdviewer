@@ -8,13 +8,17 @@ use std::{
 
 use mdconvert_core::{Block, ConversionError, DocumentMetadata, Inline, WarningCode};
 #[cfg(target_os = "macos")]
-use mdconvert_core::{ConversionRequest, Converter, GfmOptions, emit_gfm};
+use mdconvert_core::{Cancellation, ConversionRequest, Converter, GfmOptions, emit_gfm};
 #[cfg(target_os = "macos")]
-use mdconvert_pdf::PdfConverter;
+use mdconvert_ocr::{
+    LocalOcrEngine, OcrEngine, OcrError, OcrInput, OcrLine, OcrOutput, OcrRect, OcrSource,
+};
 use mdconvert_pdf::{
     HeuristicConfig, RawDocument, RawGlyph, RawImage, RawLink, RawPage, RawRect, RawRule, RawWord,
     RuleKind, reconstruct, reconstruct_with_config,
 };
+#[cfg(target_os = "macos")]
+use mdconvert_pdf::{PdfConverter, PdfOcrLimits};
 
 #[cfg(target_os = "macos")]
 fn workspace_path(relative: impl AsRef<Path>) -> PathBuf {
@@ -1170,6 +1174,331 @@ fn scanned_fixture_reaches_task_7_ocr_required_through_pdf_converter() {
         .convert(&ConversionRequest::new(workspace_path("tests/fixtures/pdf/scanned.pdf")).unwrap())
         .unwrap_err();
     assert!(matches!(error, ConversionError::OcrRequired));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn scanned_fixture_uses_injected_ocr_and_reaches_the_existing_reconstructor() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ScriptedOcr(AtomicUsize);
+
+    impl OcrEngine for ScriptedOcr {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+
+        fn recognize(&self, input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
+            assert_eq!(input.source(), OcrSource::PdfPage);
+            assert!(input.width() > 300 && input.width() <= 4_096);
+            assert!(input.height() > 300 && input.height() <= 4_096);
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(OcrOutput::new(vec![OcrLine::new(
+                "Scanned text from OCR",
+                0.49,
+                OcrRect::new(0.1, 0.1, 0.8, 0.08).unwrap(),
+            )]))
+        }
+    }
+
+    let engine = ScriptedOcr(AtomicUsize::new(0));
+    let request = ConversionRequest::new(workspace_path("tests/fixtures/pdf/scanned.pdf")).unwrap();
+    let document = PdfConverter.convert_with_ocr(&request, &engine).unwrap();
+
+    assert_eq!(engine.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        document.metadata.properties.get("ocr_engine"),
+        Some(&"scripted".into())
+    );
+    assert_eq!(
+        all_text(&document.blocks)
+            .matches("Scanned text from OCR")
+            .count(),
+        1
+    );
+    assert!(document.warnings.iter().any(|warning| {
+        warning.code == WarningCode::OcrLowConfidence && warning.page == Some(1)
+    }));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn scanned_text_pdf_is_recognized_end_to_end_by_vision() {
+    use font8x8::{BASIC_FONTS, UnicodeFonts};
+
+    const SCALE: usize = 12;
+    const MARGIN: usize = 24;
+    let text = "HELLO 123";
+    let width = MARGIN * 2 + text.chars().count() * 8 * SCALE;
+    let height = MARGIN * 2 + 8 * SCALE;
+    let mut rgb = vec![255_u8; width * height * 3];
+    for (character_index, character) in text.chars().enumerate() {
+        let glyph = BASIC_FONTS.get(character).unwrap();
+        for (row, bits) in glyph.into_iter().enumerate() {
+            for column in 0..8 {
+                if bits & (1 << column) == 0 {
+                    continue;
+                }
+                let origin_x = MARGIN + (character_index * 8 + column) * SCALE;
+                let origin_y = MARGIN + row * SCALE;
+                for y in origin_y..origin_y + SCALE {
+                    for x in origin_x..origin_x + SCALE {
+                        rgb[(y * width + x) * 3..(y * width + x) * 3 + 3].fill(0);
+                    }
+                }
+            }
+        }
+    }
+
+    fn stream(data: &[u8], dictionary: &str) -> Vec<u8> {
+        format!("<< {dictionary} /Length {} >>\nstream\n", data.len())
+            .into_bytes()
+            .into_iter()
+            .chain(data.iter().copied())
+            .chain(b"\nendstream".iter().copied())
+            .collect()
+    }
+
+    fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            bytes.extend_from_slice(object);
+            bytes.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        bytes.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        bytes
+    }
+
+    let content = b"q 456 0 0 72 0 0 cm /I1 Do Q";
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 456 72] /Resources << /XObject << /I1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        stream(content, ""),
+        stream(
+            &rgb,
+            &format!(
+                "/Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceRGB /BitsPerComponent 8"
+            ),
+        ),
+    ];
+    let bytes = pdf(&objects);
+    let request = ConversionRequest::new("scan.pdf").unwrap();
+    let document = PdfConverter
+        .convert_bytes_with_ocr(&bytes, &request, &LocalOcrEngine)
+        .unwrap();
+    let output = all_text(&document.blocks).to_ascii_uppercase();
+
+    assert!(output.contains("HELLO"), "{output:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mixed_pdf_ocrs_only_the_textless_page_and_reports_an_empty_result() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn stream(data: &[u8], dictionary: &str) -> Vec<u8> {
+        format!("<< {dictionary} /Length {} >>\nstream\n", data.len())
+            .into_bytes()
+            .into_iter()
+            .chain(data.iter().copied())
+            .chain(b"\nendstream".iter().copied())
+            .collect()
+    }
+
+    fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            bytes.extend_from_slice(object);
+            bytes.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        bytes.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        bytes
+    }
+
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Resources << /XObject << /I1 7 0 R >> >> /Contents 8 0 R >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        stream(b"BT /F1 16 Tf 20 350 Td (Digital page) Tj ET", ""),
+        stream(
+            &[0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0],
+            "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8",
+        ),
+        stream(b"q 200 0 0 200 50 100 cm /I1 Do Q", ""),
+    ];
+    let bytes = pdf(&objects);
+
+    struct EmptyOcr(AtomicUsize);
+    impl OcrEngine for EmptyOcr {
+        fn name(&self) -> &'static str {
+            "empty"
+        }
+        fn recognize(&self, _input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(OcrOutput::default())
+        }
+    }
+
+    let engine = EmptyOcr(AtomicUsize::new(0));
+    let document = PdfConverter
+        .convert_bytes_with_ocr(
+            &bytes,
+            &ConversionRequest::new("mixed.pdf").unwrap(),
+            &engine,
+        )
+        .unwrap();
+
+    assert_eq!(engine.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        all_text(&document.blocks).matches("Digital page").count(),
+        1
+    );
+    assert!(
+        document.warnings.iter().any(|warning| {
+            warning.code == WarningCode::OcrNoTextFound && warning.page == Some(2)
+        })
+    );
+
+    struct UnavailableOcr;
+    impl OcrEngine for UnavailableOcr {
+        fn name(&self) -> &'static str {
+            "unavailable"
+        }
+        fn recognize(&self, _input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
+            Err(OcrError::Unavailable)
+        }
+    }
+    let document = PdfConverter
+        .convert_bytes_with_ocr(
+            &bytes,
+            &ConversionRequest::new("mixed.pdf").unwrap(),
+            &UnavailableOcr,
+        )
+        .unwrap();
+    assert!(
+        document
+            .warnings
+            .iter()
+            .any(|warning| { warning.code == WarningCode::OcrDeferred && warning.page == Some(2) })
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn pdf_ocr_pixel_budget_fails_before_calling_the_engine() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct UnexpectedOcr(AtomicUsize);
+    impl OcrEngine for UnexpectedOcr {
+        fn name(&self) -> &'static str {
+            "unexpected"
+        }
+        fn recognize(&self, _input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(OcrOutput::default())
+        }
+    }
+
+    let bytes = fs::read(workspace_path("tests/fixtures/pdf/scanned.pdf")).unwrap();
+    let engine = UnexpectedOcr(AtomicUsize::new(0));
+    let error = PdfConverter
+        .convert_bytes_with_ocr_limits(
+            &bytes,
+            &ConversionRequest::new("scanned.pdf").unwrap(),
+            &engine,
+            PdfOcrLimits {
+                max_total_pixels: 100,
+                ..PdfOcrLimits::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ConversionError::LimitExceeded {
+            limit: "pdf_ocr_rendered_pixels",
+            maximum: 100,
+            ..
+        }
+    ));
+    assert_eq!(engine.0.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cancellation_is_observed_immediately_after_a_page_ocr_call() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct CancellingOcr(Arc<AtomicBool>);
+    impl OcrEngine for CancellingOcr {
+        fn name(&self) -> &'static str {
+            "cancelling"
+        }
+        fn recognize(&self, _input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(OcrOutput::new(vec![OcrLine::new(
+                "should not publish",
+                0.9,
+                OcrRect::new(0.1, 0.1, 0.8, 0.1).unwrap(),
+            )]))
+        }
+    }
+
+    struct FlagCancellation(Arc<AtomicBool>);
+    impl Cancellation for FlagCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let bytes = fs::read(workspace_path("tests/fixtures/pdf/scanned.pdf")).unwrap();
+    let error = PdfConverter
+        .convert_bytes_with_ocr_cancellable(
+            &bytes,
+            &ConversionRequest::new("scanned.pdf").unwrap(),
+            &CancellingOcr(flag.clone()),
+            &FlagCancellation(flag),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, ConversionError::Cancelled));
 }
 
 #[test]

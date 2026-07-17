@@ -163,6 +163,8 @@ pub enum WarningCode {
     ExternalLinkSkipped,
     AdditionalArchiveEntriesSkipped,
     OcrDeferred,
+    OcrNoTextFound,
+    OcrLowConfidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

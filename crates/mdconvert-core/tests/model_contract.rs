@@ -342,6 +342,8 @@ fn warning_codes_have_stable_snake_case_values() {
         ),
         (WarningCode::ExternalLinkSkipped, "external_link_skipped"),
         (WarningCode::OcrDeferred, "ocr_deferred"),
+        (WarningCode::OcrNoTextFound, "ocr_no_text_found"),
+        (WarningCode::OcrLowConfidence, "ocr_low_confidence"),
     ];
 
     for (code, expected) in cases {
@@ -434,6 +436,7 @@ fn conversion_errors_expose_stable_codes() {
             "limit_exceeded",
         ),
         (ConversionError::OcrRequired, "ocr_required"),
+        (ConversionError::Cancelled, "cancelled"),
         (
             ConversionError::ConversionFailed {
                 message: "parser stopped".into(),

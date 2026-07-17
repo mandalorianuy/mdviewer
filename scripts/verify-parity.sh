@@ -234,7 +234,8 @@ if (manifestPath === productionManifest) {
     'converter.docx', 'converter.pptx', 'converter.xlsx', 'converter.image_metadata',
     'print.install_repair_uninstall', 'print.closed_start', 'print.warm_start',
     'print.native_save_as', 'print.cancellation_cleanup', 'print.warning_cleanup',
-    'output.gfm_assets', 'output.transaction_cleanup', 'exclusion.ocr',
+    'output.gfm_assets', 'output.transaction_cleanup', 'converter.image_ocr',
+    'converter.scanned_pdf_ocr',
     'exclusion.youtube'
   ];
   const expectedRows = ['safari', 'mail', 'textedit', 'preview', 'word', 'excel', 'powerpoint'];
