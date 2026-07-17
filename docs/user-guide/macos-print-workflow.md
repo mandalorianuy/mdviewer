@@ -1,7 +1,10 @@
 # macOS: Guardar como Markdown desde Imprimir
 
-MDViewer puede instalar un PDF Service por usuario. En MDViewer, abrí **Integrations** y usá
-**Install**. El estado debe cambiar de `not installed` a `installed`.
+MDViewer ofrece dos integraciones por usuario. En **Integraciones** podés instalar:
+
+- **Guardar como Markdown con MDViewer**, el PDF Service del diálogo nativo de macOS.
+- **MDViewer — Guardar como Markdown**, la impresora virtual visible en Chrome y aplicaciones que
+  muestran su propio selector de destinos.
 
 La integración se instala como un alias nativo a la aplicación firmada en:
 
@@ -42,6 +45,20 @@ a la ruta sustituta.
 
 ## Uso
 
+### Chrome
+
+1. Abrí **Archivo → Imprimir**.
+2. En **Destino**, elegí **Ver más…**.
+3. Seleccioná **MDViewer — Guardar como Markdown** y pulsá **Imprimir**.
+4. MDViewer recibe el PDF local y muestra **Guardar como** para el Markdown.
+
+La impresora virtual es una cola CUPS explícita conectada a un servidor IPP local que escucha sólo
+en loopback. No se anuncia por Bonjour, por lo que aparece una sola vez. El helper conserva la ruta
+exacta de la aplicación que instaló la cola: otra copia de MDViewer en un DMG o worktree no puede
+recibir el trabajo por compartir el mismo bundle ID.
+
+### Diálogo nativo de macOS
+
 1. Abrí un documento en una aplicación macOS, por ejemplo TextEdit.
 2. Elegí **Archivo → Imprimir**.
 3. En el menú **PDF**, elegí **Guardar como Markdown con MDViewer…**.
@@ -70,6 +87,8 @@ requiere instalar una biblioteca aparte ni configurar variables de entorno.
   manualmente sólo si confirmaste que no pertenece a otra aplicación; luego usá **Install**.
 - Si la opción no aparece en el menú PDF, cerrá y volvé a abrir la aplicación desde la que imprimís
   después de instalar la integración.
+- Si la impresora virtual no aparece en un Chrome que ya estaba abierto, cerrá su vista de impresión
+  y volvé a abrirla. Chrome puede mantener en caché la lista anterior durante unos segundos.
 - Si la reparación o desinstalación falla, verificá que el destino siga siendo el alias nativo
   firmado que instaló MDViewer. Los enlaces simbólicos y archivos ajenos nunca se siguen ni borran.
 - Cada reparación o desinstalación conserva un tombstone pequeño. Esta versión no hace limpieza

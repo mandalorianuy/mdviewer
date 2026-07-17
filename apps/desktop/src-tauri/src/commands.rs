@@ -475,6 +475,52 @@ pub fn uninstall_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
     Err(CommandError::new("unsupported_platform"))
 }
 
+#[cfg(target_os = "macos")]
+pub fn macos_virtual_printer_status() -> Result<MacosWorkflowStatus, CommandError> {
+    Ok(crate::macos_virtual_printer::embedded_manager()?.status()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn macos_virtual_printer_status() -> Result<MacosWorkflowStatus, CommandError> {
+    Ok(MacosWorkflowStatus::NotInstalled)
+}
+
+#[cfg(target_os = "macos")]
+pub fn install_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+    let manager = crate::macos_virtual_printer::embedded_manager()?;
+    manager.install()?;
+    Ok(manager.status()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn install_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+    Err(CommandError::new("unsupported_platform"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn repair_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+    let manager = crate::macos_virtual_printer::embedded_manager()?;
+    manager.repair()?;
+    Ok(manager.status()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn repair_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+    Err(CommandError::new("unsupported_platform"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn uninstall_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+    let manager = crate::macos_virtual_printer::embedded_manager()?;
+    manager.uninstall()?;
+    Ok(manager.status()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn uninstall_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+    Err(CommandError::new("unsupported_platform"))
+}
+
 fn stable_warning_code(serialized: &str) -> &'static str {
     match serialized {
         "AmbiguousReadingOrder" => "ambiguous_reading_order",
@@ -662,6 +708,26 @@ mod ipc {
     pub(super) fn uninstall_macos_workflow() -> Result<MacosWorkflowStatus, CommandError> {
         super::uninstall_macos_workflow()
     }
+
+    #[tauri::command]
+    pub(super) fn macos_virtual_printer_status() -> Result<MacosWorkflowStatus, CommandError> {
+        super::macos_virtual_printer_status()
+    }
+
+    #[tauri::command]
+    pub(super) fn install_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+        super::install_macos_virtual_printer()
+    }
+
+    #[tauri::command]
+    pub(super) fn repair_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+        super::repair_macos_virtual_printer()
+    }
+
+    #[tauri::command]
+    pub(super) fn uninstall_macos_virtual_printer() -> Result<MacosWorkflowStatus, CommandError> {
+        super::uninstall_macos_virtual_printer()
+    }
 }
 
 pub fn invoke_handler<R: tauri::Runtime>()
@@ -683,6 +749,10 @@ pub fn invoke_handler<R: tauri::Runtime>()
         ipc::macos_workflow_status,
         ipc::install_macos_workflow,
         ipc::repair_macos_workflow,
-        ipc::uninstall_macos_workflow
+        ipc::uninstall_macos_workflow,
+        ipc::macos_virtual_printer_status,
+        ipc::install_macos_virtual_printer,
+        ipc::repair_macos_virtual_printer,
+        ipc::uninstall_macos_virtual_printer
     ]
 }

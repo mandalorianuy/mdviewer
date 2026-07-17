@@ -61,6 +61,10 @@ export interface MacosIntegrationBackend {
   installMacosWorkflow(): Promise<MacosWorkflowStatus>;
   repairMacosWorkflow(): Promise<MacosWorkflowStatus>;
   uninstallMacosWorkflow(): Promise<MacosWorkflowStatus>;
+  macosVirtualPrinterStatus(): Promise<MacosWorkflowStatus>;
+  installMacosVirtualPrinter(): Promise<MacosWorkflowStatus>;
+  repairMacosVirtualPrinter(): Promise<MacosWorkflowStatus>;
+  uninstallMacosVirtualPrinter(): Promise<MacosWorkflowStatus>;
 }
 
 export interface CloseRequestEvent {
@@ -219,6 +223,18 @@ export const tauriBackend: Backend = {
   },
   uninstallMacosWorkflow() {
     return invoke("uninstall_macos_workflow");
+  },
+  macosVirtualPrinterStatus() {
+    return invoke("macos_virtual_printer_status");
+  },
+  installMacosVirtualPrinter() {
+    return invoke("install_macos_virtual_printer");
+  },
+  repairMacosVirtualPrinter() {
+    return invoke("repair_macos_virtual_printer");
+  },
+  uninstallMacosVirtualPrinter() {
+    return invoke("uninstall_macos_virtual_printer");
   },
   async activateWindow() {
     const window = getCurrentWindow();

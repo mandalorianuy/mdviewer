@@ -2,6 +2,7 @@ pub mod commands;
 pub mod deep_link;
 pub mod jobs;
 pub mod macos_integration;
+pub mod macos_virtual_printer;
 pub mod state;
 
 use jobs::{PrintJobId, PrintJobStore};
@@ -188,6 +189,15 @@ pub fn forward_opened_print_files<R: tauri::Runtime>(
                     let _ = intake.finish(job.id);
                 }
                 return Err(error.code());
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(home) = std::env::var_os("HOME")
+                && let Err(error) = macos_virtual_printer::remove_managed_spool_source(
+                    &source,
+                    std::path::Path::new(&home),
+                )
+            {
+                eprintln!("mdviewer-virtual-printer-cleanup code={}", error.code());
             }
             Ok(job.id)
         })();
