@@ -1,12 +1,17 @@
 use thiserror::Error;
 
+#[cfg(target_os = "linux")]
+mod tesseract;
 #[cfg(target_os = "macos")]
 mod vision;
+#[cfg(target_os = "windows")]
+mod windows_ocr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcrSource {
     Image,
     PdfPage,
+    PdfEmbeddedImage,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +192,10 @@ impl OcrEngine for LocalOcrEngine {
     fn name(&self) -> &'static str {
         if cfg!(target_os = "macos") {
             "apple_vision"
+        } else if cfg!(target_os = "windows") {
+            "windows_media_ocr"
+        } else if cfg!(target_os = "linux") {
+            "tesseract_5"
         } else {
             "unavailable"
         }
@@ -197,7 +206,15 @@ impl OcrEngine for LocalOcrEngine {
         {
             vision::recognize(input)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            windows_ocr::recognize(input)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            tesseract::recognize(input)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = input;
             Err(OcrError::Unavailable)

@@ -155,6 +155,7 @@ fn extract_pdf_bytes_inner_with_limits(
     let mut contains_text = false;
     let mut rendered_ocr_pixels = 0_u64;
     let mut ocr_pages = Vec::new();
+    let mut ocr_embedded_image_pages = Vec::new();
     let mut ocr_deferred_pages = Vec::new();
     let mut ocr_no_text_pages = Vec::new();
     let mut ocr_low_confidence_pages = Vec::new();
@@ -162,24 +163,38 @@ fn extract_pdf_bytes_inner_with_limits(
         check_cancellation(cancellation)?;
         let mut raw_page = extract_page(index, &page)?;
         let had_digital_text = page_contains_text(&raw_page);
-        if !had_digital_text && let Some(engine) = ocr {
-            let outcome = apply_page_ocr(
-                &page,
-                &mut raw_page,
-                engine,
-                &mut rendered_ocr_pixels,
-                ocr_limits,
-            )?;
+        if let Some(engine) = ocr {
+            let outcome = if had_digital_text {
+                apply_embedded_image_ocr(
+                    &mut raw_page,
+                    engine,
+                    &mut rendered_ocr_pixels,
+                    ocr_limits,
+                )?
+            } else {
+                Some(apply_page_ocr(
+                    &page,
+                    &mut raw_page,
+                    engine,
+                    &mut rendered_ocr_pixels,
+                    ocr_limits,
+                )?)
+            };
             check_cancellation(cancellation)?;
-            ocr_pages.push(raw_page.number);
-            if outcome.unavailable {
-                ocr_deferred_pages.push(raw_page.number);
-            }
-            if !outcome.had_text {
-                ocr_no_text_pages.push(raw_page.number);
-            }
-            if outcome.low_confidence {
-                ocr_low_confidence_pages.push(raw_page.number);
+            if let Some(outcome) = outcome {
+                ocr_pages.push(raw_page.number);
+                if had_digital_text {
+                    ocr_embedded_image_pages.push(raw_page.number);
+                }
+                if outcome.unavailable {
+                    ocr_deferred_pages.push(raw_page.number);
+                }
+                if !outcome.had_text {
+                    ocr_no_text_pages.push(raw_page.number);
+                }
+                if outcome.low_confidence {
+                    ocr_low_confidence_pages.push(raw_page.number);
+                }
             }
         }
         contains_text |= page_contains_text(&raw_page);
@@ -198,6 +213,12 @@ fn extract_pdf_bytes_inner_with_limits(
         metadata
             .properties
             .insert("ocr_pages".into(), page_list(&ocr_pages));
+        if !ocr_embedded_image_pages.is_empty() {
+            metadata.properties.insert(
+                "ocr_embedded_image_pages".into(),
+                page_list(&ocr_embedded_image_pages),
+            );
+        }
         if !ocr_deferred_pages.is_empty() {
             metadata
                 .properties
@@ -249,6 +270,148 @@ struct PageOcrOutcome {
     had_text: bool,
     low_confidence: bool,
     unavailable: bool,
+}
+
+fn apply_embedded_image_ocr(
+    raw_page: &mut RawPage,
+    engine: &dyn OcrEngine,
+    total_pixels: &mut u64,
+    limits: PdfOcrLimits,
+) -> Result<Option<PageOcrOutcome>, ConversionError> {
+    const MIN_DIMENSION: u32 = 64;
+    const MIN_PIXELS: u64 = 16_384;
+    const MIN_PAGE_AREA_RATIO: f32 = 0.01;
+
+    let page_area = raw_page.width * raw_page.height;
+    let images = raw_page
+        .images
+        .iter()
+        .filter(|image| {
+            let pixels = u64::from(image.pixel_width) * u64::from(image.pixel_height);
+            let visible_area = image.bounds.width() * image.bounds.height();
+            image.pixel_width >= MIN_DIMENSION
+                && image.pixel_height >= MIN_DIMENSION
+                && pixels >= MIN_PIXELS
+                && page_area.is_finite()
+                && page_area > 0.0
+                && visible_area / page_area >= MIN_PAGE_AREA_RATIO
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if images.is_empty() {
+        return Ok(None);
+    }
+
+    let mut had_text = false;
+    let mut low_confidence = false;
+    for image in images {
+        let pixels = u64::from(image.pixel_width).saturating_mul(u64::from(image.pixel_height));
+        if pixels > limits.max_pixels_per_page {
+            return Err(ConversionError::LimitExceeded {
+                limit: "pdf_ocr_image_pixels",
+                actual: pixels,
+                maximum: limits.max_pixels_per_page,
+            });
+        }
+        let next_total = total_pixels.saturating_add(pixels);
+        if next_total > limits.max_total_pixels {
+            return Err(ConversionError::LimitExceeded {
+                limit: "pdf_ocr_rendered_pixels",
+                actual: next_total,
+                maximum: limits.max_total_pixels,
+            });
+        }
+        let png = encode_rgba(&image.rgba, image.pixel_width, image.pixel_height)?;
+        let input = OcrInput::new(
+            &png,
+            "image/png",
+            image.pixel_width,
+            image.pixel_height,
+            OcrSource::PdfEmbeddedImage,
+        )
+        .map_err(map_ocr_error)?;
+        let output = match engine.recognize(input) {
+            Ok(output) => output,
+            Err(OcrError::Unavailable) => {
+                return Ok(Some(PageOcrOutcome {
+                    had_text,
+                    low_confidence,
+                    unavailable: true,
+                }));
+            }
+            Err(error) => return Err(map_ocr_error(error)),
+        };
+        *total_pixels = next_total;
+        low_confidence |= output.lines().iter().any(|line| line.confidence() < 0.5);
+        had_text |= !output.is_empty();
+        for line in output.lines() {
+            let bounds = line.bounds();
+            let rect = RawRect::try_new(
+                image.bounds.left + bounds.left() * image.bounds.width(),
+                image.bounds.top + bounds.top() * image.bounds.height(),
+                image.bounds.left + (bounds.left() + bounds.width()) * image.bounds.width(),
+                image.bounds.top + (bounds.top() + bounds.height()) * image.bounds.height(),
+            )
+            .ok_or_else(|| ConversionError::ConversionFailed {
+                message: "local OCR returned invalid embedded image geometry".into(),
+            })?;
+            if is_duplicate_ocr_line(raw_page, line.text(), rect) {
+                continue;
+            }
+            push_ocr_line(raw_page, line.text(), rect);
+        }
+    }
+
+    Ok(Some(PageOcrOutcome {
+        had_text,
+        low_confidence,
+        unavailable: false,
+    }))
+}
+
+fn is_duplicate_ocr_line(page: &RawPage, text: &str, bounds: RawRect) -> bool {
+    let normalized = normalize_ocr_text(text);
+    if normalized.is_empty() {
+        return true;
+    }
+    let overlapping_text = page
+        .glyphs
+        .iter()
+        .filter(|glyph| rects_intersect(glyph.bounds, bounds))
+        .map(|glyph| glyph.text.as_str())
+        .collect::<String>();
+    normalize_ocr_text(&overlapping_text) == normalized
+}
+
+fn normalize_ocr_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn rects_intersect(left: RawRect, right: RawRect) -> bool {
+    left.left < right.right
+        && left.right > right.left
+        && left.top < right.bottom
+        && left.bottom > right.top
+}
+
+fn push_ocr_line(raw_page: &mut RawPage, text: &str, rect: RawRect) {
+    let glyph_start = raw_page.glyphs.len();
+    raw_page.glyphs.push(RawGlyph {
+        text: text.into(),
+        bounds: rect,
+        font_size: rect.height().max(1.0),
+        font_name: Some("Local OCR".into()),
+        font_weight: None,
+    });
+    raw_page.words.push(RawWord {
+        text: text.into(),
+        bounds: rect,
+        glyph_start,
+        glyph_end: glyph_start + 1,
+    });
 }
 
 fn apply_page_ocr(
@@ -326,20 +489,7 @@ fn apply_page_ocr(
         .ok_or_else(|| ConversionError::ConversionFailed {
             message: "local OCR returned invalid page geometry".into(),
         })?;
-        let glyph_start = raw_page.glyphs.len();
-        raw_page.glyphs.push(RawGlyph {
-            text: line.text().into(),
-            bounds: rect,
-            font_size: rect.height().max(1.0),
-            font_name: Some("Local OCR".into()),
-            font_weight: None,
-        });
-        raw_page.words.push(RawWord {
-            text: line.text().into(),
-            bounds: rect,
-            glyph_start,
-            glyph_end: glyph_start + 1,
-        });
+        push_ocr_line(raw_page, line.text(), rect);
     }
     Ok(PageOcrOutcome {
         had_text: !output.is_empty(),
@@ -362,6 +512,18 @@ fn encode_rendered_page(
             message: "PDFium OCR render returned an unexpected pixel buffer".into(),
         });
     }
+    encode_rgba(&rgba, width, height)
+}
+
+fn encode_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ConversionError> {
+    let expected = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4);
+    if u64::try_from(rgba.len()).unwrap_or(u64::MAX) != expected {
+        return Err(ConversionError::ConversionFailed {
+            message: "PDF OCR image returned an unexpected pixel buffer".into(),
+        });
+    }
     let mut encoded = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut encoded, width, height);
@@ -369,7 +531,7 @@ fn encode_rendered_page(
         encoder.set_depth(png::BitDepth::Eight);
         encoder
             .write_header()
-            .and_then(|mut writer| writer.write_image_data(&rgba))
+            .and_then(|mut writer| writer.write_image_data(rgba))
             .map_err(|_| ConversionError::ConversionFailed {
                 message: "could not encode a bounded PDF page for local OCR".into(),
             })?;
@@ -954,7 +1116,58 @@ fn pdfium_error(context: &str, error: PdfiumError) -> ConversionError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use mdconvert_ocr::{OcrLine, OcrOutput, OcrRect};
+
     use super::*;
+
+    struct ScriptedEmbeddedOcr {
+        calls: AtomicUsize,
+        text: &'static str,
+    }
+
+    impl OcrEngine for ScriptedEmbeddedOcr {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+
+        fn recognize(&self, input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
+            assert_eq!(input.source(), OcrSource::PdfEmbeddedImage);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(OcrOutput::new(vec![OcrLine::new(
+                self.text,
+                0.9,
+                OcrRect::new(0.0, 0.0, 1.0, 1.0).unwrap(),
+            )]))
+        }
+    }
+
+    fn embedded_page(image_width: u32, image_height: u32) -> RawPage {
+        RawPage {
+            number: 1,
+            width: 300.0,
+            height: 400.0,
+            rotation_degrees: 0,
+            glyphs: vec![RawGlyph {
+                text: "Digital text".into(),
+                bounds: RawRect::try_new(20.0, 20.0, 100.0, 40.0).unwrap(),
+                font_size: 12.0,
+                font_name: None,
+                font_weight: None,
+            }],
+            words: Vec::new(),
+            images: vec![RawImage {
+                index: 1,
+                bounds: RawRect::try_new(50.0, 100.0, 250.0, 300.0).unwrap(),
+                pixel_width: image_width,
+                pixel_height: image_height,
+                rgba: vec![255; image_width as usize * image_height as usize * 4],
+            }],
+            links: Vec::new(),
+            rules: Vec::new(),
+        }
+    }
 
     #[test]
     fn password_and_security_load_errors_are_encrypted_input() {
@@ -973,5 +1186,40 @@ mod tests {
     fn font_weights_outside_the_raw_contract_are_absent() {
         assert_eq!(font_weight_value(PdfFontWeight::Weight700Bold), Some(700));
         assert_eq!(font_weight_value(PdfFontWeight::Custom(u32::MAX)), None);
+    }
+
+    #[test]
+    fn embedded_image_ocr_skips_icons_below_the_intrinsic_pixel_threshold() {
+        let mut page = embedded_page(63, 256);
+        let engine = ScriptedEmbeddedOcr {
+            calls: AtomicUsize::new(0),
+            text: "Icon",
+        };
+
+        let outcome =
+            apply_embedded_image_ocr(&mut page, &engine, &mut 0, PdfOcrLimits::default()).unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(page.glyphs.len(), 1);
+    }
+
+    #[test]
+    fn embedded_image_ocr_suppresses_equivalent_spatially_overlapping_digital_text() {
+        let mut page = embedded_page(128, 128);
+        page.glyphs[0].text = "Duplicate text".into();
+        page.glyphs[0].bounds = page.images[0].bounds;
+        let engine = ScriptedEmbeddedOcr {
+            calls: AtomicUsize::new(0),
+            text: "Duplicate text",
+        };
+
+        let outcome = apply_embedded_image_ocr(&mut page, &engine, &mut 0, PdfOcrLimits::default())
+            .unwrap()
+            .unwrap();
+
+        assert!(outcome.had_text);
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(page.glyphs.len(), 1);
     }
 }

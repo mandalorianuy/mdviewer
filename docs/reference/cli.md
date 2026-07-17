@@ -1,8 +1,8 @@
 # `mdconvert` local conversion CLI
 
-`mdconvert` is the headless, local-only interface to the MDViewer v1.1 conversion engine. It does
-not accept URLs, make network requests, or shell out to another converter. On macOS it invokes
-Apple Vision locally for images and PDF pages that have no extractable text.
+`mdconvert` is the headless, local-only interface to the MDViewer v1.2 conversion engine. It does
+not accept URLs, make network requests, or shell out to another converter. OCR uses Apple Vision on
+macOS, Windows Media OCR on Windows, and the Tesseract 5 library on Linux.
 
 ## Command
 
@@ -41,7 +41,7 @@ that treat them as aliases without conflating distinct directories on case-sensi
 When the derived assets directory does not exist yet, containment compares lexical components
 exactly on every platform; it does not infer case or Unicode-normalization equivalence.
 
-The local v1.1 registry contains PDF, HTML, CSV, JSON, XML, ZIP, EPUB, DOCX, PPTX, XLSX, PNG, and
+The local v1.2 registry contains PDF, HTML, CSV, JSON, XML, ZIP, EPUB, DOCX, PPTX, XLSX, PNG, and
 JPEG. Dispatch is deterministic: strong PDF/PNG/JPEG/ZIP signatures are checked first; structured
 JSON/XML/CSV viability is checked second; HTML tokenizer signals are considered last, except that a
 compatible explicit `.html` selects authored HTML markup. Thus extensionless JSON or CSV wins even
@@ -54,11 +54,14 @@ or `.xlsx` extension.
 
 PDF conversion requires the pinned PDFium library through `PDFIUM_DYNAMIC_LIB_PATH`. An absent or
 unloadable runtime fails as `pdfium_unavailable`; encrypted PDFs fail as `encrypted_input`. On
-macOS, each page without extractable text is rendered at bounded resolution and recognized with
-Vision. Digital pages are never rasterized for OCR. PNG/JPEG images without semantic text also use
-Vision while retaining the original image asset. `ocr_no_text_found` and `ocr_low_confidence`
-warnings keep uncertain outcomes visible. Platforms without a local backend use `ocr_deferred` for
-images and `ocr_required` for a PDF that still contains no text.
+each page without extractable text is rendered at bounded resolution and recognized by the local
+backend. Digital pages are never rasterized wholesale; eligible embedded images are recognized
+individually while preserving the original asset. Images smaller than 64 px in either dimension,
+below 16,384 intrinsic pixels, or below 1% of visible page area are skipped. OCR pixels retain the
+16-million-per-operation and 64-million-per-document budgets. Spatially equivalent overlapping
+digital text is not inserted twice. `ocr_no_text_found`, `ocr_deferred`, and
+`ocr_low_confidence` warnings keep uncertain outcomes visible. Linux requires compatible Tesseract
+5/Leptonica libraries and installed `eng` plus `spa` trained data; conversion never downloads them.
 
 ## Assets and atomic publication
 
