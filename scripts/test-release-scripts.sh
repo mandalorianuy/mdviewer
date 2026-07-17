@@ -458,11 +458,13 @@ grep -q 'CARGO_TARGET_DIR:=$ROOT/.cache/target-linux-x64' "$ROOT/scripts/package
   fail "Linux release builds must not share host Cargo artifacts"
 grep -q 'xdg-utils' "$multiplatform_workflow" ||
   fail "Linux release workflow is missing the AppImage desktop integration tools"
-grep -q 'safe.directory.*GITHUB_WORKSPACE' "$multiplatform_workflow" ||
-  fail "Linux release workflow does not trust its container checkout explicitly"
-grep -Fq 'chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"' "$multiplatform_workflow" ||
+grep -Fq 'repo="$(pwd -P)"' "$multiplatform_workflow" ||
+  fail "Linux release workflow does not resolve its effective container checkout"
+grep -q 'safe.directory.*repo' "$multiplatform_workflow" ||
+  fail "Linux release workflow does not trust its effective container checkout explicitly"
+grep -Fq 'chown -R "$(id -u):$(id -g)" "$repo"' "$multiplatform_workflow" ||
   fail "Linux release workflow does not align checkout ownership with the container user"
-grep -q 'git -C.*GITHUB_WORKSPACE.*rev-parse --is-inside-work-tree' "$multiplatform_workflow" ||
+grep -q 'git -C.*repo.*rev-parse --is-inside-work-tree' "$multiplatform_workflow" ||
   fail "Linux release workflow does not verify Git access after checkout ownership setup"
 
 node - "$ROOT" <<'NODE'
