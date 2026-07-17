@@ -322,6 +322,19 @@ FAKE_IDENTITIES="$valid_identity" PATH="$notary_fake_bin:$PATH" \
   verify_notarization_credentials "$valid_identity" "$valid_key_id" "$valid_issuer" "$valid_key_path"
 
 test -f "$ROOT/.github/workflows/ci.yml" || fail "CI workflow is missing"
+
+release_workflow="$ROOT/.github/workflows/release-macos.yml"
+test -f "$release_workflow" || fail "release workflow is missing"
+grep -Eq '^[[:space:]]+workflow_dispatch:$' "$release_workflow" ||
+  fail "release workflow is not manually dispatchable"
+if grep -Eq '^[[:space:]]+tags:$' "$release_workflow"; then
+  fail "release workflow auto-runs without repository signing secrets"
+fi
+if grep -Fq 'APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8' "$release_workflow"; then
+  fail "release workflow uses runner context outside a step"
+fi
+grep -Fq 'APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8' "$release_workflow" ||
+  fail "release workflow does not export the ephemeral notary key path"
 test -f "$ROOT/.github/workflows/release-macos.yml" || fail "macOS release workflow is missing"
 grep -q 'actions/checkout@v7' "$ROOT/.github/workflows/ci.yml" || fail "CI must use checkout v7"
 grep -q 'actions/setup-node@v7' "$ROOT/.github/workflows/ci.yml" || fail "CI must use setup-node v7"

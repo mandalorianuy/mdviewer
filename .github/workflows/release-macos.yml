@@ -2,9 +2,6 @@ name: Release macOS Apple Silicon
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: read
@@ -17,7 +14,6 @@ jobs:
       CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,6 +25,8 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
           package-manager-cache: false
+      - name: Configure ephemeral credential paths
+        run: echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
       - name: Require Apple Silicon runner
         run: test "$(uname -m)" = arm64
       - name: Activate pinned Rust toolchain
