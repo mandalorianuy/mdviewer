@@ -42,7 +42,19 @@ verify_notarization_credentials \
   "${CODESIGN_IDENTITY:-}" \
   "${APPLE_API_KEY:-}" \
   "${APPLE_API_ISSUER:-}" \
-  "${APPLE_API_KEY_PATH:-}"
+  "${APPLE_API_KEY_PATH:-}" \
+  "${APPLE_NOTARY_PROFILE:-}"
+
+notary_auth=()
+if [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
+  notary_auth=(--keychain-profile "$APPLE_NOTARY_PROFILE")
+else
+  notary_auth=(
+    --key "$APPLE_API_KEY_PATH"
+    --key-id "$APPLE_API_KEY"
+    --issuer "$APPLE_API_ISSUER"
+  )
+fi
 
 zip="$ROOT/dist/macos-arm64/MDViewer-$version-notarization.zip"
 rm -f "$zip"
@@ -52,9 +64,7 @@ submit() {
   artifact="$1"
   output="$2"
   xcrun notarytool submit "$artifact" \
-    --key "$APPLE_API_KEY_PATH" \
-    --key-id "$APPLE_API_KEY" \
-    --issuer "$APPLE_API_ISSUER" \
+    "${notary_auth[@]}" \
     --wait \
     --output-format json >"$output"
   node -e 'const r=require(process.argv[1]); if (r.status !== "Accepted") process.exit(1)' "$output"

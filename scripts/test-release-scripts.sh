@@ -261,6 +261,10 @@ touch "${@: -1}"
 EOF
 cat >"$notary_fake_bin/xcrun" <<'EOF'
 #!/usr/bin/env bash
+if [ "${1:-}" = "notarytool" ] && [ "${2:-}" = "history" ]; then
+  printf '{"history":[]}\n'
+  exit 0
+fi
 if [ "${1:-}" = "notarytool" ] && [ "${2:-}" = "submit" ]; then
   : >"$NOTARY_SUBMIT_SENTINEL"
   exit 99
@@ -320,6 +324,13 @@ FAKE_IDENTITIES="$valid_identity" PATH="$notary_fake_bin:$PATH" \
   verify_production_signing_identity "$valid_identity"
 FAKE_IDENTITIES="$valid_identity" PATH="$notary_fake_bin:$PATH" \
   verify_notarization_credentials "$valid_identity" "$valid_key_id" "$valid_issuer" "$valid_key_path"
+FAKE_IDENTITIES="$valid_identity" PATH="$notary_fake_bin:$PATH" \
+  verify_notarization_credentials "$valid_identity" '' '' '' 'mdviewer-notary'
+if FAKE_IDENTITIES="$valid_identity" PATH="$notary_fake_bin:$PATH" \
+  verify_notarization_credentials \
+    "$valid_identity" "$valid_key_id" "$valid_issuer" "$valid_key_path" 'mdviewer-notary'; then
+  fail "notarization preflight accepted ambiguous API and keychain profile credentials"
+fi
 
 test -f "$ROOT/.github/workflows/ci.yml" || fail "CI workflow is missing"
 
@@ -380,6 +391,10 @@ grep -q 'verify_then_publish_release' "$ROOT/scripts/verify-release.sh" ||
   fail "production verification must own the final publishable transition"
 grep -q 'verify_production_signing_identity' "$ROOT/scripts/package-macos-arm64.sh" ||
   fail "package and notarization must share the production signing identity preflight"
+grep -q 'APPLE_NOTARY_PROFILE' "$ROOT/scripts/notarize-macos.sh" ||
+  fail "local notarization must support a credential profile stored in Keychain"
+grep -q -- '--keychain-profile' "$ROOT/scripts/notarize-macos.sh" ||
+  fail "local notarization does not pass the selected Keychain profile to notarytool"
 notary_preflight_line="$(grep -n 'verify_notarization_credentials' "$ROOT/scripts/notarize-macos.sh" | head -n 1 | cut -d: -f1)"
 notary_zip_line="$(grep -n 'notarization.zip' "$ROOT/scripts/notarize-macos.sh" | head -n 1 | cut -d: -f1)"
 test -n "$notary_preflight_line" && test -n "$notary_zip_line" && test "$notary_preflight_line" -lt "$notary_zip_line" ||

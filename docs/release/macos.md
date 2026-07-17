@@ -50,8 +50,19 @@ Never publish an unsigned-smoke artifact.
 
 ## Production package and notarization
 
-The production scripts accept no embedded identifiers or credential paths. Supply these explicit
-environment variables:
+The production scripts accept no embedded identifiers or credential paths. For a local release,
+store the Apple notarization credential in Keychain and supply its profile name:
+
+```bash
+export CODESIGN_IDENTITY='Developer ID Application: ...'
+export APPLE_NOTARY_PROFILE='mdviewer-notary'
+
+./scripts/package-macos-arm64.sh
+./scripts/notarize-macos.sh
+./scripts/verify-release.sh
+```
+
+CI can instead use an App Store Connect API key through these explicit variables:
 
 ```bash
 export CODESIGN_IDENTITY='Developer ID Application: ...'
@@ -63,6 +74,9 @@ export APPLE_API_ISSUER='...'
 ./scripts/notarize-macos.sh
 ./scripts/verify-release.sh
 ```
+
+Choose exactly one notarization method. The preflight rejects a Keychain profile combined with API
+key variables, invalid profile names and profiles that `notarytool` cannot validate.
 
 Packaging fails unless the Git tree and both lockfiles are clean. It fetches PDFium from the pinned
 Task 7 URL, verifies the archive and receipt, builds only `aarch64-apple-darwin`, signs PDFium before
