@@ -6,6 +6,7 @@ interface MarkdownPreviewProps {
   markdown: string;
   onExternalLink(url: string): void;
   elementRef?: Ref<HTMLElement>;
+  hidden?: boolean;
 }
 
 function strictPreviewUrl(url: string, key: string): string | undefined {
@@ -72,10 +73,10 @@ function components(onExternalLink: (url: string) => void): Components {
   };
 }
 
-export function MarkdownPreview({ markdown, onExternalLink, elementRef }: MarkdownPreviewProps) {
+export function MarkdownPreview({ markdown, onExternalLink, elementRef, hidden = false }: MarkdownPreviewProps) {
   const transform: UrlTransform = (url, key) => strictPreviewUrl(url, key);
   return (
-    <section ref={elementRef} className="preview-pane markdown-body" aria-label="Vista previa">
+    <section ref={elementRef} className="preview-pane markdown-body" aria-label="Vista previa" hidden={hidden}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         skipHtml

@@ -12,12 +12,31 @@ use tempfile::TempDir;
 
 #[test]
 fn desktop_base_config_is_portable_and_macos_override_is_the_exact_native_target() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let base: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let package: serde_json::Value =
+        serde_json::from_str(include_str!("../../package.json")).unwrap();
     let macos: serde_json::Value =
         serde_json::from_str(include_str!("../tauri.macos.conf.json")).unwrap();
 
+    assert_eq!(base["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(package["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(base["identifier"], "com.mdviewer.desktop");
     assert_eq!(base["bundle"]["active"], true);
+    assert_eq!(
+        base["bundle"]["icon"],
+        serde_json::json!(["icons/icon.png", "icons/icon.icns", "icons/icon.ico"])
+    );
+    let icon = fs::read(manifest.join("icons/icon.png")).unwrap();
+    assert_eq!(&icon[12..16], b"IHDR");
+    let width = u32::from_be_bytes(icon[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(icon[20..24].try_into().unwrap());
+    assert!(
+        width >= 512,
+        "bundle icon must be at least 512px, got {width}px"
+    );
+    assert_eq!(height, width, "bundle icon must be square");
+    assert!(manifest.join("icons/icon.icns").is_file());
     assert_eq!(
         base["plugins"]["deep-link"]["desktop"]["schemes"],
         serde_json::json!(["mdviewer"])
