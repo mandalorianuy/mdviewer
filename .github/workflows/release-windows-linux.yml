@@ -1,0 +1,143 @@
+name: Release Windows and Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  windows:
+    name: Signed Windows x64 NSIS
+    runs-on: windows-latest
+    env:
+      WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+          package-manager-cache: false
+      - name: Activate pinned Rust toolchain
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Import Authenticode certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "mdviewer-authenticode.pfx"
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          )
+          $securePassword = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+          if ($certificate.Thumbprint -ne ($env:WINDOWS_CERTIFICATE_THUMBPRINT -replace '\s', '').ToUpperInvariant()) {
+            throw "Imported certificate does not match WINDOWS_CERTIFICATE_THUMBPRINT"
+          }
+          "WINDOWS_IMPORTED_CERTIFICATE=$($certificate.Thumbprint)" | Out-File $env:GITHUB_ENV -Append
+      - name: Real Windows OCR fixture
+        run: cargo test -p mdconvert-ocr --test vision_macos local_backend_recognizes_a_stable_png_and_returns_normalized_bounds
+      - name: Build signed NSIS package
+        shell: pwsh
+        run: ./scripts/package-windows-x64.ps1
+      - name: Verify signed install lifecycle
+        shell: pwsh
+        run: ./scripts/verify-windows-release.ps1
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/windows-x64/MDViewer-1.2.1-x64-setup.exe
+            dist/windows-x64/package-receipt.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: MDViewer-Windows-x64
+          path: dist/windows-x64/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove ephemeral Authenticode material
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_IMPORTED_CERTIFICATE) {
+            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_IMPORTED_CERTIFICATE" -ErrorAction SilentlyContinue
+          }
+          Remove-Item (Join-Path $env:RUNNER_TEMP "mdviewer-authenticode.pfx") -Force -ErrorAction SilentlyContinue
+
+  linux:
+    name: Linux x64 AppImage and Debian
+    runs-on: ubuntu-24.04
+    container: debian:12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Debian 12 build and runtime dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            clang \
+            curl \
+            file \
+            git \
+            libayatana-appindicator3-dev \
+            libclang-dev \
+            libleptonica-dev \
+            libssl-dev \
+            libtesseract-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            patchelf \
+            tesseract-ocr \
+            tesseract-ocr-eng \
+            tesseract-ocr-spa \
+            wget \
+            xauth \
+            xvfb
+          test "$(tesseract --version 2>&1 | sed -n '1s/^tesseract \([0-9]*\).*/\1/p')" = 5
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+          package-manager-cache: false
+      - name: Activate pinned Rust toolchain
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain 1.94.0
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build AppImage and Debian packages
+        run: ./scripts/package-linux-x64.sh
+      - name: Verify Linux package runtime
+        run: ./scripts/verify-linux-release.sh
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/linux-x64/MDViewer-1.2.1-x86_64.AppImage
+            dist/linux-x64/MDViewer-1.2.1-amd64.deb
+            dist/linux-x64/package-receipt.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: MDViewer-Linux-x64
+          path: dist/linux-x64/*
+          if-no-files-found: error
+          retention-days: 14

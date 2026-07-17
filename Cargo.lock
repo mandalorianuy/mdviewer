@@ -2308,7 +2308,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mdconvert-cli"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "libc",
  "mdconvert-core",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-core"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2338,7 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-formats"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-html"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "data-url",
  "html5ever 0.39.0",
@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-ocr"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "font8x8",
  "leptess",
@@ -2375,13 +2375,14 @@ dependencies = [
  "objc2-foundation",
  "objc2-vision",
  "png 0.18.1",
+ "tempfile",
  "thiserror 2.0.18",
  "windows 0.62.2",
 ]
 
 [[package]]
 name = "mdconvert-pdf"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "font8x8",
  "mdconvert-core",
@@ -2394,7 +2395,7 @@ dependencies = [
 
 [[package]]
 name = "mdviewer-desktop"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "libc",
  "mdconvert-cli",

@@ -1,0 +1,20 @@
+{
+  "bundle": {
+    "targets": ["appimage", "deb"],
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/share/mdviewer/tessdata": "../../../.cache/tessdata/4.1.0"
+        }
+      },
+      "deb": {
+        "depends": [
+          "libtesseract5",
+          "liblept5",
+          "tesseract-ocr-eng",
+          "tesseract-ocr-spa"
+        ]
+      }
+    }
+  }
+}

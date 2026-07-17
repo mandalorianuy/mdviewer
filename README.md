@@ -3,10 +3,11 @@
 MDViewer converts local documents to GitHub-Flavored Markdown and opens the result in an editor and
 preview. The desktop product uses Tauri 2 with a portable Rust conversion core and CLI.
 
-The first public binary targets **macOS 13+ on Apple Silicon**. Core, CLI and desktop are continuously
-compiled on macOS, Windows and Linux; Windows and Linux binary releases come later.
+The current v1.2.1 source defines production desktop packages for **macOS 13+ Apple Silicon**,
+**Windows x64**, and **Linux x64**. A platform artifact is published only after its receipt passes
+the native signing or runtime verification gates.
 
-## What v1.2 includes
+## What v1.2.1 includes
 
 - “Guardar como Markdown con MDViewer” in the macOS print PDF menu.
 - Local PDF conversion through pinned PDFium, plus HTML, text, CSV, JSON, XML, ZIP, EPUB and OOXML.
@@ -60,6 +61,8 @@ Build a local macOS artifact without making signing or notarization claims:
 - [v1 parity and Swift retirement gate](docs/release/v1-parity-report.md)
 - [v1.1 OCR release notes](docs/release/v1.1.md)
 - [v1.2 portable OCR release notes](docs/release/v1.2.md)
+- [v1.2.1 multiplatform distribution notes](docs/release/v1.2.1.md)
+- [Windows and Linux packaging](docs/release/windows-linux.md)
 - [CLI contract](docs/reference/cli.md)
 - [cross-platform architecture](docs/superpowers/specs/2026-07-15-cross-platform-save-as-markdown-design.md)
 - [archived Swift baseline](docs/architecture/swift-baseline.md)
