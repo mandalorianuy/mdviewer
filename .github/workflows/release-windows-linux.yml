@@ -123,6 +123,7 @@ jobs:
             xauth \
             xdg-utils \
             xvfb
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(tesseract --version 2>&1 | sed -n '1s/^tesseract \([0-9]*\).*/\1/p')" = 5
       - uses: actions/setup-node@v7
         with:
