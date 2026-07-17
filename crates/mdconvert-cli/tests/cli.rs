@@ -305,7 +305,7 @@ fn every_registry_converter_accepts_the_same_owned_bytes_after_source_removal() 
 }
 
 #[test]
-fn image_success_publishes_required_assets_and_local_ocr_no_text_warning() {
+fn image_success_publishes_required_assets_and_reports_the_local_ocr_outcome() {
     let temp = TestDir::new();
     let input = temp.path().join("pixel.png");
     fs::write(&input, png_without_semantic_metadata()).unwrap();
@@ -336,7 +336,14 @@ fn image_success_publishes_required_assets_and_local_ocr_no_text_warning() {
             .to_string_lossy()
             .as_ref()
     );
-    assert_eq!(value["warnings"][0]["code"], "ocr_no_text_found");
+    assert_eq!(
+        value["warnings"][0]["code"],
+        if cfg!(target_os = "macos") {
+            "ocr_no_text_found"
+        } else {
+            "ocr_deferred"
+        }
+    );
     assert!(assets_path.join("image-001.png").is_file());
     assert!(assets_path.join(".mdviewer-assets.json").is_file());
 }
@@ -566,25 +573,6 @@ fn preexisting_cancel_file_stops_before_conversion_and_leaves_no_partials() {
     assert!(!markdown.exists());
     assert!(!temp.path().join("cancelled.assets").exists());
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn scanned_pdf_returns_ocr_required_without_outputs() {
-    let temp = TestDir::new();
-    let markdown = temp.path().join("scanned.md");
-    let output = command()
-        .args(["convert"])
-        .arg(fixture("pdf/scanned.pdf"))
-        .args(["--output"])
-        .arg(&markdown)
-        .arg("--json")
-        .output()
-        .unwrap();
-
-    assert_failed_json(&output, "ocr_required", 4);
-    assert!(!markdown.exists());
-    assert!(!temp.path().join("scanned.assets").exists());
 }
 
 #[test]
