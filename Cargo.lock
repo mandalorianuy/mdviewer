@@ -2191,7 +2191,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mdconvert-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "mdconvert-core",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-formats"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-html"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "data-url",
  "html5ever 0.39.0",
@@ -2247,7 +2247,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-pdf"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mdconvert-core",
  "pdfium-render",
@@ -2258,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "mdviewer-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "mdconvert-cli",

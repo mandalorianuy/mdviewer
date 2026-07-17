@@ -14,9 +14,13 @@ use tempfile::TempDir;
 fn desktop_base_config_is_portable_and_macos_override_is_the_exact_native_target() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let base: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let package: serde_json::Value =
+        serde_json::from_str(include_str!("../../package.json")).unwrap();
     let macos: serde_json::Value =
         serde_json::from_str(include_str!("../tauri.macos.conf.json")).unwrap();
 
+    assert_eq!(base["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(package["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(base["identifier"], "com.mdviewer.desktop");
     assert_eq!(base["bundle"]["active"], true);
     assert_eq!(
