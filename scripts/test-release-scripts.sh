@@ -110,6 +110,10 @@ expect_failure "dirty tree" verify_clean_release_tree "$tmp/repo"
 
 expect_failure "unsigned app" verify_developer_id_app /usr/bin/true
 
+current_codesign_details='CodeDirectory v=20500 size=27200 flags=0x10000(runtime) hashes=843+3 location=embedded'
+codesign_details_have_hardened_runtime "$current_codesign_details" ||
+  fail "current codesign output did not report hardened runtime"
+
 release_root="$tmp/release-repo"
 mkdir -p "$release_root/dist/macos-arm64/MDViewer.app/Contents/MacOS"
 mkdir -p "$release_root/dist/macos-arm64/MDViewer.app/Contents/Resources/lib"
