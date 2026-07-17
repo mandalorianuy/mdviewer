@@ -1,7 +1,8 @@
 # `mdconvert` local conversion CLI
 
-`mdconvert` is the headless, local-only interface to the MDViewer v1 conversion engine. It does
-not accept URLs, make network requests, invoke OCR, or shell out to another converter.
+`mdconvert` is the headless, local-only interface to the MDViewer v1.1 conversion engine. It does
+not accept URLs, make network requests, or shell out to another converter. On macOS it invokes
+Apple Vision locally for images and PDF pages that have no extractable text.
 
 ## Command
 
@@ -40,7 +41,7 @@ that treat them as aliases without conflating distinct directories on case-sensi
 When the derived assets directory does not exist yet, containment compares lexical components
 exactly on every platform; it does not infer case or Unicode-normalization equivalence.
 
-The local v1 registry contains PDF, HTML, CSV, JSON, XML, ZIP, EPUB, DOCX, PPTX, XLSX, PNG, and
+The local v1.1 registry contains PDF, HTML, CSV, JSON, XML, ZIP, EPUB, DOCX, PPTX, XLSX, PNG, and
 JPEG. Dispatch is deterministic: strong PDF/PNG/JPEG/ZIP signatures are checked first; structured
 JSON/XML/CSV viability is checked second; HTML tokenizer signals are considered last, except that a
 compatible explicit `.html` selects authored HTML markup. Thus extensionless JSON or CSV wins even
@@ -52,9 +53,12 @@ its package type cannot be selected safely without an explicit `.zip`, `.epub`, 
 or `.xlsx` extension.
 
 PDF conversion requires the pinned PDFium library through `PDFIUM_DYNAMIC_LIB_PATH`. An absent or
-unloadable runtime fails as `pdfium_unavailable`; encrypted PDFs fail as `encrypted_input`; PDFs
-without extractable text fail as `ocr_required`. PNG and JPEG conversion does not run OCR. It can
-succeed with an `ocr_deferred` warning.
+unloadable runtime fails as `pdfium_unavailable`; encrypted PDFs fail as `encrypted_input`. On
+macOS, each page without extractable text is rendered at bounded resolution and recognized with
+Vision. Digital pages are never rasterized for OCR. PNG/JPEG images without semantic text also use
+Vision while retaining the original image asset. `ocr_no_text_found` and `ocr_low_confidence`
+warnings keep uncertain outcomes visible. Platforms without a local backend use `ocr_deferred` for
+images and `ocr_required` for a PDF that still contains no text.
 
 ## Assets and atomic publication
 
@@ -133,7 +137,8 @@ stderr. Human diagnostics never print document contents, extracted text, or pars
 
 `--cancel-file <PATH>` treats existence of the marker path as a cancellation request. The marker is
 checked before input detection, before expensive conversion, after conversion, immediately before
-publication, and by the transactional writer before staging and before commit. Cancellation uses
+publication, between PDF OCR pages, immediately after each page recognition call, and by the
+transactional writer before staging and before commit. Cancellation uses
 the stable `cancelled` error code, exits with 6, and leaves no Markdown or assets output.
 
 ## Exit codes

@@ -1,7 +1,8 @@
 # MDViewer cross-platform con Guardar como Markdown universal
 
 **Fecha:** 2026-07-15  
-**Estado:** Diseño aprobado; plan de implementación preparado
+**Estado:** v1 implementada; evolución OCR v1.1 implementada en
+`2026-07-17-local-ocr-v1.1-design.md`
 **Producto:** MDViewer  
 **Licencia:** MIT
 
@@ -454,7 +455,8 @@ fixtures antes de corregirse.
 
 ## 16. Evolución posterior
 
-- v1.1: OCR local detrás del mismo contrato de extractor.
+- v1.1: OCR local detrás del mismo contrato de extractor. Implementado con
+  Vision en macOS y contrato portable `mdconvert-ocr`.
 - Versión Windows: producto completo más adapter universal de impresión.
 - Versión Linux: producto completo más Printer Application driverless.
 - Integración de navegador: captura HTML directa para máxima fidelidad web.

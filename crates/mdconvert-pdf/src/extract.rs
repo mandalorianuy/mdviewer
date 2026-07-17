@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fs, sync::Mutex};
 
-use mdconvert_core::{ConversionError, ConversionRequest, DocumentMetadata};
+use mdconvert_core::{Cancellation, ConversionError, ConversionRequest, DocumentMetadata};
+use mdconvert_ocr::{OcrEngine, OcrError, OcrInput, OcrSource};
 use pdfium_render::prelude::*;
 use url::Url;
 
@@ -14,15 +15,109 @@ use crate::{
 // each extraction transaction serialized at the native-library boundary.
 static PDFIUM_EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PdfOcrLimits {
+    pub dpi: u16,
+    pub max_dimension: u32,
+    pub max_pixels_per_page: u64,
+    pub max_total_pixels: u64,
+}
+
+impl Default for PdfOcrLimits {
+    fn default() -> Self {
+        Self {
+            dpi: 200,
+            max_dimension: 4_096,
+            max_pixels_per_page: 16_000_000,
+            max_total_pixels: 64_000_000,
+        }
+    }
+}
+
+impl PdfOcrLimits {
+    fn validate(self) -> Result<Self, ConversionError> {
+        if self.dpi == 0
+            || self.max_dimension == 0
+            || self.max_pixels_per_page == 0
+            || self.max_total_pixels == 0
+        {
+            return Err(ConversionError::ConversionFailed {
+                message: "PDF OCR limits must be positive and internally consistent".into(),
+            });
+        }
+        Ok(self)
+    }
+}
+
 pub fn extract_pdf(request: &ConversionRequest) -> Result<RawDocument, ConversionError> {
     let bytes = read_source(request)?;
     extract_pdf_bytes(&bytes, request)
+}
+
+pub fn extract_pdf_with_ocr(
+    request: &ConversionRequest,
+    engine: &dyn OcrEngine,
+) -> Result<RawDocument, ConversionError> {
+    let bytes = read_source(request)?;
+    extract_pdf_bytes_with_ocr(&bytes, request, engine)
 }
 
 pub fn extract_pdf_bytes(
     bytes: &[u8],
     request: &ConversionRequest,
 ) -> Result<RawDocument, ConversionError> {
+    extract_pdf_bytes_inner(bytes, request, None)
+}
+
+pub fn extract_pdf_bytes_with_ocr(
+    bytes: &[u8],
+    request: &ConversionRequest,
+    engine: &dyn OcrEngine,
+) -> Result<RawDocument, ConversionError> {
+    extract_pdf_bytes_inner(bytes, request, Some(engine))
+}
+
+fn extract_pdf_bytes_inner(
+    bytes: &[u8],
+    request: &ConversionRequest,
+    ocr: Option<&dyn OcrEngine>,
+) -> Result<RawDocument, ConversionError> {
+    extract_pdf_bytes_inner_with_limits(bytes, request, ocr, PdfOcrLimits::default(), None)
+}
+
+pub fn extract_pdf_bytes_with_ocr_limits(
+    bytes: &[u8],
+    request: &ConversionRequest,
+    engine: &dyn OcrEngine,
+    limits: PdfOcrLimits,
+) -> Result<RawDocument, ConversionError> {
+    extract_pdf_bytes_inner_with_limits(bytes, request, Some(engine), limits, None)
+}
+
+pub fn extract_pdf_bytes_with_ocr_cancellable(
+    bytes: &[u8],
+    request: &ConversionRequest,
+    engine: &dyn OcrEngine,
+    cancellation: &dyn Cancellation,
+) -> Result<RawDocument, ConversionError> {
+    extract_pdf_bytes_inner_with_limits(
+        bytes,
+        request,
+        Some(engine),
+        PdfOcrLimits::default(),
+        Some(cancellation),
+    )
+}
+
+fn extract_pdf_bytes_inner_with_limits(
+    bytes: &[u8],
+    request: &ConversionRequest,
+    ocr: Option<&dyn OcrEngine>,
+    ocr_limits: PdfOcrLimits,
+    cancellation: Option<&dyn Cancellation>,
+) -> Result<RawDocument, ConversionError> {
+    let ocr_limits = ocr_limits.validate()?;
+    check_cancellation(cancellation)?;
     let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     if actual > request.limits.max_input_bytes {
         return Err(ConversionError::LimitExceeded {
@@ -55,24 +150,240 @@ pub fn extract_pdf_bytes(
     }
     preflight_images(&document, request)?;
 
-    let metadata = extract_metadata(&document, page_count);
+    let mut metadata = extract_metadata(&document, page_count);
     let mut pages = Vec::with_capacity(page_count as usize);
     let mut contains_text = false;
+    let mut rendered_ocr_pixels = 0_u64;
+    let mut ocr_pages = Vec::new();
+    let mut ocr_deferred_pages = Vec::new();
+    let mut ocr_no_text_pages = Vec::new();
+    let mut ocr_low_confidence_pages = Vec::new();
     for (index, page) in document.pages().iter().enumerate() {
-        let raw_page = extract_page(index, &page)?;
-        contains_text |= raw_page.glyphs.iter().any(|glyph| {
-            glyph
-                .text
-                .chars()
-                .any(|character| !character.is_whitespace())
-        });
+        check_cancellation(cancellation)?;
+        let mut raw_page = extract_page(index, &page)?;
+        let had_digital_text = page_contains_text(&raw_page);
+        if !had_digital_text && let Some(engine) = ocr {
+            let outcome = apply_page_ocr(
+                &page,
+                &mut raw_page,
+                engine,
+                &mut rendered_ocr_pixels,
+                ocr_limits,
+            )?;
+            check_cancellation(cancellation)?;
+            ocr_pages.push(raw_page.number);
+            if outcome.unavailable {
+                ocr_deferred_pages.push(raw_page.number);
+            }
+            if !outcome.had_text {
+                ocr_no_text_pages.push(raw_page.number);
+            }
+            if outcome.low_confidence {
+                ocr_low_confidence_pages.push(raw_page.number);
+            }
+        }
+        contains_text |= page_contains_text(&raw_page);
         pages.push(raw_page);
     }
     if !contains_text {
         return Err(ConversionError::OcrRequired);
     }
 
+    if let Some(engine) = ocr
+        && !ocr_pages.is_empty()
+    {
+        metadata
+            .properties
+            .insert("ocr_engine".into(), engine.name().into());
+        metadata
+            .properties
+            .insert("ocr_pages".into(), page_list(&ocr_pages));
+        if !ocr_deferred_pages.is_empty() {
+            metadata
+                .properties
+                .insert("ocr_deferred_pages".into(), page_list(&ocr_deferred_pages));
+        }
+        if !ocr_no_text_pages.is_empty() {
+            metadata
+                .properties
+                .insert("ocr_no_text_pages".into(), page_list(&ocr_no_text_pages));
+        }
+        if !ocr_low_confidence_pages.is_empty() {
+            metadata.properties.insert(
+                "ocr_low_confidence_pages".into(),
+                page_list(&ocr_low_confidence_pages),
+            );
+        }
+    }
+
     Ok(RawDocument { metadata, pages })
+}
+
+fn check_cancellation(cancellation: Option<&dyn Cancellation>) -> Result<(), ConversionError> {
+    if cancellation.is_some_and(Cancellation::is_cancelled) {
+        Err(ConversionError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn page_contains_text(page: &RawPage) -> bool {
+    page.glyphs.iter().any(|glyph| {
+        glyph
+            .text
+            .chars()
+            .any(|character| !character.is_whitespace())
+    })
+}
+
+fn page_list(pages: &[u32]) -> String {
+    pages
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PageOcrOutcome {
+    had_text: bool,
+    low_confidence: bool,
+    unavailable: bool,
+}
+
+fn apply_page_ocr(
+    page: &PdfPage<'_>,
+    raw_page: &mut RawPage,
+    engine: &dyn OcrEngine,
+    total_pixels: &mut u64,
+    limits: PdfOcrLimits,
+) -> Result<PageOcrOutcome, ConversionError> {
+    const POINTS_PER_INCH: f64 = 72.0;
+
+    let mut width = f64::from(raw_page.width) * f64::from(limits.dpi) / POINTS_PER_INCH;
+    let mut height = f64::from(raw_page.height) * f64::from(limits.dpi) / POINTS_PER_INCH;
+    let max_dimension = f64::from(limits.max_dimension);
+    let dimension_scale = (max_dimension / width).min(max_dimension / height).min(1.0);
+    width *= dimension_scale;
+    height *= dimension_scale;
+    let page_pixels = (width.ceil() as u64).saturating_mul(height.ceil() as u64);
+    if page_pixels > limits.max_pixels_per_page {
+        let pixel_scale = (limits.max_pixels_per_page as f64 / page_pixels as f64).sqrt();
+        width *= pixel_scale;
+        height *= pixel_scale;
+    }
+    let width = width.floor().max(1.0) as u32;
+    let height = height.floor().max(1.0) as u32;
+    let page_pixels = u64::from(width).saturating_mul(u64::from(height));
+    if page_pixels > limits.max_pixels_per_page {
+        return Err(ConversionError::LimitExceeded {
+            limit: "pdf_ocr_page_pixels",
+            actual: page_pixels,
+            maximum: limits.max_pixels_per_page,
+        });
+    }
+    let next_total = total_pixels.saturating_add(page_pixels);
+    if next_total > limits.max_total_pixels {
+        return Err(ConversionError::LimitExceeded {
+            limit: "pdf_ocr_rendered_pixels",
+            actual: next_total,
+            maximum: limits.max_total_pixels,
+        });
+    }
+
+    let bitmap = page
+        .render_with_config(
+            &PdfRenderConfig::new()
+                .set_fixed_size(width as i32, height as i32)
+                .render_annotations(false)
+                .render_form_data(false),
+        )
+        .map_err(|error| pdfium_error("render PDF page for local OCR", error))?;
+    *total_pixels = next_total;
+    let png = encode_rendered_page(&bitmap, width, height)?;
+    let input = OcrInput::new(&png, "image/png", width, height, OcrSource::PdfPage)
+        .map_err(map_ocr_error)?;
+    let output = match engine.recognize(input) {
+        Ok(output) => output,
+        Err(OcrError::Unavailable) => {
+            return Ok(PageOcrOutcome {
+                had_text: false,
+                low_confidence: false,
+                unavailable: true,
+            });
+        }
+        Err(error) => return Err(map_ocr_error(error)),
+    };
+    let low_confidence = output.lines().iter().any(|line| line.confidence() < 0.5);
+    for line in output.lines() {
+        let bounds = line.bounds();
+        let rect = RawRect::try_new(
+            bounds.left() * raw_page.width,
+            bounds.top() * raw_page.height,
+            (bounds.left() + bounds.width()) * raw_page.width,
+            (bounds.top() + bounds.height()) * raw_page.height,
+        )
+        .ok_or_else(|| ConversionError::ConversionFailed {
+            message: "local OCR returned invalid page geometry".into(),
+        })?;
+        let glyph_start = raw_page.glyphs.len();
+        raw_page.glyphs.push(RawGlyph {
+            text: line.text().into(),
+            bounds: rect,
+            font_size: rect.height().max(1.0),
+            font_name: Some("Local OCR".into()),
+            font_weight: None,
+        });
+        raw_page.words.push(RawWord {
+            text: line.text().into(),
+            bounds: rect,
+            glyph_start,
+            glyph_end: glyph_start + 1,
+        });
+    }
+    Ok(PageOcrOutcome {
+        had_text: !output.is_empty(),
+        low_confidence,
+        unavailable: false,
+    })
+}
+
+fn encode_rendered_page(
+    bitmap: &PdfBitmap<'_>,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, ConversionError> {
+    let rgba = bitmap.as_rgba_bytes();
+    let expected = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4);
+    if u64::try_from(rgba.len()).unwrap_or(u64::MAX) != expected {
+        return Err(ConversionError::ConversionFailed {
+            message: "PDFium OCR render returned an unexpected pixel buffer".into(),
+        });
+    }
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&rgba))
+            .map_err(|_| ConversionError::ConversionFailed {
+                message: "could not encode a bounded PDF page for local OCR".into(),
+            })?;
+    }
+    Ok(encoded)
+}
+
+fn map_ocr_error(error: OcrError) -> ConversionError {
+    match error {
+        OcrError::Unavailable => ConversionError::OcrRequired,
+        error => ConversionError::ConversionFailed {
+            message: format!("local PDF OCR failed with {}", error.code()),
+        },
+    }
 }
 
 fn read_source(request: &ConversionRequest) -> Result<Vec<u8>, ConversionError> {

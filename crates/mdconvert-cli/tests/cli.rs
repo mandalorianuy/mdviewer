@@ -79,37 +79,17 @@ fn assert_failed_json(output: &std::process::Output, code: &str, exit_code: i32)
 }
 
 fn png_without_semantic_metadata() -> Vec<u8> {
-    fn crc32(bytes: &[u8]) -> u32 {
-        let mut crc = u32::MAX;
-        for byte in bytes {
-            crc ^= u32::from(*byte);
-            for _ in 0..8 {
-                crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
-            }
-        }
-        !crc
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, 300, 300);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&vec![255; 300 * 300])
+            .unwrap();
     }
-    fn chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-        output.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        output.extend_from_slice(kind);
-        output.extend_from_slice(data);
-        let mut crc_input = kind.to_vec();
-        crc_input.extend_from_slice(data);
-        output.extend_from_slice(&crc32(&crc_input).to_be_bytes());
-    }
-
-    let mut output = b"\x89PNG\r\n\x1a\n".to_vec();
-    let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&1_u32.to_be_bytes());
-    ihdr.extend_from_slice(&1_u32.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
-    chunk(&mut output, b"IHDR", &ihdr);
-    chunk(
-        &mut output,
-        b"IDAT",
-        &[0x78, 0x9c, 0x63, 0x60, 0, 2, 0, 0, 5, 0, 1],
-    );
-    chunk(&mut output, b"IEND", &[]);
     output
 }
 
@@ -325,7 +305,7 @@ fn every_registry_converter_accepts_the_same_owned_bytes_after_source_removal() 
 }
 
 #[test]
-fn image_success_publishes_required_assets_and_ocr_deferred_warning() {
+fn image_success_publishes_required_assets_and_reports_the_local_ocr_outcome() {
     let temp = TestDir::new();
     let input = temp.path().join("pixel.png");
     fs::write(&input, png_without_semantic_metadata()).unwrap();
@@ -356,7 +336,14 @@ fn image_success_publishes_required_assets_and_ocr_deferred_warning() {
             .to_string_lossy()
             .as_ref()
     );
-    assert_eq!(value["warnings"][0]["code"], "ocr_deferred");
+    assert_eq!(
+        value["warnings"][0]["code"],
+        if cfg!(target_os = "macos") {
+            "ocr_no_text_found"
+        } else {
+            "ocr_deferred"
+        }
+    );
     assert!(assets_path.join("image-001.png").is_file());
     assert!(assets_path.join(".mdviewer-assets.json").is_file());
 }
@@ -586,25 +573,6 @@ fn preexisting_cancel_file_stops_before_conversion_and_leaves_no_partials() {
     assert!(!markdown.exists());
     assert!(!temp.path().join("cancelled.assets").exists());
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn scanned_pdf_returns_ocr_required_without_outputs() {
-    let temp = TestDir::new();
-    let markdown = temp.path().join("scanned.md");
-    let output = command()
-        .args(["convert"])
-        .arg(fixture("pdf/scanned.pdf"))
-        .args(["--output"])
-        .arg(&markdown)
-        .arg("--json")
-        .output()
-        .unwrap();
-
-    assert_failed_json(&output, "ocr_required", 4);
-    assert!(!markdown.exists());
-    assert!(!temp.path().join("scanned.assets").exists());
 }
 
 #[test]

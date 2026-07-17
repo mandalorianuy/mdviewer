@@ -1161,6 +1161,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2191,13 +2197,15 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mdconvert-cli"
-version = "0.1.1"
+version = "1.1.0"
 dependencies = [
  "libc",
  "mdconvert-core",
  "mdconvert-formats",
  "mdconvert-html",
+ "mdconvert-ocr",
  "mdconvert-pdf",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -2206,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-core"
-version = "0.1.1"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2219,12 +2227,13 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-formats"
-version = "0.1.1"
+version = "1.1.0"
 dependencies = [
  "crc32fast",
  "flate2",
  "mdconvert-core",
  "mdconvert-html",
+ "mdconvert-ocr",
  "quick-xml 0.41.0",
  "serde",
  "serde_json",
@@ -2235,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "mdconvert-html"
-version = "0.1.1"
+version = "1.1.0"
 dependencies = [
  "data-url",
  "html5ever 0.39.0",
@@ -2246,10 +2255,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "mdconvert-pdf"
-version = "0.1.1"
+name = "mdconvert-ocr"
+version = "1.1.0"
 dependencies = [
+ "font8x8",
+ "objc2",
+ "objc2-foundation",
+ "objc2-vision",
+ "png 0.18.1",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mdconvert-pdf"
+version = "1.1.0"
+dependencies = [
+ "font8x8",
  "mdconvert-core",
+ "mdconvert-ocr",
  "pdfium-render",
  "png 0.18.1",
  "tempfile",
@@ -2258,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "mdviewer-desktop"
-version = "0.1.1"
+version = "1.1.0"
 dependencies = [
  "libc",
  "mdconvert-cli",
@@ -2599,6 +2622,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
  "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-vision"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfc194758a2d5d7540b1ad283bfb9ca318ec608991892326e95b428230b2689b"
+dependencies = [
+ "objc2",
+ "objc2-core-foundation",
  "objc2-foundation",
 ]
 

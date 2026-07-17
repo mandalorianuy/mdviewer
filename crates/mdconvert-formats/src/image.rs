@@ -4,8 +4,9 @@ use crc32fast::Hasher;
 use flate2::read::ZlibDecoder;
 use mdconvert_core::{
     Asset, AssetId, Block, ConversionError, ConversionRequest, ConversionWarning, Converter,
-    Document, DocumentMetadata, WarningCode,
+    Document, DocumentMetadata, Inline, WarningCode,
 };
+use mdconvert_ocr::{OcrEngine, OcrError, OcrInput, OcrSource};
 
 use crate::{limit_exceeded, read_input};
 
@@ -83,7 +84,7 @@ impl ImageConverter {
         bytes: &[u8],
         request: &ConversionRequest,
     ) -> Result<Document, ConversionError> {
-        convert_owned_bytes(request, bytes.to_vec(), &ImageLimits::default())
+        convert_owned_bytes(request, bytes.to_vec(), &ImageLimits::default(), None)
     }
 
     pub fn convert_owned_bytes(
@@ -91,7 +92,16 @@ impl ImageConverter {
         bytes: Vec<u8>,
         request: &ConversionRequest,
     ) -> Result<Document, ConversionError> {
-        convert_owned_bytes(request, bytes, &ImageLimits::default())
+        convert_owned_bytes(request, bytes, &ImageLimits::default(), None)
+    }
+
+    pub fn convert_owned_bytes_with_ocr(
+        &self,
+        bytes: Vec<u8>,
+        request: &ConversionRequest,
+        engine: &dyn OcrEngine,
+    ) -> Result<Document, ConversionError> {
+        convert_owned_bytes(request, bytes, &ImageLimits::default(), Some(engine))
     }
 }
 
@@ -117,13 +127,14 @@ fn convert(request: &ConversionRequest, limits: &ImageLimits) -> Result<Document
         return Err(limit_exceeded("assets", 1, 0));
     }
     let bytes = read_input(request)?;
-    convert_owned_bytes(request, bytes, limits)
+    convert_owned_bytes(request, bytes, limits, None)
 }
 
 fn convert_owned_bytes(
     request: &ConversionRequest,
     bytes: Vec<u8>,
     limits: &ImageLimits,
+    ocr: Option<&dyn OcrEngine>,
 ) -> Result<Document, ConversionError> {
     limits.validate()?;
     crate::ensure_input_bytes(request, &bytes)?;
@@ -157,7 +168,17 @@ fn convert_owned_bytes(
     let mut properties = parsed.metadata;
     properties.insert("width".into(), parsed.width.to_string());
     properties.insert("height".into(), parsed.height.to_string());
-    properties.insert("ocr_policy".into(), "deferred_no_pixel_decode".into());
+    properties.insert(
+        "ocr_policy".into(),
+        if parsed.semantic_text {
+            "semantic_metadata_present"
+        } else if ocr.is_some() {
+            "local_on_device"
+        } else {
+            "deferred_no_pixel_decode"
+        }
+        .into(),
+    );
     if parsed.format == "png" {
         properties.insert("png.interlace_profile".into(), "non_interlaced_only".into());
     }
@@ -167,15 +188,54 @@ fn convert_owned_bytes(
         .file_name()
         .and_then(|value| value.to_str())
         .map(ToOwned::to_owned);
-    let warnings = if parsed.semantic_text {
-        Vec::new()
-    } else {
-        vec![ConversionWarning {
-            code: WarningCode::OcrDeferred,
-            message: "The image has no semantic text metadata; OCR was not run in local v1".into(),
-            page: None,
-        }]
-    };
+    let mut blocks = Vec::new();
+    let mut warnings = Vec::new();
+    if !parsed.semantic_text {
+        if let Some(engine) = ocr {
+            let input = OcrInput::new(
+                &bytes,
+                parsed.media_type,
+                parsed.width,
+                parsed.height,
+                OcrSource::Image,
+            )
+            .map_err(map_ocr_error)?;
+            match engine.recognize(input) {
+                Ok(output) => {
+                    properties.insert("ocr_engine".into(), engine.name().into());
+                    if output.is_empty() {
+                        warnings.push(ConversionWarning {
+                            code: WarningCode::OcrNoTextFound,
+                            message: "Local OCR completed but found no text in the image".into(),
+                            page: None,
+                        });
+                    } else {
+                        let low_confidence =
+                            output.lines().iter().any(|line| line.confidence() < 0.5);
+                        blocks.extend(output.lines().iter().map(|line| Block::Paragraph {
+                            content: vec![Inline::Text(line.text().into())],
+                        }));
+                        if low_confidence {
+                            warnings.push(ConversionWarning {
+                                code: WarningCode::OcrLowConfidence,
+                                message: "Local OCR preserved one or more low-confidence lines"
+                                    .into(),
+                                page: None,
+                            });
+                        }
+                    }
+                }
+                Err(OcrError::Unavailable) => warnings.push(ocr_deferred_warning()),
+                Err(error) => return Err(map_ocr_error(error)),
+            }
+        } else {
+            warnings.push(ocr_deferred_warning());
+        }
+    }
+    blocks.push(Block::Image {
+        asset_id: id.clone(),
+        alt: title.clone().unwrap_or_default(),
+    });
     Ok(Document {
         metadata: DocumentMetadata {
             title: title.clone(),
@@ -183,10 +243,7 @@ fn convert_owned_bytes(
             properties,
             ..DocumentMetadata::default()
         },
-        blocks: vec![Block::Image {
-            asset_id: id.clone(),
-            alt: title.unwrap_or_default(),
-        }],
+        blocks,
         assets: vec![Asset {
             id,
             file_name: format!("image-001.{}", parsed.canonical_extension),
@@ -195,6 +252,20 @@ fn convert_owned_bytes(
         }],
         warnings,
     })
+}
+
+fn ocr_deferred_warning() -> ConversionWarning {
+    ConversionWarning {
+        code: WarningCode::OcrDeferred,
+        message: "The image has no semantic text metadata; OCR was not run because local OCR is unavailable".into(),
+        page: None,
+    }
+}
+
+fn map_ocr_error(error: OcrError) -> ConversionError {
+    ConversionError::ConversionFailed {
+        message: format!("local OCR failed with {}", error.code()),
+    }
 }
 
 fn validate_dimensions(

@@ -9,6 +9,7 @@ license.workspace = true
 mdconvert-core = { path = "../mdconvert-core" }
 mdconvert-formats = { path = "../mdconvert-formats" }
 mdconvert-html = { path = "../mdconvert-html" }
+mdconvert-ocr = { path = "../mdconvert-ocr" }
 mdconvert-pdf = { path = "../mdconvert-pdf" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
@@ -20,6 +21,7 @@ libc = "=0.2.186"
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+png = "=0.18.1"
 tempfile = "=3.27.0"
 
 [[bin]]

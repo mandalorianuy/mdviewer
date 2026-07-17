@@ -1,12 +1,13 @@
 # macOS Apple Silicon release
 
-MDViewer v1 is distributed for macOS 13 or later on Apple Silicon only. The Rust core, CLI and
-desktop compile on Windows and Linux in CI, but v1 does not publish binaries for those platforms.
+MDViewer v1.1 is distributed for macOS 13 or later on Apple Silicon only. The Rust core, CLI and
+desktop compile on Windows and Linux in CI, but v1.1 does not publish binaries for those platforms.
 
-All conversion happens locally. v1 has no OCR, PyTorch, Docling or network conversion. Image-only
-and scanned PDFs report that OCR is required; local OCR is planned for v1.1. Printed PDF input can
+All conversion happens locally. v1.1 uses Apple Vision on-device for PNG/JPEG images and textless
+PDF pages; it has no PyTorch, Docling or network conversion. OCR render budgets are bounded and
+mixed PDFs keep their digital-text pages on the existing extraction path. Printed PDF input can
 lose HTML semantics, link structure, form state, accessibility metadata or the original reading
-order. Direct HTML remains the higher-fidelity future route for web content.
+order. Direct HTML remains the higher-fidelity route for web content.
 
 ## PDF print integration and signing boundary
 
@@ -55,7 +56,7 @@ store the Apple notarization credential in Keychain and supply its profile name:
 
 ```bash
 export CODESIGN_IDENTITY='Developer ID Application: ...'
-export APPLE_NOTARY_PROFILE='mdviewer-notary'
+export APPLE_NOTARY_PROFILE='mdviewer-release'
 
 ./scripts/package-macos-arm64.sh
 ./scripts/notarize-macos.sh

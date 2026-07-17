@@ -15,6 +15,7 @@
     },
     {"id": "formats", "command": ["cargo", "test", "-p", "mdconvert-formats"]},
     {"id": "html", "command": ["cargo", "test", "-p", "mdconvert-html"]},
+    {"id": "ocr", "command": ["cargo", "test", "-p", "mdconvert-ocr"]},
     {
       "id": "pdf",
       "command": [
@@ -229,7 +230,7 @@
     {
       "id": "converter.image_metadata",
       "area": "converter",
-      "requirement": "Preserve bounded PNG and JPEG metadata without invoking OCR",
+      "requirement": "Preserve bounded PNG and JPEG metadata independently of OCR",
       "disposition": "required",
       "status": "pass",
       "evidence": {"kind": "automated_test", "suite": "formats", "path": "crates/mdconvert-formats/tests/image_without_ocr.rs", "selector": "png_dimensions_and_semantic_metadata_are_preserved_without_ocr"}
@@ -299,13 +300,20 @@
       "evidence": {"kind": "automated_test", "suite": "core", "path": "crates/mdconvert-core/tests/output_transaction.rs", "selector": "cancellation_before_commit_cleans_staging_and_leaves_no_output"}
     },
     {
-      "id": "exclusion.ocr",
-      "area": "exclusion",
-      "requirement": "OCR and reliable scanned-PDF conversion are excluded from v1",
-      "disposition": "excluded",
-      "status": "excluded",
-      "target": "v1.1",
-      "evidence": {"kind": "approved_exclusion", "path": "docs/superpowers/specs/2026-07-15-cross-platform-save-as-markdown-design.md", "selector": "OCR y conversión fiable de PDFs escaneados"}
+      "id": "converter.image_ocr",
+      "area": "converter",
+      "requirement": "Recognize image text locally with Apple Vision and normalized geometry",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "ocr", "path": "crates/mdconvert-ocr/tests/vision_macos.rs", "selector": "vision_recognizes_a_stable_local_png_and_returns_normalized_bounds"}
+    },
+    {
+      "id": "converter.scanned_pdf_ocr",
+      "area": "converter",
+      "requirement": "Recognize scanned PDF text and preserve the existing reconstruction pipeline",
+      "disposition": "required",
+      "status": "pass",
+      "evidence": {"kind": "automated_test", "suite": "pdf", "path": "crates/mdconvert-pdf/tests/pdf_conversion.rs", "selector": "scanned_text_pdf_is_recognized_end_to_end_by_vision"}
     },
     {
       "id": "exclusion.youtube",
