@@ -1,4 +1,4 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use mdconvert_ocr::{LocalOcrEngine, OcrEngine, OcrInput, OcrSource};
@@ -43,7 +43,7 @@ fn text_png(text: &str) -> Vec<u8> {
 }
 
 #[test]
-fn vision_recognizes_a_stable_local_png_and_returns_normalized_bounds() {
+fn local_backend_recognizes_a_stable_png_and_returns_normalized_bounds() {
     let bytes = text_png("HELLO 123");
     let input = OcrInput::new(&bytes, "image/png", 912, 144, OcrSource::Image).unwrap();
     let output = LocalOcrEngine.recognize(input).unwrap();
@@ -54,7 +54,17 @@ fn vision_recognizes_a_stable_local_png_and_returns_normalized_bounds() {
         .collect::<Vec<_>>()
         .join(" ");
 
-    assert!(text.to_ascii_uppercase().contains("HELLO"), "{text:?}");
+    let recognized = text
+        .split_whitespace()
+        .map(|token| token.to_ascii_uppercase())
+        .collect::<Vec<_>>();
+    let expected = ["HELLO", "123"];
+    let recovered = expected
+        .iter()
+        .filter(|token| recognized.iter().any(|actual| actual == **token))
+        .count();
+    let token_recall = recovered as f32 / expected.len() as f32;
+    assert!(token_recall >= 0.95, "recall={token_recall}: {text:?}");
     assert!(output.lines().iter().all(|line| {
         let bounds = line.bounds();
         bounds.left() >= 0.0

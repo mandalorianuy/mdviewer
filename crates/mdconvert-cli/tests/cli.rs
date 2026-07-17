@@ -336,14 +336,14 @@ fn image_success_publishes_required_assets_and_reports_the_local_ocr_outcome() {
             .to_string_lossy()
             .as_ref()
     );
-    assert_eq!(
-        value["warnings"][0]["code"],
-        if cfg!(target_os = "macos") {
-            "ocr_no_text_found"
-        } else {
-            "ocr_deferred"
-        }
-    );
+    let warning_code = value["warnings"][0]["code"].as_str().unwrap();
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        assert_eq!(warning_code, "ocr_no_text_found");
+    } else if cfg!(target_os = "windows") {
+        assert!(matches!(warning_code, "ocr_no_text_found" | "ocr_deferred"));
+    } else {
+        assert_eq!(warning_code, "ocr_deferred");
+    }
     assert!(assets_path.join("image-001.png").is_file());
     assert!(assets_path.join(".mdviewer-assets.json").is_file());
 }

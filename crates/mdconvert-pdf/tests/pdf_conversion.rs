@@ -18,7 +18,7 @@ use mdconvert_pdf::{
     RuleKind, reconstruct, reconstruct_with_config,
 };
 #[cfg(target_os = "macos")]
-use mdconvert_pdf::{PdfConverter, PdfOcrLimits};
+use mdconvert_pdf::{PdfConverter, PdfOcrLimits, extract_pdf_bytes_with_ocr};
 
 #[cfg(target_os = "macos")]
 fn workspace_path(relative: impl AsRef<Path>) -> PathBuf {
@@ -1414,6 +1414,124 @@ fn mixed_pdf_ocrs_only_the_textless_page_and_reports_an_empty_result() {
             .iter()
             .any(|warning| { warning.code == WarningCode::OcrDeferred && warning.page == Some(2) })
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn digital_pdf_ocrs_an_eligible_embedded_image_and_projects_its_geometry() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn stream(data: &[u8], dictionary: &str) -> Vec<u8> {
+        format!("<< {dictionary} /Length {} >>\nstream\n", data.len())
+            .into_bytes()
+            .into_iter()
+            .chain(data.iter().copied())
+            .chain(b"\nendstream".iter().copied())
+            .collect()
+    }
+
+    fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            bytes.extend_from_slice(object);
+            bytes.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        bytes.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        bytes
+    }
+
+    const WIDTH: usize = 128;
+    const HEIGHT: usize = 128;
+    let image = vec![255_u8; WIDTH * HEIGHT * 3];
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Resources << /Font << /F1 5 0 R >> /XObject << /I1 7 0 R >> >> /Contents [6 0 R 8 0 R] >>".to_vec(),
+        b"<< >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        stream(b"BT /F1 16 Tf 20 350 Td (Digital heading) Tj ET", ""),
+        stream(
+            &image,
+            &format!(
+                "/Type /XObject /Subtype /Image /Width {WIDTH} /Height {HEIGHT} /ColorSpace /DeviceRGB /BitsPerComponent 8"
+            ),
+        ),
+        stream(b"q 160 0 0 100 70 120 cm /I1 Do Q", ""),
+    ];
+    let bytes = pdf(&objects);
+
+    struct EmbeddedOcr(AtomicUsize);
+    impl OcrEngine for EmbeddedOcr {
+        fn name(&self) -> &'static str {
+            "embedded-scripted"
+        }
+
+        fn recognize(&self, input: OcrInput<'_>) -> Result<OcrOutput, OcrError> {
+            assert_eq!(input.source(), OcrSource::PdfEmbeddedImage);
+            assert_eq!((input.width(), input.height()), (128, 128));
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(OcrOutput::new(vec![OcrLine::new(
+                "Embedded image text",
+                0.9,
+                OcrRect::new(0.25, 0.2, 0.5, 0.3).unwrap(),
+            )]))
+        }
+    }
+
+    let engine = EmbeddedOcr(AtomicUsize::new(0));
+    let raw = extract_pdf_bytes_with_ocr(
+        &bytes,
+        &ConversionRequest::new("digital-image.pdf").unwrap(),
+        &engine,
+    )
+    .unwrap();
+
+    assert_eq!(engine.0.load(Ordering::SeqCst), 1);
+    assert_eq!(raw.pages[0].images.len(), 1);
+    let image_bounds = raw.pages[0].images[0].bounds;
+    let word = raw.pages[0]
+        .words
+        .iter()
+        .find(|word| word.text == "Embedded image text")
+        .unwrap();
+    assert!(word.bounds.left >= image_bounds.left);
+    assert!(word.bounds.top >= image_bounds.top);
+    assert!(word.bounds.right <= image_bounds.right);
+    assert!(word.bounds.bottom <= image_bounds.bottom);
+    assert_eq!(
+        raw.metadata.properties.get("ocr_embedded_image_pages"),
+        Some(&"1".into())
+    );
+
+    let document = reconstruct(raw).unwrap();
+    assert_eq!(
+        all_text(&document.blocks)
+            .matches("Digital heading")
+            .count(),
+        1
+    );
+    assert_eq!(
+        all_text(&document.blocks)
+            .matches("Embedded image text")
+            .count(),
+        1
+    );
+    assert_eq!(document.assets.len(), 1);
 }
 
 #[cfg(target_os = "macos")]

@@ -349,7 +349,7 @@ grep -Fq 'APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8' "$release_workflow" ||
 test -f "$ROOT/.github/workflows/release-macos.yml" || fail "macOS release workflow is missing"
 grep -q 'actions/checkout@v7' "$ROOT/.github/workflows/ci.yml" || fail "CI must use checkout v7"
 grep -q 'actions/setup-node@v7' "$ROOT/.github/workflows/ci.yml" || fail "CI must use setup-node v7"
-grep -q 'ubuntu-22.04' "$ROOT/.github/workflows/ci.yml" || fail "Linux CI lane is missing"
+grep -q 'ubuntu-24.04' "$ROOT/.github/workflows/ci.yml" || fail "Linux CI lane is missing"
 grep -q 'windows-latest' "$ROOT/.github/workflows/ci.yml" || fail "Windows CI lane is missing"
 grep -q 'macos-15' "$ROOT/.github/workflows/ci.yml" || fail "Apple Silicon CI lane is missing"
 grep -q -- '--no-bundle' "$ROOT/.github/workflows/ci.yml" || fail "portable Tauri smoke is missing"
