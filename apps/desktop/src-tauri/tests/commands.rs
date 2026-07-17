@@ -510,7 +510,7 @@ fn conversion_rejects_a_regular_source_replaced_after_user_selection() {
         .authorize_user_selection(&output, SelectionAccess::Write)
         .unwrap();
     fs::remove_file(&source).unwrap();
-    fs::write(&source, "<p>Replaced B</p>").unwrap();
+    fs::write(&source, "<p>Replaced B with a different length</p>").unwrap();
 
     let error = convert_document(
         &state,
