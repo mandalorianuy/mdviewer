@@ -325,6 +325,11 @@ test -f "$ROOT/.github/workflows/ci.yml" || fail "CI workflow is missing"
 
 release_workflow="$ROOT/.github/workflows/release-macos.yml"
 test -f "$release_workflow" || fail "release workflow is missing"
+grep -Eq '^[[:space:]]+workflow_dispatch:$' "$release_workflow" ||
+  fail "release workflow is not manually dispatchable"
+if grep -Eq '^[[:space:]]+tags:$' "$release_workflow"; then
+  fail "release workflow auto-runs without repository signing secrets"
+fi
 if grep -Fq 'APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8' "$release_workflow"; then
   fail "release workflow uses runner context outside a step"
 fi
