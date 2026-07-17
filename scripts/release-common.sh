@@ -195,8 +195,27 @@ verify_notarization_credentials() {
   local key_id="${2:-}"
   local issuer="${3:-}"
   local key_path="${4:-}"
+  local profile="${5:-}"
 
   verify_production_signing_identity "$identity" || return 1
+  if [ -n "$profile" ]; then
+    if [ -n "$key_id" ] || [ -n "$issuer" ] || [ -n "$key_path" ]; then
+      release_die "choose either APPLE_NOTARY_PROFILE or App Store Connect API credentials"
+      return 1
+    fi
+    printf '%s\n' "$profile" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' || {
+      release_die "APPLE_NOTARY_PROFILE contains invalid characters"
+      return 1
+    }
+    require_command xcrun || return 1
+    xcrun notarytool history \
+      --keychain-profile "$profile" \
+      --output-format json >/dev/null 2>&1 || {
+        release_die "APPLE_NOTARY_PROFILE is unavailable or invalid"
+        return 1
+      }
+    return 0
+  fi
   printf '%s\n' "$key_id" | grep -Eq '^[A-Z0-9]{10}$' || {
     release_die "APPLE_API_KEY must be exactly 10 uppercase alphanumeric characters"
     return 1
