@@ -217,6 +217,10 @@ verify_notarization_credentials() {
   fi
 }
 
+codesign_details_have_hardened_runtime() {
+  printf '%s\n' "$1" | grep -Eq '(^|[[:space:]])flags=[^[:space:]]*runtime'
+}
+
 verify_developer_id_app() {
   app="$1"
   test -d "$app" || release_die "application bundle is missing: $app" || return 1
@@ -229,7 +233,7 @@ verify_developer_id_app() {
     release_die "application is not signed with Developer ID Application" || return 1
   printf '%s\n' "$details" | grep -Eq '^TeamIdentifier=[A-Z0-9]{10}$' ||
     release_die "application signature has no valid TeamIdentifier" || return 1
-  printf '%s\n' "$details" | grep -Eq '^flags=.*runtime' ||
+  codesign_details_have_hardened_runtime "$details" ||
     release_die "application signature does not enable hardened runtime" || return 1
 }
 
