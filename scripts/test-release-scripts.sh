@@ -460,6 +460,10 @@ grep -q 'xdg-utils' "$multiplatform_workflow" ||
   fail "Linux release workflow is missing the AppImage desktop integration tools"
 grep -q 'safe.directory.*GITHUB_WORKSPACE' "$multiplatform_workflow" ||
   fail "Linux release workflow does not trust its container checkout explicitly"
+grep -Fq 'chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"' "$multiplatform_workflow" ||
+  fail "Linux release workflow does not align checkout ownership with the container user"
+grep -q 'git -C.*GITHUB_WORKSPACE.*rev-parse --is-inside-work-tree' "$multiplatform_workflow" ||
+  fail "Linux release workflow does not verify Git access after checkout ownership setup"
 
 node - "$ROOT" <<'NODE'
 const fs = require('node:fs');
