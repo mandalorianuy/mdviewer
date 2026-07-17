@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "../src/App";
 import {
@@ -62,8 +62,13 @@ const converted = {
   warningCodes: [] as string[],
 };
 
+beforeEach(() => {
+  window.localStorage.setItem("mdviewer.editorMode", "split");
+});
+
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
   vi.restoreAllMocks();
 });
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 
 import { warningMessage } from "./features/conversion/warnings";
 import {
@@ -26,6 +26,16 @@ interface AppProps {
   backend?: Backend;
 }
 
+type EditorMode = "preview" | "editor" | "split";
+type ReaderFont = "space-grotesk" | "system" | "serif" | "mono";
+
+const readerFonts: Record<ReaderFont, string> = {
+  "space-grotesk": '"Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  system: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  serif: 'Iowan Old Style, Palatino, "Palatino Linotype", Georgia, serif',
+  mono: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+};
+
 function operationId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `00000000-0000-4000-8000-${Date.now().toString().padStart(12, "0").slice(-12)}`;
 }
@@ -35,10 +45,28 @@ function initialTheme(): ThemePreference {
   return stored === "light" || stored === "dark" ? stored : "system";
 }
 
+function initialEditorMode(): EditorMode {
+  const stored = window.localStorage.getItem("mdviewer.editorMode");
+  return stored === "editor" || stored === "split" ? stored : "preview";
+}
+
+function initialReaderFont(): ReaderFont {
+  const stored = window.localStorage.getItem("mdviewer.readerFont");
+  return stored && stored in readerFonts ? stored as ReaderFont : "space-grotesk";
+}
+
+function initialReaderSize(): number {
+  const stored = Number(window.localStorage.getItem("mdviewer.readerSize"));
+  return Number.isFinite(stored) && stored >= 12 && stored <= 28 ? stored : 16;
+}
+
 export default function App({ backend = tauriBackend }: AppProps) {
   const macosIntegrationsAvailable = /Mac/.test(navigator.platform || navigator.userAgent);
   const [currentDocument, setDocument] = useState<DocumentState>(untitledDocument);
   const [theme, setTheme] = useState<ThemePreference>(initialTheme);
+  const [editorMode, setEditorMode] = useState<EditorMode>(initialEditorMode);
+  const [readerFont, setReaderFont] = useState<ReaderFont>(initialReaderFont);
+  const [readerSize, setReaderSize] = useState(initialReaderSize);
   const [findOpen, setFindOpen] = useState(false);
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
@@ -87,6 +115,15 @@ export default function App({ backend = tauriBackend }: AppProps) {
     window.document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("mdviewer.theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    window.localStorage.setItem("mdviewer.editorMode", editorMode);
+  }, [editorMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem("mdviewer.readerFont", readerFont);
+    window.localStorage.setItem("mdviewer.readerSize", String(readerSize));
+  }, [readerFont, readerSize]);
 
   useEffect(() => {
     window.document.title = currentDocument.name.replace(/\.md$/i, "") || "MDViewer";
@@ -411,35 +448,53 @@ export default function App({ backend = tauriBackend }: AppProps) {
 
   const blocked = openBusy || saveBusy || workflowBusy || exportBusy;
 
+  const shellStyle = {
+    "--reader-font-family": readerFonts[readerFont],
+    "--reader-font-size": `${readerSize}px`,
+  } as CSSProperties;
+
   return (
-    <main className="app-shell">
-      <header className="app-header">
-        <div className="brand"><span className="brand-mark" aria-hidden="true">M↓</span><div><h1>MDViewer</h1><p>Markdown local, sin salir de tu equipo</p></div></div>
+    <main className="app-shell" data-testid="app-shell" style={shellStyle}>
+      <header className="toolbar" role="toolbar" aria-label="Controles del documento">
+        <button type="button" className="primary-control" aria-label="Abrir Markdown" onClick={() => void openMarkdown()} disabled={blocked}>Abrir archivo</button>
+        <details className="document-menu">
+          <summary>Documento</summary>
+          <div className="document-menu-popover">
+            <strong>{currentDocument.name}</strong>
+            <span className={dirty ? "dirty" : "saved"}>{dirty ? "Cambios sin guardar" : "Guardado"}</span>
+            <button type="button" onClick={() => void save()} disabled={!dirty || blocked}>Guardar</button>
+            <button type="button" aria-label="Guardar como" onClick={() => void saveAs()} disabled={blocked}>Guardar como…</button>
+            <button type="button" onClick={() => setFindOpen(true)} disabled={exportBusy}>Buscar…</button>
+          </div>
+        </details>
+        <span className="toolbar-separator" aria-hidden="true" />
+        <label className="reader-control font-control">
+          <span>Fuente</span>
+          <select aria-label="Fuente de lectura" value={readerFont} onChange={(event) => setReaderFont(event.target.value as ReaderFont)}>
+            <option value="space-grotesk">Space Grotesk</option>
+            <option value="system">Sistema</option>
+            <option value="serif">Serif</option>
+            <option value="mono">Monoespaciada</option>
+          </select>
+        </label>
+        <label className="reader-control size-control">
+          <span>Tamaño</span>
+          <input aria-label="Tamaño de lectura" type="range" min="12" max="28" value={readerSize} onChange={(event) => setReaderSize(Number(event.target.value))} />
+          <output>{readerSize} pt</output>
+        </label>
+        <div className="mode-control" role="group" aria-label="Modo de visualización">
+          <button type="button" aria-pressed={editorMode === "preview"} onClick={() => setEditorMode("preview")}>Vista</button>
+          <button type="button" aria-pressed={editorMode === "editor"} onClick={() => setEditorMode("editor")}>Editor</button>
+          <button type="button" aria-pressed={editorMode === "split"} onClick={() => setEditorMode("split")}>Dividido</button>
+        </div>
+        <span className="toolbar-spacer" />
         <ThemeSelect value={theme} onChange={setTheme} />
+        {macosIntegrationsAvailable && <button type="button" className="quiet" onClick={() => setIntegrationsOpen(true)} disabled={exportBusy}>Integraciones</button>}
+        <button type="button" className="quiet export-control" aria-label="Exportar HTML" onClick={() => void exportHtml()} disabled={blocked}>HTML</button>
+        <button type="button" className="quiet export-control" aria-label="Exportar PDF" onClick={exportPdf} disabled={blocked}>PDF</button>
+        <button type="button" className="accent" aria-label="Convertir archivo" disabled={blocked} onClick={() => enqueueWorkflow(convertDirectly)}>Convertir</button>
       </header>
-      <nav className="toolbar" aria-label="Documento">
-        <button type="button" onClick={() => void openMarkdown()} disabled={blocked}>Abrir Markdown</button>
-        <button type="button" onClick={() => void save()} disabled={!dirty || blocked}>Guardar</button>
-        <button type="button" className="quiet" onClick={() => void saveAs()} disabled={blocked}>Guardar como</button>
-        <span className="toolbar-separator" />
-        <button type="button" className="quiet" onClick={() => setFindOpen(true)} disabled={exportBusy}>Buscar</button>
-        <button type="button" className="quiet" onClick={() => void exportHtml()} disabled={blocked}>Exportar HTML</button>
-        <button type="button" className="quiet" onClick={exportPdf} disabled={blocked}>Exportar PDF</button>
-        {macosIntegrationsAvailable && <button type="button" className="quiet" onClick={() => setIntegrationsOpen(true)} disabled={exportBusy}>Integrations</button>}
-        <button
-          type="button"
-          className="accent"
-          disabled={blocked}
-          onClick={() => enqueueWorkflow(convertDirectly)}
-        >
-          Convertir archivo
-        </button>
-      </nav>
       {integrationsOpen && <IntegrationsPanel backend={backend} onClose={() => setIntegrationsOpen(false)} />}
-      <section className="document-bar" aria-label="Estado del documento">
-        <strong>{currentDocument.name}</strong>
-        <span className={dirty ? "dirty" : "saved"}>{dirty ? "Cambios sin guardar" : "Guardado"}</span>
-      </section>
       {activeOperation && (
         <section className="conversion-status" aria-live="polite">
           <progress aria-label="Conversión en curso" />
@@ -472,12 +527,12 @@ export default function App({ backend = tauriBackend }: AppProps) {
         </div>
       ))}
       {warnings.length > 0 && <aside className="warning-list" aria-label="Advertencias"><strong>Conversión completada con observaciones</strong><ul>{warnings.map((code, index) => <li key={`${code}-${index}`}>{warningMessage(code)}</li>)}</ul></aside>}
-      <div className="workspace">
-        <EditorSurface content={currentDocument.content} findOpen={findOpen} findQuery={findQuery} onChange={(content) => setDocument((current) => ({ ...current, content }))} onFindChange={setFindQuery} onFindClose={() => setFindOpen(false)} />
-        <MarkdownPreview markdown={currentDocument.content} onExternalLink={followExternal} elementRef={previewRef} />
+      <div className={`workspace mode-${editorMode}`}>
+        {(editorMode === "editor" || editorMode === "split") && <EditorSurface content={currentDocument.content} findOpen={findOpen} findQuery={findQuery} onChange={(content) => setDocument((current) => ({ ...current, content }))} onFindChange={setFindQuery} onFindClose={() => setFindOpen(false)} />}
+        <MarkdownPreview markdown={currentDocument.content} onExternalLink={followExternal} elementRef={previewRef} hidden={editorMode === "editor"} />
       </div>
       <style data-mdviewer-print>{PRINT_STYLESHEET}</style>
-      <footer className="status-bar"><span>{currentDocument.content.length} caracteres</span><span>Procesamiento local</span></footer>
+      <footer className="status-bar"><span>{currentDocument.name} · {dirty ? "Sin guardar" : "Guardado"}</span><span>{currentDocument.content.length} caracteres · Procesamiento local</span></footer>
     </main>
   );
 }
