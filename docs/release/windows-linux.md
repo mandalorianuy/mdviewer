@@ -2,16 +2,16 @@
 
 ## Windows x64
 
-The production workflow requires these encrypted GitHub repository secrets:
+The current production workflow has a fail-closed PFX signing adapter but no certificate is stored
+in GitHub. MDViewer is applying to SignPath Foundation's free open-source program so that the
+Windows Authenticode key remains in protected signing infrastructure instead of being exported to a
+repository secret. The [code-signing policy](code-signing-policy.md) defines custody, approval and
+incident handling.
 
-- `WINDOWS_CERTIFICATE`: base64-encoded PFX containing a trusted code-signing certificate and its
-  private key;
-- `WINDOWS_CERTIFICATE_PASSWORD`: PFX export password;
-- `WINDOWS_CERTIFICATE_THUMBPRINT`: the certificate's 40-character SHA-1 thumbprint.
-
-The workflow imports the certificate into the ephemeral runner's current-user store. Packaging
-fails unless that certificate has a private key and the Code Signing extended-key usage. Tauri
-signs both the application and NSIS installer with SHA-256 and a trusted timestamp.
+After SignPath accepts the project, the workflow will build the unsigned candidate on a GitHub-hosted
+runner, submit its trusted-build provenance for manual approval, retrieve the signed result and then
+run the existing production verifier. The legacy PFX adapter will be removed only after the
+SignPath path proves both the application and NSIS installer signatures end to end.
 
 `verify-windows-release.ps1` then requires valid Authenticode on the installer and installed
 executable, performs a silent per-user install, launches the application, uninstalls it, and only

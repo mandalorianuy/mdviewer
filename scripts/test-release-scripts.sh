@@ -454,6 +454,21 @@ grep -q 'package-receipt-windows-x64.json' "$ROOT/scripts/package-windows-x64.ps
   fail "Windows release receipt needs a globally unique asset name"
 grep -q 'package-receipt-linux-x64.json' "$ROOT/scripts/package-linux-x64.sh" ||
   fail "Linux release receipt needs a globally unique asset name"
+
+signpath_acknowledgement='Free code signing provided by SignPath.io, certificate by SignPath Foundation'
+test -f "$ROOT/docs/release/code-signing-policy.md" ||
+  fail "public code-signing policy is missing"
+test -f "$ROOT/PRIVACY.md" || fail "public privacy policy is missing"
+grep -Fq "$signpath_acknowledgement" "$ROOT/README.md" ||
+  fail "README is missing the required SignPath acknowledgement"
+grep -Fq "$signpath_acknowledgement" "$ROOT/docs/release/v1.2.1.md" ||
+  fail "v1.2.1 download notes are missing the required SignPath acknowledgement"
+grep -Fq 'manual approval' "$ROOT/docs/release/code-signing-policy.md" ||
+  fail "code-signing policy does not require manual approval"
+grep -Fq 'SignPath Foundation' "$ROOT/docs/release/code-signing-policy.md" ||
+  fail "code-signing policy does not identify the Windows certificate publisher"
+grep -Fq 'local-only' "$ROOT/PRIVACY.md" ||
+  fail "privacy policy does not preserve the local-only product boundary"
 grep -q 'CARGO_TARGET_DIR:=$ROOT/.cache/target-linux-x64' "$ROOT/scripts/package-linux-x64.sh" ||
   fail "Linux release builds must not share host Cargo artifacts"
 grep -q 'xdg-utils' "$multiplatform_workflow" ||

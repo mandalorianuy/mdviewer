@@ -63,10 +63,17 @@ Build a local macOS artifact without making signing or notarization claims:
 - [v1.2 portable OCR release notes](docs/release/v1.2.md)
 - [v1.2.1 multiplatform distribution notes](docs/release/v1.2.1.md)
 - [Windows and Linux packaging](docs/release/windows-linux.md)
+- [code-signing policy](docs/release/code-signing-policy.md)
 - [CLI contract](docs/reference/cli.md)
 - [cross-platform architecture](docs/superpowers/specs/2026-07-15-cross-platform-save-as-markdown-design.md)
 - [archived Swift baseline](docs/architecture/swift-baseline.md)
 - [contributing](CONTRIBUTING.md)
 - [security](SECURITY.md)
+- [privacy](PRIVACY.md)
+
+The Windows release is awaiting enrollment in SignPath Foundation's open-source program. No
+unsigned Windows installer is published.
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation
 
 MDViewer is licensed under the [MIT License](LICENSE).
