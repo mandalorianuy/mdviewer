@@ -11,3 +11,8 @@
    integrate to both GitHub and OneDev.
 8. Run the signed release workflow. If Windows certificate custody is unavailable, stop before tag
    or public release and report that external prerequisite exactly.
+9. Apply to SignPath Foundation's open-source program with the public privacy and code-signing
+   policies, GitHub trusted-build provenance, manual approval and no exported Authenticode key.
+10. After SignPath accepts the project and provides its project identifiers, replace the temporary
+    PFX adapter test-first, prove signatures on both the installed executable and outer NSIS
+    installer, and rebuild all platform artifacts from one exact release commit before tagging.
